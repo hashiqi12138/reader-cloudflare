@@ -180,10 +180,185 @@ if (succeeded.length < 2) {
     )
 }
 
+console.log('\n=== 5. 书源管理（D1） ===')
+{
+    const importedId = `user:${BASE}`
+
+    // 先清掉上一次可能留下的同一条：本地 D1 是持久的，否则重复运行会越积越多
+    await fetch(`${BASE}/api/sources?id=${encodeURIComponent(importedId)}`, { method: 'DELETE' })
+
+    const baseline = (await getJson('/api/sources')).json?.sources?.length ?? 0
+
+    // 这份书源用 @css: 规则打内置测试站点，因此**导入进来的书源必须真的能跑通全链路** ——
+    // 这才是 D1 的意义：书源来自库里，而不是写死在代码里
+    const importBody = JSON.stringify([
+        {
+            bookSourceName: '导入测试源（CSS 规则）',
+            bookSourceUrl: BASE,
+            bookSourceGroup: '导入测试',
+            enabled: true,
+            searchUrl: `${BASE}/fixture/search?q={{key}}&p={{page}}`,
+            ruleSearch: {
+                bookList: '@css:div.result-item',
+                name: '@css:h3.title@text',
+                author: '@css:span.author@text',
+                bookUrl: '@css:h3.title a@href',
+            },
+            ruleBookInfo: {
+                name: '@css:h1.book-name@text',
+                author: '@css:span.book-author@text',
+                tocUrl: '@css:a.toc-link@href',
+            },
+            ruleToc: {
+                chapterList: '@css:ul.chapter-list li',
+                chapterName: '@css:a@text',
+                chapterUrl: '@css:a@href',
+            },
+            ruleContent: { content: '@css:div#content@textNodes' },
+        },
+    ])
+
+    async function call(method, path, body) {
+        const response = await fetch(BASE + path, {
+            method,
+            headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
+            body:
+                body === undefined
+                    ? undefined
+                    : typeof body === 'string'
+                      ? body
+                      : JSON.stringify(body),
+        })
+        const text = await response.text()
+        let json = null
+        try {
+            json = JSON.parse(text)
+        } catch {
+            /* 非 JSON 时留给调用方判定 */
+        }
+        return { status: response.status, json }
+    }
+
+    const first = await call('POST', '/api/sources', importBody)
+    check(
+        first.status === 200 && first.json?.imported === 1,
+        '导入一条新书源',
+        JSON.stringify(first.json),
+    )
+
+    const afterImport = await getJson('/api/sources')
+    check(
+        afterImport.json?.sources?.length === baseline + 1,
+        '列表里多出一条',
+        `baseline=${baseline} now=${afterImport.json?.sources?.length}`,
+    )
+    const imported = afterImport.json?.sources?.find((s) => s.id === importedId)
+    check(imported?.builtin === false, '导入的条目不是内置源', JSON.stringify(imported))
+
+    const searching = await fetch(`${BASE}/api/search`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ keyword: '测试', sourceIds: [importedId] }),
+    })
+    const searchJson = await searching.json()
+    const searchBooks = searchJson.sources?.[0]?.books ?? []
+    check(
+        searchBooks.length === 2,
+        '导入的书源能真正驱动引擎（搜到 2 本）',
+        searchJson.sources?.[0]?.error ?? `count=${searchBooks.length}`,
+    )
+
+    const again = await call('POST', '/api/sources', importBody)
+    check(
+        again.status === 200 && again.json?.updated === 1 && again.json?.imported === 0,
+        '重复导入同一地址算更新而不是新增',
+        JSON.stringify(again.json),
+    )
+    check(
+        (await getJson('/api/sources')).json?.sources?.length === baseline + 1,
+        '重复导入后列表长度没变',
+    )
+
+    const badJson = await call('POST', '/api/sources', '这不是 JSON')
+    check(
+        badJson.status === 400 && badJson.json?.code === 'invalid_json',
+        '非 JSON 内容被拒（400 invalid_json）',
+        JSON.stringify(badJson.json),
+    )
+
+    const empty = await call('POST', '/api/sources', '[]')
+    check(
+        empty.status === 400 && empty.json?.code === 'empty_import',
+        '空数组被拒（400 empty_import）',
+        JSON.stringify(empty.json),
+    )
+
+    const partial = await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            { bookSourceName: '缺地址的源' },
+            { bookSourceName: '协议不对的源', bookSourceUrl: 'ftp://example.com' },
+            { bookSourceName: '可以用的源', bookSourceUrl: 'https://example.com' },
+        ]),
+    )
+    check(
+        partial.status === 200 &&
+            partial.json?.imported === 1 &&
+            partial.json?.rejected?.length === 2,
+        '坏条目被逐条拒绝、好条目照常导入',
+        JSON.stringify(partial.json),
+    )
+    // 上面那条 https://example.com 是导入来当反例的，验证完就删掉，别留在库里
+    await call('DELETE', '/api/sources?id=' + encodeURIComponent('user:https://example.com'))
+
+    const disabled = await call('PATCH', '/api/sources', { id: importedId, enabled: false })
+    check(
+        disabled.status === 200 && disabled.json?.enabled === false,
+        '停用书源',
+        JSON.stringify(disabled.json),
+    )
+
+    const afterDisable = await fetch(`${BASE}/api/search`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ keyword: '测试', sourceIds: [importedId] }),
+    }).then((r) => r.json())
+    check(
+        afterDisable.sourceCount === 0,
+        '停用后搜索不再使用它',
+        `sourceCount=${afterDisable.sourceCount}`,
+    )
+
+    const builtinDelete = await call(
+        'DELETE',
+        '/api/sources?id=' + encodeURIComponent('builtin:fixture-css'),
+    )
+    check(
+        builtinDelete.status === 400 && builtinDelete.json?.code === 'builtin_readonly',
+        '内置源不允许删除（400 builtin_readonly）',
+        JSON.stringify(builtinDelete.json),
+    )
+
+    const removed = await call('DELETE', '/api/sources?id=' + encodeURIComponent(importedId))
+    check(
+        removed.status === 200 && removed.json?.deleted === true,
+        '删除书源',
+        JSON.stringify(removed.json),
+    )
+
+    const afterDelete = await getJson('/api/sources')
+    check(
+        afterDelete.json?.sources?.length === baseline,
+        '删除后回到导入前的数量',
+        `expect=${baseline} now=${afterDelete.json?.sources?.length}`,
+    )
+}
+
 console.log('\n=== 结果 ===')
 if (failures.length === 0) {
     console.log(
-        `全部通过：搜索 → 详情 → 目录 → 正文，且 ${succeeded.length} 个书源（CSS / XPath / JS）结果一致`,
+        `全部通过：搜索 → 详情 → 目录 → 正文，${succeeded.length} 个书源（CSS / XPath / JS）结果一致，书源管理往返正常`,
     )
 } else {
     console.log(`失败 ${failures.length} 项：\n - ${failures.join('\n - ')}`)

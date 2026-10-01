@@ -1,21 +1,28 @@
 /**
  * 书源注册表
  *
- * 当前阶段只提供内置的测试站点。真正要用的书源由使用者自己导入 ——
- * 规则引擎是中立的，具体指向哪个站点是使用者的选择。
+ * 两类书源合在一起对外提供：内置的测试源由代码定义，用户导入的存 D1。
+ * 之所以不把内置源也塞进库：它们是**代码的一部分**（跟着版本走、随时可能改规则），
+ * 放进库里就会出现「部署了新版本，但库里的旧定义还在」这种两边不一致的状态。
  *
- * 后续接入 D1 后，这里会变成「内置源 + 用户导入源」的合并视图，
- * 因此现在就把「取一张表」和「按 id 找一条」这两件事拆成函数，
- * 到时候只改实现、不动调用方。
+ * 真正要用的书源由使用者自己导入 —— 规则引擎是中立的，指向哪个站点是使用者的选择。
  */
 
 import type { BookSource } from '../engine/types'
+import { getUserSource, listUserSources } from './db'
+import { BUILTIN_ID_PREFIX, type RegisteredSource } from './types'
 
-export interface RegisteredSource extends BookSource {
-    /** 稳定标识。内置源用 `builtin:` 前缀，避免与用户导入的地址型 id 撞车 */
-    id: string
-    /** 是否内置（内置源不可删除，也不进用户的书源管理列表） */
-    builtin: boolean
+export type { RegisteredSource }
+
+/** 注册表选项 */
+export interface RegistryOptions {
+    /**
+     * 是否把内置测试源算进来。
+     *
+     * 线上必须为 false：测试站点本身不挂载（ENABLE_FIXTURE=false），
+     * 列出来只会得到三个「搜不到书」的书源，让人以为引擎坏了。
+     */
+    includeFixture: boolean
 }
 
 /** 内置测试站点的书源定义。地址随请求来源变化，因此按 origin 现造 */
@@ -23,6 +30,7 @@ export function fixtureSource(origin: string): RegisteredSource {
     return {
         id: 'builtin:fixture-css',
         builtin: true,
+        sortOrder: 0,
         bookSourceName: '内置测试站点（CSS 规则）',
         bookSourceUrl: origin,
         bookSourceGroup: '测试',
@@ -67,6 +75,7 @@ export function fixtureXPathSource(origin: string): RegisteredSource {
     return {
         id: 'builtin:fixture-xpath',
         builtin: true,
+        sortOrder: 1,
         bookSourceName: '内置测试站点（XPath 规则）',
         bookSourceUrl: origin,
         bookSourceGroup: '测试',
@@ -111,6 +120,7 @@ export function fixtureJsSource(origin: string): RegisteredSource {
     return {
         id: 'builtin:fixture-js',
         builtin: true,
+        sortOrder: 2,
         bookSourceName: '内置测试站点（JS + java.ajax 规则）',
         bookSourceUrl: origin,
         bookSourceGroup: '测试',
@@ -151,12 +161,42 @@ export function fixtureJsSource(origin: string): RegisteredSource {
     }
 }
 
-/** 当前可用的书源列表 */
-export function listSources(origin: string): RegisteredSource[] {
+/** 内置测试源，仅在测试站点挂载时可用 */
+export function builtinSources(origin: string): RegisteredSource[] {
     return [fixtureSource(origin), fixtureXPathSource(origin), fixtureJsSource(origin)]
 }
 
+/** 全部书源：内置（可选）在前，用户导入的在后 */
+export async function listSources(
+    db: D1Database,
+    origin: string,
+    options: RegistryOptions,
+): Promise<RegisteredSource[]> {
+    const builtin = options.includeFixture ? builtinSources(origin) : []
+    return [...builtin, ...(await listUserSources(db))]
+}
+
+/** 搜索时真正参与的书源：只要启用的 */
+export async function listEnabledSources(
+    db: D1Database,
+    origin: string,
+    options: RegistryOptions,
+): Promise<RegisteredSource[]> {
+    const all = await listSources(db, origin, options)
+    return all.filter((source) => source.enabled !== false)
+}
+
 /** 按 id 取一条书源 */
-export function findSource(origin: string, id: string): RegisteredSource | undefined {
-    return listSources(origin).find((s) => s.id === id)
+export async function findSource(
+    db: D1Database,
+    origin: string,
+    id: string,
+    options: RegistryOptions,
+): Promise<RegisteredSource | undefined> {
+    if (id.startsWith(BUILTIN_ID_PREFIX)) {
+        // 测试站点没挂载时，这条内置源等于不存在 —— 直接当作找不到，而不是返回一个必然失败的书源
+        if (!options.includeFixture) return undefined
+        return builtinSources(origin).find((source) => source.id === id)
+    }
+    return getUserSource(db, id)
 }
