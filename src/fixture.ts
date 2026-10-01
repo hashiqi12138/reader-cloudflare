@@ -179,6 +179,57 @@ export function fixtureChapterPage(bookId: string, chapterId: string): string {
 }
 
 /**
+ * **分页正文**，专供验证 `nextContentUrl`
+ *
+ * 不少站点把一章切成好几页，每页结尾挂着「本章未完，请点击下一页继续阅读」。
+ * 只取第一页的话读到的就是半截内容，而「内容不全」比「报错」更难察觉 ——
+ * 页面看起来完全正常，只是少了一半。
+ *
+ * 两页合起来的内容与 fixtureChapterPage 必须**逐字相同**，这样才能断言
+ * 「翻页拼出来的正文 == 单页正文」，而不是只看「有那么几百字」。
+ */
+export function fixturePagedChapterPage(bookId: string, chapterId: string, pageNo: number): string {
+    const book = BOOKS.find((b) => b.id === bookId)
+    const chapter = book?.chapters.find((c) => c.id === chapterId)
+    if (!book || !chapter) return page('未找到', '<p class="empty">没有这一章</p>')
+
+    const all = chapterParagraphs(book.name, chapter.name)
+    // 固定两页：第 1 页前两段，第 2 页最后一段
+    const slice = pageNo <= 1 ? all.slice(0, 2) : all.slice(2)
+    if (slice.length === 0) return page('正文', '<p class="empty">没有更多内容</p>')
+
+    const paragraphs = slice.map((text) => `<p>${escapeHtml(text)}</p>`).join('\n        ')
+
+    // 与真实站点一致：非最后一页在正文末尾挂「下一页」，并给出一句未完结提示
+    const tail =
+        pageNo <= 1
+            ? `<div class="pager"><a href="/fixture/paged-chapter/${book.id}/${chapter.id}/2">下一页</a></div>
+    <p class="hint">本章未完，请点击下一页继续阅读</p>`
+            : ''
+
+    // 最后一页模仿真实站点的**陷阱**：它把「下一章」也写成同一个 id（pb_next）。
+    // 于是 `nextContentUrl: "id.pb_next@href"` 会跨章抓取，把后面几章的内容拼进当前章 ——
+    // 这比「内容不全」更糟，因为读到的根本不是这一章。
+    // 正确写法是按文字取：`text.下一页@href`，最后一页那个按钮写的是「下一章」，自然不匹配。
+    const nextChapter =
+        pageNo <= 1
+            ? ''
+            : `<div class="pager"><a id="pb_next" href="/fixture/paged-chapter/2/1/1">下一章</a></div>`
+
+    return page(
+        `${book.name} ${chapter.name} 第 ${pageNo} 页`,
+        `<div class="reader">
+    <h1 class="chapter-title">${escapeHtml(chapter.name)}</h1>
+    <div id="content">
+        ${paragraphs}
+    </div>
+    ${tail}
+    ${nextChapter}
+</div>`,
+    )
+}
+
+/**
  * 章节正文的 JSON 版本
  *
  * 用来模拟「正文不在网页里、要走独立接口再取一次」的站点 —— 真实书源里
@@ -221,6 +272,13 @@ export function handleFixture(pathname: string, url: URL): Response | null {
 
     const pagedToc = /^\/fixture\/paged-toc\/(\w+)\/(\d+)$/.exec(pathname)
     if (pagedToc) return html(fixturePagedTocPage(pagedToc[1]!, Number(pagedToc[2])))
+
+    const pagedChapter = /^\/fixture\/paged-chapter\/(\w+)\/(\w+)\/(\d+)$/.exec(pathname)
+    if (pagedChapter) {
+        return html(
+            fixturePagedChapterPage(pagedChapter[1]!, pagedChapter[2]!, Number(pagedChapter[3])),
+        )
+    }
 
     const chapter = /^\/fixture\/chapter\/(\w+)\/(\w+)$/.exec(pathname)
     if (chapter) return html(fixtureChapterPage(chapter[1]!, chapter[2]!))

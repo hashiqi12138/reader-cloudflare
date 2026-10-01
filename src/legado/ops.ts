@@ -206,7 +206,24 @@ export async function fetchChapters(
     return chapters
 }
 
-/** 正文：返回清洗后的文本 */
+/**
+ * 一章正文最多翻多少页
+ *
+ * 不少站点把一章切成好几页（精华书阁的那本 2226 章的书，一章就分 3 页以上，
+ * 每页结尾都写着「本章未完，请点击下一页继续阅读」）。不翻页的话读到的就是半截内容 ——
+ * 而「内容不全」比「报错」更难发现：页面看起来是正常的，只是少了一半。
+ *
+ * 上限与目录分页同理，受 Workers 子请求数（免费版 50 个）约束；
+ * 一章通常也就 2～4 页，10 页留足了余量。
+ */
+const MAX_CONTENT_PAGES = 10
+
+/**
+ * 正文：返回清洗后的文本
+ *
+ * 带 `nextContentUrl` 时会把后续页也取回并接在正文后面 —— 顺序很重要，
+ * 页与页之间不加分隔符以外的任何东西，否则段落会被拼错。
+ */
 export async function fetchContent(
     source: BookSource,
     chapterUrl: string,
@@ -215,17 +232,41 @@ export async function fetchContent(
     const rule = source.ruleContent
     if (!rule?.content) throw new UpstreamError('书源未配置正文规则（ruleContent.content）')
 
-    const plan = await buildPlan(chapterUrl, source, { ...ctx, baseUrl: chapterUrl })
-    const html = await fetchText(plan)
-    const sel = rootSelection(html)
-    const contentCtx: RuleContext = {
-        ...ctx,
-        baseUrl: plan.url,
-        http: sandboxHttp(source, plan.url),
+    const pageTexts: string[] = []
+    const visitedUrls = new Set<string>()
+
+    let currentUrl = chapterUrl
+    for (let page = 0; page < MAX_CONTENT_PAGES; page += 1) {
+        if (visitedUrls.has(currentUrl)) break
+        visitedUrls.add(currentUrl)
+
+        const plan = await buildPlan(currentUrl, source, { ...ctx, baseUrl: currentUrl })
+        const html = await fetchText(plan)
+        const sel = rootSelection(html)
+        const contentCtx: RuleContext = {
+            ...ctx,
+            baseUrl: plan.url,
+            http: sandboxHttp(source, plan.url),
+        }
+
+        const values = await analyzeStrings(sel, rule.content, contentCtx)
+        const pageText = values.join('\n')
+        if (pageText.trim() !== '') pageTexts.push(pageText)
+
+        // 没有 nextContentUrl 规则就是单页章节，到此为止
+        if (!rule.nextContentUrl) break
+
+        const nextRaw = await analyzeAddress(sel, rule.nextContentUrl, contentCtx)
+        if (!nextRaw) break
+        const nextUrl = resolveUrl(nextRaw, plan.url)
+        // 指向自己或已经取过的页就停
+        if (nextUrl === currentUrl || visitedUrls.has(nextUrl)) break
+        currentUrl = nextUrl
     }
 
-    const values = await analyzeStrings(sel, rule.content, contentCtx)
-    let text = values.join('\n')
+    // 净化正则作用于**整章**而不是单页：书源里那些跨段的规则（`[\s\S]*` 之类）
+    // 只有拿到完整正文才成立
+    let text = pageTexts.join('\n')
 
     // 书源自带的净化正则
     if (rule.replaceRegex) {

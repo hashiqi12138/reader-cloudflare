@@ -820,6 +820,81 @@ console.log('\n=== 11. 分页目录（nextTocUrl） ===')
     check(!left.some((s) => s.id === id), '分页目录测试源已清理')
 }
 
+console.log('\n=== 12. 分页正文（nextContentUrl） ===')
+{
+    // 「章节内容不全」是最难察觉的一类问题：页面看起来完全正常，只是少了一半。
+    // 不少站点把一章切成好几页，每页结尾写着「本章未完，请点击下一页继续阅读」。
+    // 测试站点为此把一章拆成两页，两页合起来必须与单页正文**逐字相同**。
+
+    const id = `user:${BASE}`
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: '分页正文测试源',
+                bookSourceUrl: BASE,
+                searchUrl: `${BASE}/fixture/search?q={{key}}&p={{page}}`,
+                ruleSearch: {
+                    bookList: '.result-item',
+                    name: 'h3.title@text',
+                    bookUrl: 'h3.title a@href',
+                },
+                ruleToc: {
+                    chapterList: '@css:ul.chapter-list li',
+                    chapterName: '@css:a@text',
+                    chapterUrl: '@css:a@href',
+                },
+                ruleContent: {
+                    content: '@css:div#content@textNodes##本章未完.*',
+                    // 按**文字**取，而不是按 id 取。真实站点把「下一章」也写成同一个 id，
+                    // 按 id 会把后面几章的内容拼进当前章（测试站点的最后一页特意复现了这个陷阱）
+                    nextContentUrl: 'text.下一页@href',
+                },
+            },
+        ]),
+    )
+
+    // 单页正文：用内置 CSS 书源取同一章（正常章节页，3 段在一页里）
+    const single = await getJson(
+        `/api/content?sourceId=${encodeURIComponent('builtin:fixture-css')}&url=${encodeURIComponent(`${BASE}/fixture/chapter/1/1`)}`,
+    )
+    const singleText = String(single.json?.content ?? '')
+
+    // 分页正文：同一章，但内容被拆成两页
+    const paged = await getJson(
+        `/api/content?sourceId=${encodeURIComponent(id)}&url=${encodeURIComponent(`${BASE}/fixture/paged-chapter/1/1/1`)}`,
+    )
+    const pagedText = String(paged.json?.content ?? '')
+
+    check(singleText.length > 0, '单页正文取到了（作为对照基准）', `len=${singleText.length}`)
+    check(
+        pagedText.includes('第三段'),
+        '分页正文包含最后一页的内容（没有只取第一页）',
+        paged.json?.error ?? JSON.stringify(pagedText.slice(-40)),
+    )
+    check(
+        pagedText === singleText,
+        '两页拼起来的正文与单页正文逐字一致',
+        `分页=${pagedText.length}字 单页=${singleText.length}字`,
+    )
+    check(
+        !pagedText.includes('测试小说·乙'),
+        '没有跟着「下一章」跨到别的章节去（末页那个按钮与「下一页」共用 id）',
+        JSON.stringify(pagedText.slice(-60)),
+    )
+    if (pagedText !== singleText) {
+        console.log(`    分页：${JSON.stringify(pagedText)}`)
+        console.log(`    单页：${JSON.stringify(singleText)}`)
+    }
+
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+    const left = (await getJson('/api/sources')).json?.sources ?? []
+    check(!left.some((s) => s.id === id), '分页正文测试源已清理')
+}
+
 console.log('\n=== 结果 ===')
 if (failures.length === 0) {
     console.log(
