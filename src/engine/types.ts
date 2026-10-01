@@ -153,6 +153,30 @@ export interface BookSource {
     /** 书源级请求头 */
     header?: string
 
+    /**
+     * 发现页（「探索」）地址
+     *
+     * 三种写法都要认，线上三种都有：
+     *   - 一串 `标题::地址`，按行排（最老的写法）
+     *   - 整条 `@js:` / `<js>`：脚本返回分类数组，或返回上面那种文本
+     *   - 一个普通地址（含 `{{page}}`）：整站就一个分类
+     */
+    exploreUrl?: string
+
+    /** 发现页的书目规则，字段与 ruleSearch 同形，多一个 nextPageUrl */
+    ruleExplore?: {
+        bookList?: string
+        name?: string
+        author?: string
+        kind?: string
+        wordCount?: string
+        lastChapter?: string
+        intro?: string
+        coverUrl?: string
+        bookUrl?: string
+        nextPageUrl?: string
+    }
+
     /** 书籍详情页 URL 的识别正则 */
     bookUrlPattern?: string
 }

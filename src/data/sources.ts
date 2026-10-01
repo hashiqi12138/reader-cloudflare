@@ -489,6 +489,58 @@ export function fixtureFileSource(origin: string): RegisteredSource {
     }
 }
 
+/**
+ * 发现页（探索）
+ *
+ * exploreUrl 用 `<js>` 返回**分类数组**：线上更常见的是 `标题::地址` 文本，
+ * 但脚本形态也真实存在，而且它顺带把「分类结构解析」这条路径（对象数组、
+ * 相对地址、`{{page}}` 模板）全走了一遍。分类地址带 `{{page}}`，
+ * 由 buildPlan 在真正请求时展开。
+ */
+export function fixtureExploreSource(origin: string): RegisteredSource {
+    return {
+        id: 'builtin:fixture-explore',
+        builtin: true,
+        sortOrder: 10,
+        bookSourceName: '内置测试站点（发现）',
+        bookSourceUrl: origin,
+        bookSourceGroup: '测试',
+        bookSourceComment: '验证 exploreUrl + ruleExplore：发现页分类、书目与分页',
+        bookSourceType: 0,
+        enabled: true,
+
+        searchUrl: `${origin}/fixture/search?q={{key}}&p={{page}}`,
+        ruleSearch: {
+            bookList: '@css:div.result-item',
+            name: '@css:h3.title@text',
+            author: '@css:span.author@text',
+            bookUrl: '@css:h3.title a@href',
+        },
+
+        exploreUrl: `<js>[{ title: '热门推荐', url: '/fixture/explore/hot?p={{page}}' }, { title: '最新上架', url: '/fixture/explore/new?p={{page}}' }, { title: '单页精选', url: '/fixture/explore/single' }]</js>`,
+        ruleExplore: {
+            bookList: '@css:div.result-item',
+            name: '@css:h3.title@text',
+            author: '@css:span.author@text',
+            kind: '@css:span.kind@text',
+            bookUrl: '@css:h3.title a@href',
+            nextPageUrl: '@css:a.next-page@href',
+        },
+
+        ruleBookInfo: {
+            name: '@css:h1.book-name@text',
+            intro: '@css:div.book-intro@text',
+            tocUrl: '@css:a.toc-link@href',
+        },
+        ruleToc: {
+            chapterList: '@css:ul.chapter-list li',
+            chapterName: '@css:a@text',
+            chapterUrl: '@css:a@href',
+        },
+        ruleContent: { content: '@css:div#content@textNodes' },
+    }
+}
+
 /** 内置测试源，仅在测试站点挂载时可用 */
 export function builtinSources(origin: string): RegisteredSource[] {
     return [
@@ -502,6 +554,7 @@ export function builtinSources(origin: string): RegisteredSource[] {
         fixtureAudioSource(origin),
         fixtureAudioNoRuleSource(origin),
         fixtureFileSource(origin),
+        fixtureExploreSource(origin),
     ]
 }
 

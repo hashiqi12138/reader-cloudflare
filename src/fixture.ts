@@ -106,6 +106,56 @@ ${items}
     )
 }
 
+/**
+ * 发现页（探索）
+ *
+ * 每个分类是一页书目：第 1 页底部有「下一页」，翻到最后一页就没有 ——
+ * 正好用来验证「有 nextPageUrl 就继续翻、没有就停」。
+ * 两个分类的每页条数特意不同（2 与 3），这样「翻到第 2 页有没有换内容」
+ * 是能看出来的，不会被「每页都一样」蒙混过去。
+ */
+export function fixtureExplorePage(category: string, pageNo: number): string {
+    const books = BOOKS.filter((b) => b.chapters.length > 0)
+    // 三个分类分别对应三种「还有没有下一页」：
+    //   hot    每页 2 本、还有后续 → 有「下一页」链接
+    //   new    每页 3 本、倒序     → 第 2 页就到底
+    //   single 只有一页、没有链接   → nextPageUrl 取不到，靠内容长度判断
+    const list =
+        category === 'new'
+            ? [...books].reverse()
+            : category === 'single'
+              ? books.slice(0, 2)
+              : books
+    const perPage = category === 'new' ? 3 : 2
+    const start = Math.max(0, (pageNo - 1) * perPage)
+    const slice = list.slice(start, start + perPage)
+
+    const items = slice
+        .map(
+            (b) => `<div class="result-item">
+        <h3 class="title"><a href="/fixture/book/${b.id}">${escapeHtml(b.name)}</a></h3>
+        <span class="author">${escapeHtml(b.author)}</span>
+        <span class="kind">玄幻</span>
+    </div>`,
+        )
+        .join('\n')
+
+    const hasNext = start + perPage < list.length
+    const pager = hasNext
+        ? `<div class="pager"><a class="next-page" href="/fixture/explore/${encodeURIComponent(category)}?p=${pageNo + 1}">下一页</a></div>`
+        : '<div class="pager"></div>'
+
+    return page(
+        `发现：${category}`,
+        `<h1>发现 · ${escapeHtml(category)}</h1>
+<div class="explore-meta" data-category="${escapeHtml(category)}" data-page="${pageNo}">共 ${list.length} 条</div>
+<div class="result-list">
+${items}
+</div>
+${pager}`,
+    )
+}
+
 export function fixtureBookPage(bookId: string): string {
     const book = BOOKS.find((b) => b.id === bookId)
     if (!book) return page('未找到', '<p class="empty">没有这本书</p>')
@@ -477,6 +527,11 @@ export function handleFixture(request: Request, url: URL): Response | null {
 
     const book = /^\/fixture\/book\/(\w+)$/.exec(pathname)
     if (book) return html(fixtureBookPage(book[1]!))
+
+    const explore = /^\/fixture\/explore\/([\w-]+)$/.exec(pathname)
+    if (explore) {
+        return html(fixtureExplorePage(explore[1]!, Number(url.searchParams.get('p') ?? '1')))
+    }
 
     const toc = /^\/fixture\/toc\/(\w+)$/.exec(pathname)
     if (toc) return html(fixtureTocPage(toc[1]!))

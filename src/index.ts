@@ -6,12 +6,28 @@
  */
 
 import { Hono } from 'hono'
+import { deleteCookie, getCookie, setCookie } from 'hono/cookie'
+import type { Context } from 'hono'
 
 import { countUserSources, deleteUserSource, importSources, setSourceEnabled } from './data/db'
 import { findSource, listEnabledSources, listSources } from './data/sources'
 import type { RegistryOptions } from './data/sources'
 import { addToShelf, getProgress, listShelf, removeFromShelf, saveProgress } from './data/library'
 import type { AddToShelfInput, SaveProgressInput } from './data/library'
+import {
+    SESSION_TTL_MS,
+    anonymousDataExists,
+    authenticate,
+    claimAnonymousData,
+    createAccount,
+    createSession,
+    ownerForUser,
+    pruneSessions,
+    revokeSession,
+    userForToken,
+} from './data/accounts'
+import type { AccountUser } from './data/accounts'
+import { buildHomeSections, readHomeCache, writeHomeCache } from './data/home'
 import { DataError, bookKey } from './data/types'
 import { getOrCreateMediaSecret } from './data/settings'
 import { UnsupportedRuleError } from './engine/analyze'
@@ -19,11 +35,12 @@ import { SOURCE_TYPE, type MediaLink } from './engine/types'
 import { SandboxError, runInSandbox } from './engine/js'
 import { parseHtml } from './engine/select'
 import { handleFixture } from './fixture'
+import { exploreBooks, listExploreCategories } from './legado/explore'
 import { fetchBookInfo, fetchChapters, searchBooks } from './legado/ops'
 import { fetchChapterContent } from './legado/media'
 import { mediaRequestHeaders } from './legado/source'
 import { UpstreamError } from './lib/http'
-import { USER_HEADER, parseUserToken } from './lib/identity'
+import { USER_HEADER } from './lib/identity'
 import { MediaTokenError, signMediaToken, verifyMediaToken } from './lib/signing'
 import type { MediaTokenPayload } from './lib/signing'
 
@@ -37,7 +54,7 @@ const app = new Hono<{ Bindings: Env }>()
  */
 const MAX_IMPORT_BODY_BYTES = 4 * 1024 * 1024
 
-type ErrorStatus = 400 | 403 | 404 | 413 | 422 | 500 | 502
+type ErrorStatus = 400 | 401 | 403 | 404 | 409 | 413 | 422 | 429 | 500 | 502 | 504
 
 /** 把各类失败映射成明确的 HTTP 状态，而不是一律 500 */
 function statusFor(err: unknown): { status: ErrorStatus; code: string } {
@@ -68,18 +85,47 @@ function registryOf(env: Env): RegistryOptions {
 }
 
 /**
- * 取出本次请求的身份
+ * 会话 cookie 名
  *
- * 书架与阅读进度按身份隔离；**书源不隔离** ——
- * 书源是「这份实例怎么取网」的配置，属于部署者；书架是使用者自己的数据。
- * 两者混在一起管，只会让「换个浏览器书架空了、书源却还在」这种预期外的行为变多。
+ * 用 **HttpOnly cookie** 而不是像以前那样把身份放在自定义头里：
+ * 会话是凭证，凭证放在 localStorage 里等于把「XSS 一次 = 长期冒充」这条路留着。
+ * HttpOnly 的 cookie 脚本读不到，SameSite=Lax 又挡住了跨站带 cookie 的请求。
  */
-function ownerOf(c: { req: { header: (name: string) => string | undefined } }): string {
-    try {
-        return parseUserToken(c.req.header(USER_HEADER))
-    } catch (err) {
-        throw new DataError(describe(err), 400, 'missing_identity')
+const SESSION_COOKIE = 'rc_session'
+
+/** 下发 / 清除会话 cookie 的公共选项 */
+function sessionCookieOptions(c: Context<{ Bindings: Env }>) {
+    return {
+        path: '/',
+        httpOnly: true,
+        sameSite: 'Lax' as const,
+        // 本地 wrangler dev 跑在 http 上，加 Secure 会让浏览器直接丢掉这个 cookie；
+        // 线上是 https，必须加 —— 所以按协议判断，而不是按环境变量
+        secure: new URL(c.req.url).protocol === 'https:',
     }
+}
+
+/** 本次请求的登录账号；没登录返回 null */
+async function currentUser(c: Context<{ Bindings: Env }>): Promise<AccountUser | null> {
+    return userForToken(c.env.DB, getCookie(c, SESSION_COOKIE))
+}
+
+/** 本次请求的登录账号；没登录直接 401，由 fail() 统一成响应 */
+async function requireUser(c: Context<{ Bindings: Env }>): Promise<AccountUser> {
+    const user = await currentUser(c)
+    if (!user) throw new DataError('请先登录', 401, 'unauthenticated')
+    return user
+}
+
+/**
+ * 书架与阅读进度挂在**账号**上
+ *
+ * 书源仍然是全局的：书源是「这份实例怎么取网」的配置，属于部署者；
+ * 书架与进度是使用者自己的数据。两者混在一起管，只会让
+ * 「换个浏览器书架空了、书源却还在」这种预期外的行为变多。
+ */
+async function ownerOf(c: Context<{ Bindings: Env }>): Promise<string> {
+    return ownerForUser(await requireUser(c))
 }
 
 /**
@@ -141,6 +187,8 @@ app.get('/api/sources', async (c) => {
             builtin: s.builtin,
             enabled: s.enabled !== false,
             hasSearch: Boolean(s.searchUrl && s.ruleSearch?.bookList),
+            // 「发现」页要按这个字段筛出能探索的书源，否则前端得逐个试一遍
+            hasExplore: Boolean(s.exploreUrl && s.ruleExplore?.bookList),
         })),
     })
 })
@@ -235,12 +283,17 @@ app.delete('/api/sources', async (c) => {
  * 这几个接口都要求带身份头（见 ownerOf）。
  */
 app.get('/api/shelf', async (c) => {
-    const entries = await listShelf(c.env.DB, ownerOf(c))
+    const entries = await listShelf(c.env.DB, await ownerOf(c))
     return c.json({ count: entries.length, entries })
 })
 
 app.post('/api/shelf', async (c) => {
-    const owner = ownerOf(c)
+    let owner: string
+    try {
+        owner = await ownerOf(c)
+    } catch (err) {
+        return fail(c, err)
+    }
 
     let body: AddToShelfInput
     try {
@@ -258,7 +311,12 @@ app.post('/api/shelf', async (c) => {
 })
 
 app.delete('/api/shelf', async (c) => {
-    const owner = ownerOf(c)
+    let owner: string
+    try {
+        owner = await ownerOf(c)
+    } catch (err) {
+        return fail(c, err)
+    }
     const key = c.req.query('key') ?? ''
     if (key === '') return c.json({ error: '缺少 key 参数' }, 400)
 
@@ -272,7 +330,12 @@ app.delete('/api/shelf', async (c) => {
 
 /** 阅读位置。不在书架里的书也记 —— 否则「读了两章再搜回来」就得从头翻 */
 app.get('/api/progress', async (c) => {
-    const owner = ownerOf(c)
+    let owner: string
+    try {
+        owner = await ownerOf(c)
+    } catch (err) {
+        return fail(c, err)
+    }
     const sourceId = c.req.query('sourceId') ?? ''
     const bookUrl = c.req.query('bookUrl') ?? ''
     if (sourceId === '' || bookUrl === '') {
@@ -284,7 +347,12 @@ app.get('/api/progress', async (c) => {
 })
 
 app.put('/api/progress', async (c) => {
-    const owner = ownerOf(c)
+    let owner: string
+    try {
+        owner = await ownerOf(c)
+    } catch (err) {
+        return fail(c, err)
+    }
 
     let body: SaveProgressInput
     try {
@@ -299,6 +367,204 @@ app.put('/api/progress', async (c) => {
     } catch (err) {
         return fail(c, err)
     }
+})
+
+// ---------------------------------------------------------------- 账号
+
+/**
+ * 注册
+ *
+ * 注册成功即登录：新用户不该先填一遍表单、再填一遍同样的表单。
+ * 会话 cookie 直接下发，前端拿到 user 就能进主界面。
+ */
+app.post('/api/auth/register', async (c) => {
+    let body: { username?: string; password?: string }
+    try {
+        body = await c.req.json()
+    } catch {
+        return c.json({ error: '请求体必须是 JSON' }, 400)
+    }
+
+    try {
+        const user = await createAccount(c.env.DB, body.username, body.password)
+        const { token, expiresAt } = await createSession(
+            c.env.DB,
+            user.id,
+            c.req.header('user-agent') ?? '',
+        )
+        setCookie(c, SESSION_COOKIE, token, {
+            ...sessionCookieOptions(c),
+            maxAge: Math.floor(SESSION_TTL_MS / 1000),
+        })
+        return c.json({ user, expiresAt }, 201)
+    } catch (err) {
+        return fail(c, err)
+    }
+})
+
+app.post('/api/auth/login', async (c) => {
+    let body: { username?: string; password?: string }
+    try {
+        body = await c.req.json()
+    } catch {
+        return c.json({ error: '请求体必须是 JSON' }, 400)
+    }
+
+    try {
+        const user = await authenticate(c.env.DB, body.username, body.password)
+        // 顺手清一次过期会话：登录是唯一必然会发生的动作，不需要额外的定时任务
+        await pruneSessions(c.env.DB)
+        const { token, expiresAt } = await createSession(
+            c.env.DB,
+            user.id,
+            c.req.header('user-agent') ?? '',
+        )
+        setCookie(c, SESSION_COOKIE, token, {
+            ...sessionCookieOptions(c),
+            maxAge: Math.floor(SESSION_TTL_MS / 1000),
+        })
+        return c.json({ user, expiresAt })
+    } catch (err) {
+        return fail(c, err)
+    }
+})
+
+app.post('/api/auth/logout', async (c) => {
+    const token = getCookie(c, SESSION_COOKIE)
+    if (token) await revokeSession(c.env.DB, token)
+    deleteCookie(c, SESSION_COOKIE, { path: '/' })
+    return c.json({ ok: true })
+})
+
+/**
+ * 当前登录状态
+ *
+ * 除了「我是谁」，还要回答「本机上有没有一份升级前的匿名书架可以并进来」——
+ * 没有这个提示，老用户升上来只会看到书架空了，却不知道为什么。
+ */
+app.get('/api/auth/me', async (c) => {
+    const user = await currentUser(c)
+    const legacyToken = (c.req.header(USER_HEADER) ?? '').trim()
+    let claimable = false
+    if (user && legacyToken !== '') {
+        try {
+            claimable = await anonymousDataExists(c.env.DB, legacyToken)
+        } catch {
+            /* 表还没建好等情况不该让 /me 失败：claimable 保持 false 即可 */
+        }
+    }
+    return c.json({ user: user ?? null, claimable })
+})
+
+/** 把本机匿名身份名下的书架与进度并入当前账号（一次性动作，可重复调用） */
+app.post('/api/auth/claim', async (c) => {
+    let body: { token?: string }
+    try {
+        body = await c.req.json()
+    } catch {
+        return c.json({ error: '请求体必须是 JSON' }, 400)
+    }
+
+    try {
+        const user = await requireUser(c)
+        const merged = await claimAnonymousData(c.env.DB, String(body.token ?? ''), user)
+        return c.json({ merged })
+    } catch (err) {
+        return fail(c, err)
+    }
+})
+
+// ---------------------------------------------------------------- 发现（书源探索）
+
+/** 一个书源的发现页分类 */
+app.get('/api/explore', async (c) => {
+    const sourceId = c.req.query('sourceId') ?? ''
+    const origin = new URL(c.req.url).origin
+    const source = await findSource(c.env.DB, origin, sourceId, registryOf(c.env))
+    if (!source) return c.json({ error: `找不到书源：${sourceId}` }, 404)
+
+    try {
+        const categories = await listExploreCategories(source, {
+            baseUrl: source.bookSourceUrl,
+        })
+        return c.json({
+            sourceId: source.id,
+            sourceName: source.bookSourceName,
+            count: categories.length,
+            categories,
+        })
+    } catch (err) {
+        return fail(c, err)
+    }
+})
+
+/** 某个分类下的书 */
+app.get('/api/explore/books', async (c) => {
+    const sourceId = c.req.query('sourceId') ?? ''
+    const target = c.req.query('url') ?? ''
+    const page = Number(c.req.query('page') ?? '1')
+    const origin = new URL(c.req.url).origin
+
+    const source = await findSource(c.env.DB, origin, sourceId, registryOf(c.env))
+    if (!source) return c.json({ error: `找不到书源：${sourceId}` }, 404)
+    if (target === '') return c.json({ error: '缺少 url 参数' }, 400)
+
+    try {
+        const result = await exploreBooks(source, target, page, {
+            baseUrl: source.bookSourceUrl,
+        })
+        return c.json({
+            sourceId: source.id,
+            sourceName: source.bookSourceName,
+            count: result.books.length,
+            books: result.books,
+            nextUrl: result.nextUrl,
+            // 分类地址里带 {{page}} 时，分页由模板表达，前端一直往下翻即可
+            hasMore: result.nextUrl !== null || result.templated,
+        })
+    } catch (err) {
+        return fail(c, err)
+    }
+})
+
+// ---------------------------------------------------------------- 首页
+
+/**
+ * 首页：继续阅读 + 推荐位
+ *
+ * 推荐位来自各书源的**发现页**，缓存 30 分钟（见 data/home.ts）；
+ * 「继续阅读」是个人数据，每次实时读，不进缓存。
+ */
+app.get('/api/home', async (c) => {
+    let owner: string
+    let entries: Awaited<ReturnType<typeof listShelf>>
+    try {
+        owner = await ownerOf(c)
+        entries = await listShelf(c.env.DB, owner)
+    } catch (err) {
+        return fail(c, err)
+    }
+
+    const continueReading = entries.filter((e) => e.chapterUrl !== null).slice(0, 8)
+
+    const refresh = c.req.query('refresh') === '1'
+    let payload = refresh ? null : await readHomeCache(c.env.DB)
+
+    if (!payload) {
+        const origin = new URL(c.req.url).origin
+        const all = await listEnabledSources(c.env.DB, origin, registryOf(c.env))
+        // 书架里出现过的书源排在前面：最轻量的「个人化」，且能一句话解释清楚
+        const preferred = [...new Set(entries.map((e) => e.sourceId))]
+        const built = await buildHomeSections(all, preferred, (s) => s.id)
+        payload = { sections: built.sections, failures: built.failures, builtAt: Date.now() }
+        try {
+            await writeHomeCache(c.env.DB, payload)
+        } catch {
+            // 缓存写失败不该让首页失败，下次重建就是
+        }
+    }
+
+    return c.json({ ...payload, continueReading, count: entries.length })
 })
 
 /**

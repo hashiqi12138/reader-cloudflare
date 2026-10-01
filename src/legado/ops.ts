@@ -43,7 +43,12 @@ export function resolveUrl(value: string, base: string): string {
  * 换行会被 URL 解析器当成非法字符删掉，得到几条地址首尾相接的串：
  * 喜马拉雅的 nextTocUrl 正是这样拼出 9 条地址，然后请求一个必然 404 的怪地址。
  */
-async function analyzeAddress(item: Selection, rule: string, ctx: RuleContext): Promise<string> {
+/** 地址类字段：一列候选里取**第一个非空行**，拼错一个字符就整条不可用，不能取整串 */
+export async function analyzeAddress(
+    item: Selection,
+    rule: string,
+    ctx: RuleContext,
+): Promise<string> {
     if (rule.trim() === '') return ''
     const values = await analyzeStrings(item, rule, ctx)
     for (const value of values) {
@@ -91,30 +96,55 @@ export async function searchBooks(
     }
     const sel = rootSelection(html)
     const items = await analyzeSelections(sel, rule.bookList, searchCtx)
+    return booksFromItems(source, items, rule, searchCtx, base)
+}
 
+/** 搜索与「发现」用的是同一套字段规则，只是分组名不同 */
+export interface BookListRule {
+    name?: string
+    author?: string
+    kind?: string
+    wordCount?: string
+    lastChapter?: string
+    intro?: string
+    coverUrl?: string
+    bookUrl?: string
+}
+
+/**
+ * 把列表规则圈出的条目逐个读成书
+ *
+ * 抽出来是因为**搜索与发现必须给出同一本书**：两边各写一份字段读取逻辑，
+ * 迟早会在某一边修好一个字段而另一边没跟上，表现为「搜得到但发现页里缺作者」这种
+ * 很难归因的差异。
+ */
+export async function booksFromItems(
+    source: BookSource,
+    items: Selection[],
+    rule: BookListRule,
+    ctx: RuleContext,
+    base: string,
+): Promise<SearchBook[]> {
     const books: SearchBook[] = []
     for (const item of items) {
-        const name = await analyzeString(item, rule.name ?? 'text', searchCtx)
+        const name = await analyzeString(item, rule.name ?? 'text', ctx)
         if (!name) continue
 
-        const bookUrlRaw = await analyzeAddress(item, rule.bookUrl ?? 'tag.a@href', searchCtx)
+        const bookUrlRaw = await analyzeAddress(item, rule.bookUrl ?? 'tag.a@href', ctx)
         books.push({
             name,
-            author: await analyzeString(item, rule.author ?? '', searchCtx),
-            kind: (await analyzeString(item, rule.kind ?? '', searchCtx)) || undefined,
-            lastChapter:
-                (await analyzeString(item, rule.lastChapter ?? '', searchCtx)) || undefined,
-            intro: (await analyzeString(item, rule.intro ?? '', searchCtx)) || undefined,
+            author: await analyzeString(item, rule.author ?? '', ctx),
+            kind: (await analyzeString(item, rule.kind ?? '', ctx)) || undefined,
+            lastChapter: (await analyzeString(item, rule.lastChapter ?? '', ctx)) || undefined,
+            intro: (await analyzeString(item, rule.intro ?? '', ctx)) || undefined,
             coverUrl:
-                resolveUrl(await analyzeAddress(item, rule.coverUrl ?? '', searchCtx), base) ||
-                undefined,
-            wordCount: (await analyzeString(item, rule.wordCount ?? '', searchCtx)) || undefined,
+                resolveUrl(await analyzeAddress(item, rule.coverUrl ?? '', ctx), base) || undefined,
+            wordCount: (await analyzeString(item, rule.wordCount ?? '', ctx)) || undefined,
             bookUrl: resolveUrl(bookUrlRaw, base),
             sourceName: source.bookSourceName,
             sourceUrl: source.bookSourceUrl,
         })
     }
-
     return books
 }
 

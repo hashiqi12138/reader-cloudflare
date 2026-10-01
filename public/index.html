@@ -1,9 +1,10 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="light" data-accent="amber">
     <head>
         <meta charset="utf-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
         <meta name="color-scheme" content="light dark" />
+        <meta name="description" content="兼容 Legado 书源规则的聚合阅读器" />
         <title>书源阅读器</title>
         <link rel="stylesheet" href="/style.css" />
         <!--
@@ -11,39 +12,24 @@
             首屏多等几十毫秒换来说到底更简单的代码，划算。
         -->
     </head>
-    <body>
+    <body data-reader="0">
         <header class="topbar">
-            <span class="brand">书源阅读器</span>
-            <nav>
-                <button class="tab" data-route="shelf" type="button">书架</button>
-                <button class="tab" data-route="search" type="button">搜索</button>
-                <button class="tab" data-route="sources" type="button">书源</button>
-            </nav>
-            <a
-                class="icon-btn"
-                href="/api/probe"
-                target="_blank"
-                rel="noreferrer"
-                title="运行时自检"
-                >自检</a
-            >
+            <a class="brand" href="#/home">
+                <span class="brand-mark">书</span>
+                <span class="brand-text">书源阅读器</span>
+            </a>
+            <nav id="nav" class="nav"></nav>
+            <div class="topbar-right">
+                <span id="account"></span>
+            </div>
         </header>
 
-        <div
-            id="toast"
-            hidden
-            style="
-                position: fixed;
-                z-index: 40;
-                left: 12px;
-                right: 12px;
-                bottom: 12px;
-                max-width: 640px;
-                margin: 0 auto;
-            "
-        ></div>
-
         <main id="view"></main>
+
+        <!-- 手机上用底部导航：顶栏那几个文字标签在窄屏里会挤成一排 -->
+        <nav id="bottom-nav" class="bottom-nav"></nav>
+
+        <div id="toast" hidden></div>
 
         <!--
             AGPL 第 13 条要求：用户通过网络使用本程序时，必须能拿到它的源代码。
@@ -52,18 +38,15 @@
         -->
         <footer class="footer">
             <a
+                id="source-link"
                 href="https://github.com/hashiqi12138/reader-cloudflare"
                 target="_blank"
                 rel="noreferrer"
             >
                 源代码
             </a>
-            <span>· 许可 AGPL-3.0-or-later</span>
-            <!--
-                书架按「本机身份」隔离。把身份显示出来（并提供复制/切换）是必要的：
-                否则使用者只会遇到「换个浏览器书架就空了」，却不知道原因。
-            -->
-            <span id="identity" class="identity"></span>
+            <span class="dot">·</span>
+            <span>AGPL-3.0-or-later</span>
         </footer>
 
         <script type="module" src="/app.js"></script>

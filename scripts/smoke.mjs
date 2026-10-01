@@ -35,25 +35,49 @@ async function getJson(path) {
 }
 
 /**
- * 书架与阅读进度按身份隔离，这几个接口必须带身份头。
- * 冒烟里固定用两个身份，专门用来验「互相看不到」。
+ * 注册一个临时账号，返回「带着它会话 cookie」的调用器
+ *
+ * 书架与阅读进度现在挂在**账号**上，会话是 HttpOnly cookie，所以这一段
+ * 不再用自定义头，而是真的走一遍注册把 cookie 拿到手。
+ * 用户名每次都带时间戳与随机数，免得与上一次运行的残留撞车（唯一约束会直接 409）。
  */
-const USER_HEADER = 'x-reader-user'
-const USER_A = 'smoke-user-a-0123456789'
-const USER_B = 'smoke-user-b-0123456789'
-
-async function callAs(user, method, path, body) {
-    const response = await fetch(BASE + path, {
-        method,
-        headers: {
-            ...(user === null ? {} : { [USER_HEADER]: user }),
-            ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
-        },
-        body:
-            body === undefined ? undefined : typeof body === 'string' ? body : JSON.stringify(body),
+async function sessionUser(prefix) {
+    const username = `${prefix}${Date.now().toString(36)}${Math.floor(Math.random() * 1000)}`
+    const response = await fetch(`${BASE}/api/auth/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password: 'smoke-password-1' }),
     })
-    const text = await response.text()
-    return { status: response.status, json: parseMaybeJson(text), text }
+    let cookie = (response.headers.get('set-cookie') ?? '').split(';')[0]
+
+    return {
+        username,
+        get cookie() {
+            return cookie
+        },
+        status: response.status,
+        async call(method, path, body) {
+            const res = await fetch(BASE + path, {
+                method,
+                headers: {
+                    ...(cookie ? { cookie } : {}),
+                    ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+                },
+                body:
+                    body === undefined
+                        ? undefined
+                        : typeof body === 'string'
+                          ? body
+                          : JSON.stringify(body),
+            })
+            // 登录/登出会重新下发或清掉 cookie，跟着更新 ——
+            // 不然「登出再登录」这一段的第二次请求还带着已经失效的那个会话
+            const setCookie = res.headers.get('set-cookie')
+            if (setCookie) cookie = setCookie.split(';')[0]
+            const text = await res.text()
+            return { status: res.status, json: parseMaybeJson(text), text }
+        },
+    }
 }
 
 /**
@@ -406,7 +430,7 @@ console.log('\n=== 6. 前端静态资源 ===')
         (pageText.match(/https:\/\/github\.com\/[^"']+/) ?? ['(没找到)'])[0],
     )
 
-    for (const asset of ['/app.js', '/style.css']) {
+    for (const asset of ['/app.js', '/style.css', '/js/core.js', '/js/views.js', '/js/reader.js']) {
         const response = await fetch(BASE + asset)
         check(response.status === 200, `${asset} 返回 200`, `status=${response.status}`)
         check((await response.text()).length > 500, `${asset} 不是空文件`)
@@ -422,22 +446,80 @@ console.log('\n=== 6. 前端静态资源 ===')
     )
 }
 
-console.log('\n=== 7. 书架与阅读进度 ===')
+console.log('\n=== 7. 账号、书架与阅读进度 ===')
 {
     const sourceId = 'builtin:fixture-css'
     const bookUrl = `${BASE}/fixture/book/1`
     const chapterUrl = `${BASE}/fixture/chapter/1/1`
 
-    // 本段所有书架/进度请求都用 USER_A 这个身份（服务端按身份隔离，不带头会被拒）
-    const callA = (method, path, body) => callAs(USER_A, method, path, body)
-    const shelfOf = async (user = USER_A) =>
-        (await callAs(user, 'GET', '/api/shelf')).json?.entries ?? []
+    // ---- 未登录必须被挡住：这是「需要登录」的底线，不能只靠前端藏界面 ----
+    const anonShelf = await fetch(`${BASE}/api/shelf`)
+    const anonShelfBody = parseMaybeJson(await anonShelf.text())
+    check(
+        anonShelf.status === 401 && anonShelfBody?.code === 'unauthenticated',
+        '未登录访问书架返回 401 unauthenticated',
+        `status=${anonShelf.status} code=${anonShelfBody?.code}`,
+    )
+    const anonHome = await fetch(`${BASE}/api/home`)
+    check(anonHome.status === 401, '未登录访问首页接口同样是 401', `status=${anonHome.status}`)
 
-    // 清掉上一次可能留下的条目，保证可重复运行
-    const existing = (await shelfOf()).find((e) => e.sourceId === sourceId && e.bookUrl === bookUrl)
-    if (existing) await callA('DELETE', `/api/shelf?key=${encodeURIComponent(existing.bookKey)}`)
+    // ---- 注册两个账号，之后所有书架/进度操作都用它们的会话 ----
+    const a = await sessionUser('smokea')
+    const b = await sessionUser('smokeb')
+    check(
+        a.status === 201 && b.status === 201 && a.cookie !== '' && b.cookie !== '',
+        '注册两个临时账号并拿到会话 cookie',
+        `${a.status}/${b.status} cookie=${a.cookie !== ''}/${b.cookie !== ''}`,
+    )
 
+    const meA = await a.call('GET', '/api/auth/me')
+    check(
+        meA.json?.user?.username === a.username,
+        '/api/auth/me 认得会话（cookie 生效）',
+        JSON.stringify(meA.json?.user?.username),
+    )
+
+    // 登录接口的几条否定路径：都必须是明确的状态码，而不是含混的失败
+    const repeat = await fetch(`${BASE}/api/auth/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: a.username, password: 'smoke-password-1' }),
+    })
+    check(repeat.status === 409, '重复用户名注册返回 409', `status=${repeat.status}`)
+
+    const weak = await fetch(`${BASE}/api/auth/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: `${a.username}x`, password: 'short' }),
+    })
+    check(weak.status === 400, '弱口令被拒（400）', `status=${weak.status}`)
+
+    const wrongPassword = await a.call('POST', '/api/auth/login', {
+        username: a.username,
+        password: 'definitely-wrong',
+    })
+    check(
+        wrongPassword.status === 401 && wrongPassword.json?.code === 'bad_credentials',
+        '密码不对返回 401 bad_credentials',
+        `status=${wrongPassword.status} code=${wrongPassword.json?.code}`,
+    )
+
+    const unknownUser = await a.call('POST', '/api/auth/login', {
+        username: `nobody${Date.now().toString(36)}`,
+        password: 'whatever-12345',
+    })
+    check(
+        unknownUser.status === 401 && unknownUser.json?.error === wrongPassword.json?.error,
+        '账号不存在与密码不对给出同一句话（不泄漏哪个用户名存在）',
+        JSON.stringify(unknownUser.json?.error),
+    )
+
+    const callA = (method, path, body) => a.call(method, path, body)
+    const shelfOf = async (user = a) => (await user.call('GET', '/api/shelf')).json?.entries ?? []
+
+    // 新账号的书架天然是空的，不需要清理上一次的残留
     const baseline = (await shelfOf()).length
+    check(baseline === 0, '新账号的书架是空的', `count=${baseline}`)
 
     const added = await callA('POST', '/api/shelf', {
         sourceId,
@@ -492,8 +574,7 @@ console.log('\n=== 7. 书架与阅读进度 ===')
         JSON.stringify({ name: afterRead.chapterName, index: afterRead.chapterIndex }),
     )
 
-    const readBack = await callAs(
-        USER_A,
+    const readBack = await a.call(
         'GET',
         `/api/progress?sourceId=${encodeURIComponent(sourceId)}&bookUrl=${encodeURIComponent(bookUrl)}`,
     )
@@ -527,8 +608,7 @@ console.log('\n=== 7. 书架与阅读进度 ===')
     )
     check((await shelfOf()).length === baseline, '移出后回到原来的条目数')
 
-    const progressGone = await callAs(
-        USER_A,
+    const progressGone = await a.call(
         'GET',
         `/api/progress?sourceId=${encodeURIComponent(sourceId)}&bookUrl=${encodeURIComponent(bookUrl)}`,
     )
@@ -561,8 +641,8 @@ console.log('\n=== 7. 书架与阅读进度 ===')
     })
     check(addForA.status === 201, '身份 A 加一本书', JSON.stringify(addForA.json?.created))
 
-    const shelfA = await shelfOf(USER_A)
-    const shelfB = await shelfOf(USER_B)
+    const shelfA = await shelfOf(a)
+    const shelfB = await shelfOf(b)
     check(shelfA.length > 0, '身份 A 能看到自己的书架', `count=${shelfA.length}`)
     check(
         shelfB.length === 0,
@@ -579,8 +659,8 @@ console.log('\n=== 7. 书架与阅读进度 ===')
         chapterIndex: 0,
     })
     const progressQuery = `/api/progress?sourceId=${encodeURIComponent(sourceId)}&bookUrl=${encodeURIComponent(bookUrl)}`
-    const progressA = await callAs(USER_A, 'GET', progressQuery)
-    const progressB = await callAs(USER_B, 'GET', progressQuery)
+    const progressA = await a.call('GET', progressQuery)
+    const progressB = await b.call('GET', progressQuery)
     check(progressA.json?.progress !== null, '身份 A 有阅读进度')
     check(
         progressB.json?.progress === null,
@@ -590,41 +670,42 @@ console.log('\n=== 7. 书架与阅读进度 ===')
 
     // B 删不掉 A 的书架条目：按 owner 过滤之后应当报「找不到」而不是删掉别人的
     const keyOfA = shelfA.find((e) => e.name === '甲的书')?.bookKey ?? ''
-    const deleteByB = await callAs(USER_B, 'DELETE', `/api/shelf?key=${encodeURIComponent(keyOfA)}`)
+    const deleteByB = await b.call('DELETE', `/api/shelf?key=${encodeURIComponent(keyOfA)}`)
     check(
         deleteByB.status === 404,
         '身份 B 删不掉 A 的书架条目（404 而不是删掉）',
         `status=${deleteByB.status} code=${deleteByB.json?.code}`,
     )
     check(
-        (await shelfOf(USER_A)).some((e) => e.bookKey === keyOfA),
+        (await shelfOf(a)).some((e) => e.bookKey === keyOfA),
         'A 的书架条目仍在',
     )
 
-    // 不带身份必须明确报错，而不是「当作某个默认用户」
-    const noHeader = await callAs(null, 'GET', '/api/shelf')
+    // 登出之后会话必须立刻失效：真正把「会话」和「只是一串本地数据」区分开的正是这一条
+    await a.call('POST', '/api/auth/logout', {})
+    const afterLogout = await a.call('GET', '/api/shelf')
     check(
-        noHeader.status === 400 && noHeader.json?.code === 'missing_identity',
-        '不带身份头时返回 400 missing_identity（而不是共用一份书架）',
-        `status=${noHeader.status} code=${noHeader.json?.code}`,
+        afterLogout.status === 401,
+        '登出后原 cookie 立即失效（401）',
+        `status=${afterLogout.status}`,
     )
 
-    // 用 ASCII 的非法值来测：HTTP 头本身就不允许非 ASCII 字符，
-    // 拿中文当用例的话请求根本发不出去，测到的是 fetch 的限制而不是服务端校验
-    // （非 ASCII 那侧由 test/identity.test.ts 直接覆盖 parseUserToken）
-    for (const bad of ['short-token', 'abcdefghijklmnopqrs!']) {
-        const badHeader = await callAs(bad, 'GET', '/api/shelf')
-        check(
-            badHeader.status === 400 && badHeader.json?.code === 'missing_identity',
-            `身份「${bad}」被拒（400）`,
-            `status=${badHeader.status}`,
-        )
-    }
+    const backIn = await a.call('POST', '/api/auth/login', {
+        username: a.username,
+        password: 'smoke-password-1',
+    })
+    check(backIn.status === 200, '用密码重新登录成功', `status=${backIn.status}`)
+    const afterLogin = await a.call('GET', '/api/shelf')
+    check(
+        afterLogin.status === 200 && (afterLogin.json?.entries ?? []).length > 0,
+        '重新登录后书架还在（数据挂在账号上，不是挂在会话上）',
+        `count=${(afterLogin.json?.entries ?? []).length}`,
+    )
 
-    // 收尾：把 A 造的数据清掉，保证可重复运行
+    // 收尾：把 A 造的数据清掉
     await callA('DELETE', `/api/shelf?key=${encodeURIComponent(keyOfA)}`)
-    check((await shelfOf(USER_A)).length === baseline, '身份 A 的数据已清理')
-    check((await shelfOf(USER_B)).length === 0, '身份 B 始终没有数据')
+    check((await shelfOf(a)).length === baseline, '身份 A 的数据已清理')
+    check((await shelfOf(b)).length === 0, '身份 B 始终没有数据')
 }
 
 console.log('\n=== 8. 相对地址以书源地址为基准 ===')
@@ -1909,6 +1990,159 @@ console.log('\n=== 18. URL 字段里的 JS（searchUrl 的 @js: / <js>） ===')
 
     const left = (await getJson('/api/sources')).json?.sources ?? []
     check(!left.some((s) => s.id === id), 'URL JS 测试源已清理')
+}
+
+console.log('\n=== 19. 发现（书源探索）与首页推荐 ===')
+{
+    /**
+     * 「发现」走的是 exploreUrl + ruleExplore：「分类列表 → 某个分类的书」。
+     * 分类地址里带 `{{page}}`，所以「有没有下一页」既可能来自 nextPageUrl，
+     * 也可能来自模板本身 —— 两条路都要验。
+     *
+     * 这段用内置的发现源（`<js>` 返回分类数组）跑，完全不依赖第三方站点。
+     */
+    const exploreId = 'builtin:fixture-explore'
+    const user = await sessionUser('smokehome')
+    check(user.status === 201, '首页/发现测试用的临时账号已注册', `status=${user.status}`)
+
+    // 书源列表要标出「哪些源能探索」，否则前端只能逐个试
+    const sources = (await getJson('/api/sources')).json?.sources ?? []
+    const exploreSource = sources.find((s) => s.id === exploreId)
+    check(
+        exploreSource?.hasExplore === true,
+        '/api/sources 标出 hasExplore（前端据此筛出可探索的源）',
+        JSON.stringify(exploreSource?.hasExplore),
+    )
+    check(
+        sources.some((s) => s.hasExplore === false),
+        '不支持探索的源 hasExplore=false',
+        `共 ${sources.length} 条`,
+    )
+
+    const categories = await getJson(`/api/explore?sourceId=${encodeURIComponent(exploreId)}`)
+    const list = categories.json?.categories ?? []
+    check(
+        categories.status === 200 && list.length === 3,
+        '发现页读出 3 个分类（<js> 返回的分类数组）',
+        JSON.stringify(list.map((c) => c.title)),
+    )
+    check(
+        list[0]?.url.includes('{{page}}'),
+        '分类地址里的 {{page}} 原样带出来，由请求时展开',
+        String(list[0]?.url),
+    )
+
+    const categoryUrl = encodeURIComponent(list[0]?.url ?? '')
+    const page1 = await getJson(
+        `/api/explore/books?sourceId=${encodeURIComponent(exploreId)}&url=${categoryUrl}&page=1`,
+    )
+    const page2 = await getJson(
+        `/api/explore/books?sourceId=${encodeURIComponent(exploreId)}&url=${categoryUrl}&page=2`,
+    )
+    const names1 = (page1.json?.books ?? []).map((b) => b.name)
+    const names2 = (page2.json?.books ?? []).map((b) => b.name)
+    check(names1.length === 2, '分类第 1 页取到 2 本', JSON.stringify(names1))
+    check(
+        names1.join() !== names2.join(),
+        '第 2 页换了一批书（分页真的生效，不是每页都一样）',
+        `${names1.join('/')} vs ${names2.join('/')}`,
+    )
+    check(
+        page1.json?.hasMore === true && page1.json?.nextUrl !== null,
+        '第 1 页给出下一页（nextPageUrl 生效）',
+        String(page1.json?.nextUrl),
+    )
+    // 分类地址带 {{page}} 时，分页是由模板表达的，「还有没有」只能靠内容判断：
+    // 翻过头的那一页返回 0 条，前端据此停下 —— 断言这个停止信号，而不是 hasMore
+    const pageFar = await getJson(
+        `/api/explore/books?sourceId=${encodeURIComponent(exploreId)}&url=${categoryUrl}&page=9`,
+    )
+    check(
+        (pageFar.json?.books ?? []).length === 0,
+        '翻过头的那一页返回 0 条（模板分页的停止信号）',
+        `count=${(pageFar.json?.books ?? []).length}`,
+    )
+
+    // 既没有 {{page}} 也没有 nextPageUrl 的分类：取完就是完，必须明确说「没有更多」
+    const single = await getJson(
+        `/api/explore/books?sourceId=${encodeURIComponent(exploreId)}&url=${encodeURIComponent('/fixture/explore/single')}&page=1`,
+    )
+    check(
+        (single.json?.books ?? []).length === 2 && single.json?.hasMore === false,
+        '既没有 {{page}} 也没有 nextPageUrl 的分类：取完就停（hasMore=false）',
+        `count=${(single.json?.books ?? []).length} hasMore=${JSON.stringify(single.json?.hasMore)}`,
+    )
+    check(
+        (page1.json?.books ?? []).every((b) => b.bookUrl.startsWith(BASE)),
+        '分类里的相对地址按书源地址补全',
+        String(page1.json?.books?.[0]?.bookUrl),
+    )
+
+    // 没配发现页的源要明确报错，而不是回一个空分类列表让人以为「这个源没内容」
+    const noExplore = await getJson('/api/explore?sourceId=builtin%3Afixture-css')
+    check(
+        noExplore.status === 502 && String(noExplore.json?.error ?? '').includes('exploreUrl'),
+        '没有 exploreUrl 的源给出明确报错（502 且说明缺什么）',
+        `status=${noExplore.status} ${noExplore.json?.error ?? ''}`,
+    )
+
+    // ---- 首页 ----
+    const home = await user.call('GET', '/api/home')
+    const sections = home.json?.sections ?? []
+    check(
+        home.status === 200 && sections.length >= 1,
+        '首页推荐位至少有一个栏目（来自发现页的第一个分类）',
+        `sections=${sections.length} failures=${JSON.stringify(home.json?.failures ?? []).slice(0, 80)}`,
+    )
+    check(
+        (sections[0]?.books ?? []).length > 0,
+        '推荐位里有书',
+        `${sections[0]?.sourceName} / ${sections[0]?.category}：${(sections[0]?.books ?? []).length} 本`,
+    )
+    check(
+        (home.json?.continueReading ?? []).length === 0,
+        '新账号的「继续阅读」是空的',
+        `count=${(home.json?.continueReading ?? []).length}`,
+    )
+
+    const bookUrl = `${BASE}/fixture/book/1`
+    await user.call('POST', '/api/shelf', {
+        sourceId: 'builtin:fixture-css',
+        bookUrl,
+        name: '测试小说·甲',
+        author: '作者甲',
+    })
+    await user.call('PUT', '/api/progress', {
+        sourceId: 'builtin:fixture-css',
+        bookUrl,
+        chapterUrl: `${BASE}/fixture/chapter/1/2`,
+        chapterName: '第二章',
+        chapterIndex: 1,
+        pageIndex: 4,
+    })
+
+    const home2 = await user.call('GET', '/api/home')
+    const reading = home2.json?.continueReading ?? []
+    check(
+        reading.length === 1 && reading[0]?.chapterUrl === `${BASE}/fixture/chapter/1/2`,
+        '读过之后出现在「继续阅读」里，且带出章节地址（首页不用再查一次目录）',
+        JSON.stringify(reading[0]?.chapterName),
+    )
+    check(
+        reading[0]?.pageIndex === 4,
+        '翻页位置一起带出来（翻页模式能接着上次那一页读）',
+        JSON.stringify(reading[0]?.pageIndex),
+    )
+
+    // 推荐位带缓存：第二次应当命中缓存（builtAt 不变），refresh=1 才重建
+    const cached = await user.call('GET', '/api/home')
+    check(
+        cached.json?.builtAt === home2.json?.builtAt,
+        '推荐位走缓存（第二次请求不重建）',
+        `${cached.json?.builtAt}`,
+    )
+
+    await user.call('POST', '/api/auth/logout', {})
 }
 
 console.log('\n=== 结果 ===')

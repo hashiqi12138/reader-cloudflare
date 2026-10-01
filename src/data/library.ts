@@ -23,6 +23,10 @@ export interface ShelfEntry {
     /** 最近阅读的章节，没读过则为 null */
     chapterName: string | null
     chapterIndex: number | null
+    /** 最近阅读那一章的地址。首页「继续阅读」直接用它，省得再查一次目录 */
+    chapterUrl: string | null
+    /** 翻页模式停在第几页 */
+    pageIndex: number | null
     /** 阅读进度最后的更新时间，用来区分「加进书架但没读」和「读过」 */
     readAt: number | null
 }
@@ -32,6 +36,8 @@ export interface Progress {
     chapterUrl: string
     chapterName: string
     chapterIndex: number
+    /** 翻页模式停在第几页（从 0 起）；滚动模式恒为 0 */
+    pageIndex: number
     updatedAt: number
 }
 
@@ -46,6 +52,8 @@ interface ShelfRow {
     updated_at: number
     chapter_name: string | null
     chapter_index: number | null
+    chapter_url: string | null
+    page_index: number | null
     read_at: number | null
 }
 
@@ -61,6 +69,8 @@ function rowToEntry(row: ShelfRow): ShelfEntry {
         updatedAt: row.updated_at,
         chapterName: row.chapter_name,
         chapterIndex: row.chapter_index,
+        chapterUrl: row.chapter_url,
+        pageIndex: row.page_index,
         readAt: row.read_at,
     }
 }
@@ -80,7 +90,8 @@ export async function listShelf(db: D1Database, owner: string): Promise<ShelfEnt
         .prepare(
             `SELECT s.book_key, s.source_id, s.book_url, s.name, s.author, s.cover_url,
                     s.created_at, s.updated_at,
-                    p.chapter_name, p.chapter_index, p.updated_at AS read_at
+                    p.chapter_name, p.chapter_index, p.chapter_url, p.page_index,
+                    p.updated_at AS read_at
                FROM shelf s
                LEFT JOIN reading_progress p ON p.owner = s.owner AND p.book_key = s.book_key
               WHERE s.owner = ?
@@ -100,7 +111,8 @@ export async function getShelfEntry(
         .prepare(
             `SELECT s.book_key, s.source_id, s.book_url, s.name, s.author, s.cover_url,
                     s.created_at, s.updated_at,
-                    p.chapter_name, p.chapter_index, p.updated_at AS read_at
+                    p.chapter_name, p.chapter_index, p.chapter_url, p.page_index,
+                    p.updated_at AS read_at
                FROM shelf s
                LEFT JOIN reading_progress p ON p.owner = s.owner AND p.book_key = s.book_key
               WHERE s.owner = ? AND s.book_key = ?`,
@@ -189,7 +201,7 @@ export async function getProgress(
 ): Promise<Progress | undefined> {
     const row = await db
         .prepare(
-            `SELECT book_key, chapter_url, chapter_name, chapter_index, updated_at
+            `SELECT book_key, chapter_url, chapter_name, chapter_index, page_index, updated_at
                FROM reading_progress WHERE owner = ? AND book_key = ?`,
         )
         .bind(owner, key)
@@ -198,6 +210,7 @@ export async function getProgress(
             chapter_url: string
             chapter_name: string
             chapter_index: number
+            page_index: number
             updated_at: number
         }>()
     if (!row) return undefined
@@ -206,6 +219,7 @@ export async function getProgress(
         chapterUrl: row.chapter_url,
         chapterName: row.chapter_name,
         chapterIndex: row.chapter_index,
+        pageIndex: row.page_index ?? 0,
         updatedAt: row.updated_at,
     }
 }
@@ -216,6 +230,8 @@ export interface SaveProgressInput {
     chapterUrl: string
     chapterName?: string
     chapterIndex?: number
+    /** 翻页模式停在第几页。滚动模式不传，按 0 存 */
+    pageIndex?: number
 }
 
 /**
@@ -235,21 +251,26 @@ export async function saveProgress(
         typeof input.chapterIndex === 'number' && Number.isFinite(input.chapterIndex)
             ? Math.max(0, Math.trunc(input.chapterIndex))
             : 0
+    const pageIndex =
+        typeof input.pageIndex === 'number' && Number.isFinite(input.pageIndex)
+            ? Math.max(0, Math.trunc(input.pageIndex))
+            : 0
 
     const key = bookKey(sourceId, bookUrl)
     const now = Date.now()
 
     await db
         .prepare(
-            `INSERT INTO reading_progress (owner, book_key, chapter_url, chapter_name, chapter_index, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?)
+            `INSERT INTO reading_progress (owner, book_key, chapter_url, chapter_name, chapter_index, page_index, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(owner, book_key) DO UPDATE SET
                  chapter_url = excluded.chapter_url,
                  chapter_name = excluded.chapter_name,
                  chapter_index = excluded.chapter_index,
+                 page_index = excluded.page_index,
                  updated_at = excluded.updated_at`,
         )
-        .bind(owner, key, chapterUrl, chapterName, chapterIndex, now)
+        .bind(owner, key, chapterUrl, chapterName, chapterIndex, pageIndex, now)
         .run()
 
     // 在书架里的书，阅读位置变化也应该把它顶到书架最前面
