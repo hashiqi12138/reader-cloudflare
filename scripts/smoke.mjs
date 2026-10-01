@@ -368,6 +368,13 @@ console.log('\n=== 6. 前端静态资源 ===')
         page.headers.get('content-type') ?? '',
     )
     check(pageText.includes('id="view"'), '页面里有挂载点 #view')
+    // AGPL 第 13 条：网络服务的用户必须能拿到源码。把它变成一条会失败的检查，
+    // 而不是只写在 README 里 —— 许可义务靠「记得」是保不住的
+    check(
+        /https:\/\/github\.com\/[^"']+/.test(pageText) && pageText.includes('源代码'),
+        '页面里有指向源码仓库的链接（AGPL 第 13 条）',
+        (pageText.match(/https:\/\/github\.com\/[^"']+/) ?? ['(没找到)'])[0],
+    )
 
     for (const asset of ['/app.js', '/style.css']) {
         const response = await fetch(BASE + asset)

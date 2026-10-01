@@ -459,6 +459,27 @@ label.check {
     padding: 6px 12px 24px;
 }
 
+/* 页脚：AGPL 第 13 条要求网络服务的用户能拿到源码，链接就放在这里 */
+.footer {
+    max-width: 860px;
+    margin: 0 auto;
+    padding: 14px 12px 28px;
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    font-size: 0.85rem;
+    color: var(--text-dim);
+    border-top: 1px solid var(--border);
+}
+
+.footer a {
+    color: var(--text-dim);
+}
+
+.footer a:hover {
+    color: var(--accent);
+}
+
 @media (max-width: 560px) {
     .topbar .brand {
         display: none;
