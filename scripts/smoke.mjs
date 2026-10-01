@@ -1412,7 +1412,7 @@ console.log('\n=== 14. 字段规则里的 {{}} 模板 ===')
     check(!left.some((s) => s.id === id), '模板测试源已清理')
 }
 
-console.log('\n=== 15. 沙箱助手（java.getString / java.timeFormat） ===')
+console.log('\n=== 15. 沙箱助手（java.getString / timeFormat / md5 / hex / UI no-op） ===')
 {
     /**
      * `java.getString(规则)` 让沙箱里的脚本回过头去跑一条引擎规则 —— 真实书源里
@@ -1451,6 +1451,13 @@ console.log('\n=== 15. 沙箱助手（java.getString / java.timeFormat） ===')
                     wordCount: `@js:java.timeFormatUTC(${fixedMs}, 'yyyy-MM-dd HH:mm', 0)`,
                     // 第二个参数：在给定内容上求值，而不是当前节点
                     intro: `@js:java.getString('$.name', '{"name":"另一段内容"}')`,
+                    /**
+                     * 摘要与十六进制助手，以及**纯 UI 动作**。
+                     * toast / refreshExplore 在服务端没有界面可弹，但书源里它们常和取数据
+                     * 写在同一个 try 里，缺一个就是「not a function」把整条规则带走 ——
+                     * 所以必须有，且必须是 no-op 而不是抛错。
+                     */
+                    author: `@js:java.md5Encode('abc') + '|' + java.hexEncodeToString('中') + '|' + java.hexDecodeToString('e4b8ad') + '|' + (java.toast('调试') === undefined ? 'toast-ok' : 'toast-bad') + '|' + (java.refreshExplore() === undefined ? 'refresh-ok' : 'refresh-bad') + '|' + (java.getWebViewUA().indexOf('Chrome/') > 0 ? 'ua-ok' : 'ua-bad')`,
                 },
                 ruleBookInfo: { name: '@css:h1.book-name@text', tocUrl: '@css:a.toc-link@href' },
                 ruleToc: {
@@ -1485,6 +1492,11 @@ console.log('\n=== 15. 沙箱助手（java.getString / java.timeFormat） ===')
             book.intro === '另一段内容',
             'java.getString 的第二个参数：在给定内容上求值',
             String(book.intro),
+        )
+        check(
+            book.author === '900150983cd24fb0d6963f7d28e17f72|e4b8ad|中|toast-ok|refresh-ok|ua-ok',
+            'md5 / hex 互转正确，且 toast、refreshExplore、getWebViewUA 不打断规则',
+            String(book.author),
         )
     }
 
@@ -1604,6 +1616,132 @@ console.log('\n=== 16. JS 里的连接符不能被切碎 ===')
     await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
     const left = (await getJson('/api/sources')).json?.sources ?? []
     check(!left.some((s) => s.id === id), 'JS 连接符测试源已清理')
+}
+
+console.log('\n=== 17. @js: 列表规则（接口型书源的关键路径） ===')
+{
+    /**
+     * 接口型书源（音频、漫画）的 `bookList` 大量写成整条 `@js:`，脚本返回一个数组。
+     * 这里有三处必须同时成立，缺一处就是**一条都搜不到、而且不报错**：
+     *
+     *   1. `@js:` 规则不能被 `detectKind` 归进 JSOUP 简写 —— 那样会解析出空步骤，
+     *      于是「整页变成一个条目」，后续字段规则在整页上当然取不到 `$.name`。
+     *   2. 数组结果必须**逐个**返回，不能被换行 join 成一条（N 个条目只剩 1 个）。
+     *   3. 条目的 `source` 必须是**条目自己的文本**，`$.name` 与 `result` 都在这份文本上求值。
+     *
+     * 三条都是静默失败，所以这里断言的是「条目数」和「字段值」，而不是「接口没报错」。
+     */
+    const id = `user:${BASE}`
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: 'JS 列表规则测试源',
+                bookSourceUrl: BASE,
+                searchUrl: `${BASE}/fixture/api/search?q={{key}}&p={{page}}`,
+                ruleSearch: {
+                    // 返回 3 条 JSON 字符串（真实书源最常见的形态）
+                    bookList: `@js:(function(){ var o = []; for (var i = 1; i <= 3; i++) { o.push(JSON.stringify({ name: '第' + i + '本', author: '作者' + i, url: '/fixture/book/' + i })); } return o; })()`,
+                    name: '$.name',
+                    author: '$.author',
+                    bookUrl: '$.url',
+                    // 同一批条目上，`result` 必须是条目自己（而不是整页响应）
+                    kind: '@js:JSON.parse(result).author + "·条目内"',
+                },
+                ruleToc: {},
+                ruleContent: {},
+            },
+        ]),
+    )
+
+    const listRes = await call('POST', '/api/search', { keyword: '测试', sourceIds: [id] })
+    const listPer = listRes.json?.sources?.[0]
+    const listBooks = listPer?.books ?? []
+    check(
+        listBooks.length === 3,
+        '@js: 列表规则返回 3 条就是 3 个条目（不会被拍平成 1 条）',
+        listPer?.error ?? `count=${listBooks.length}`,
+    )
+    check(
+        listBooks[0]?.name === '第1本' && listBooks[2]?.name === '第3本',
+        '每个条目的 $.字段 取自条目自己的 JSON，而不是整页',
+        JSON.stringify(listBooks.map((b) => b.name)),
+    )
+    check(
+        listBooks[0]?.kind === '作者1·条目内',
+        '条目内的 result 绑定的是条目文本',
+        String(listBooks[0]?.kind),
+    )
+    check(
+        String(listBooks[1]?.bookUrl ?? '') === `${BASE}/fixture/book/2`,
+        '条目里的相对地址按书源地址补全',
+        String(listBooks[1]?.bookUrl),
+    )
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+
+    // ---- `@js:` 返回对象数组（不是字符串）也不能退化成 [object Object] ----
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: 'JS 对象数组测试源',
+                bookSourceUrl: BASE,
+                searchUrl: `${BASE}/fixture/api/search?q={{key}}&p={{page}}`,
+                ruleSearch: {
+                    bookList: `@js:[{ name: '甲', author: '乙', url: '/fixture/book/1' }, { name: '丙', author: '丁', url: '/fixture/book/2' }]`,
+                    name: '$.name',
+                    author: '$.author',
+                    bookUrl: '$.url',
+                },
+                ruleToc: {},
+                ruleContent: {},
+            },
+        ]),
+    )
+    const objRes = await call('POST', '/api/search', { keyword: '测试', sourceIds: [id] })
+    const objBooks = objRes.json?.sources?.[0]?.books ?? []
+    check(
+        objBooks.length === 2 && objBooks[0]?.name === '甲' && objBooks[1]?.author === '丁',
+        '@js: 返回对象数组时逐条 JSON 化（不是 [object Object]）',
+        JSON.stringify(objBooks.map((b) => `${b.name}/${b.author}`)),
+    )
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+
+    // ---- 返回 HTML 片段数组时，条目要按 HTML 解析，后续 CSS 规则照常可用 ----
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: 'JS HTML 条目测试源',
+                bookSourceUrl: BASE,
+                searchUrl: `${BASE}/fixture/api/search?q={{key}}&p={{page}}`,
+                ruleSearch: {
+                    bookList: `@js:(function(){ return ['<li><h3>庚书</h3><a href="/fixture/book/1">详情</a></li>', '<li><h3>辛书</h3><a href="/fixture/book/2">详情</a></li>']; })()`,
+                    name: 'h3@text',
+                    author: 'h3@text',
+                    bookUrl: 'a@href',
+                },
+                ruleToc: {},
+                ruleContent: {},
+            },
+        ]),
+    )
+    const htmlRes = await call('POST', '/api/search', { keyword: '测试', sourceIds: [id] })
+    const htmlBooks = htmlRes.json?.sources?.[0]?.books ?? []
+    check(
+        htmlBooks.length === 2 && htmlBooks[0]?.name === '庚书' && htmlBooks[1]?.name === '辛书',
+        '@js: 返回 HTML 片段数组时，条目按 HTML 解析、CSS 字段规则可用',
+        JSON.stringify(htmlBooks.map((b) => b.name)),
+    )
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+
+    const left = (await getJson('/api/sources')).json?.sources ?? []
+    check(!left.some((s) => s.id === id), 'JS 列表规则测试源已清理')
 }
 
 console.log('\n=== 结果 ===')

@@ -18,7 +18,7 @@ import { UnsupportedRuleError, type RuleContext, type RuleResult } from './types
 import { parseJsoupRule } from './jsoup'
 import { extractValues, parseHtml, reparseFragment, selectNodes } from './select'
 import { jsonPathToStrings } from './jsonpath'
-import { runInSandbox, sandboxResultToString } from './js'
+import { runInSandbox, sandboxResultToString, sandboxResultToStrings } from './js'
 import type { SandboxGetString, SandboxLimits } from './js'
 import { classifyTemplate, hasRuleSyntax, stripRuleMarker, templatePattern } from './template'
 import { splitRuleText } from './ruleText'
@@ -439,8 +439,11 @@ async function evalSelectorChain(
             },
             sandboxLimits(current, ctx),
         )
-        values = [sandboxResultToString(result)]
-        current = selectionFromText(values[0] ?? '', current.source)
+        // 数组要**逐个**返回，不能拍平成一条字符串：列表规则里的 N 条一旦被
+        // 换行 join 成一条，N 个条目就只剩 1 个（`sandboxResultToString` 对数组
+        // 就是那么做的），而对象数组还会退化成 `[object Object]`。
+        values = sandboxResultToStrings(result)
+        current = selectionFromText(values.join('\n'), current.source)
     }
 
     return values
@@ -469,7 +472,9 @@ async function evalSingleSegment(
             { ...baseGlobals(ctx), result: ctx.result ?? sel.source, src: sel.source },
             sandboxLimits(sel, ctx),
         )
-        return [sandboxResultToString(result)]
+        // 逐个返回（见 evalSelectorChain 里的同一处说明）：`@js:` 列表规则
+        // 返回数组时，条目数必须等于数组长度
+        return sandboxResultToStrings(result)
     }
 
     let kind = detectKind(head)
@@ -499,7 +504,8 @@ async function evalSingleSegment(
         },
         sandboxLimits(sel, ctx),
     )
-    return [sandboxResultToString(result)]
+    // 同上：选择器 + `@js:` 尾巴用在列表规则上时也一样
+    return sandboxResultToStrings(result)
 }
 
 /**
@@ -577,28 +583,41 @@ export async function analyzeSelections(
         if (asField) kind = { kind: 'json', body: asField }
     }
 
+    /**
+     * JS 列表规则（整条 `@js:`，或选择器后面接 `<js>` 段）必须走「取字符串」那条路。
+     *
+     * 不能进节点那条路：`@js:...` 会被 `detectKind` 归进 JSOUP 简写
+     * （`@js:` 里 `@` 前面是空串，判定维持 JSOUP），`parseJsoupRule` 对它解析出
+     * **空步骤**，`selectNodes` 于是原样返回根节点 —— 也就是「**整页变成一个条目**」。
+     * 接口型书源（音频、漫画）的列表规则几乎全是这个形态，症状是
+     * **一条都搜不到、而且全程不报错**。
+     */
+    const isJsRule = /^@js:/.test(selector) || /<js[\s>]/i.test(selector)
+
     let nodes: any[] | null = null
     let reversed = false
 
-    if (kind.kind === 'css') {
-        nodes = selectByCss(sel, splitCssExtract(kind.body).css)
-    } else if (kind.kind === 'xpath') {
-        // 列表规则同样要把 `//` 当相对路径用：目录规则要的是「本页里的章节项」，
-        // 而不是"全文档里的第一个"
-        const expression = toRelativeXPath(kind.body)
-        const collected: any[] = []
-        for (const node of sel.nodes) {
-            const outcome = runXPath(sel.$, expression, node)
-            if (outcome.kind === 'nodes') {
-                // 属性节点不能作为后续规则继续筛选的上下文，丢掉
-                collected.push(...outcome.nodes.filter((n) => !isAttributeView(n)))
+    if (!isJsRule) {
+        if (kind.kind === 'css') {
+            nodes = selectByCss(sel, splitCssExtract(kind.body).css)
+        } else if (kind.kind === 'xpath') {
+            // 列表规则同样要把 `//` 当相对路径用：目录规则要的是「本页里的章节项」，
+            // 而不是"全文档里的第一个"
+            const expression = toRelativeXPath(kind.body)
+            const collected: any[] = []
+            for (const node of sel.nodes) {
+                const outcome = runXPath(sel.$, expression, node)
+                if (outcome.kind === 'nodes') {
+                    // 属性节点不能作为后续规则继续筛选的上下文，丢掉
+                    collected.push(...outcome.nodes.filter((n) => !isAttributeView(n)))
+                }
             }
+            nodes = collected
+        } else if (kind.kind === 'jsoup') {
+            const plan = parseJsoupRule(kind.body)
+            nodes = selectNodes(sel.$, sel.nodes, plan.steps)
+            reversed = plan.reverse
         }
-        nodes = collected
-    } else if (kind.kind === 'jsoup') {
-        const plan = parseJsoupRule(kind.body)
-        nodes = selectNodes(sel.$, sel.nodes, plan.steps)
-        reversed = plan.reverse
     }
 
     if (nodes) {
@@ -612,11 +631,18 @@ export async function analyzeSelections(
         return nodes.map((node) => ({ $: sel.$, nodes: [node], source: sel.source }))
     }
 
-    // JSONPath 这类列表规则给不出节点，退化成「取字符串再各自解析」
-    const values = await analyzeStrings(sel, selector, ctx)
+    // JSONPath / JS 这类列表规则给不出节点，退化成「取字符串再各自解析」
+    const values = await analyzeStrings(sel, isJsRule ? trimmed : selector, ctx)
 
-    if (kind.kind !== 'json') {
-        return values.map((text) => selectionFromText(text, sel.source))
+    if (isJsRule || kind.kind !== 'json') {
+        /**
+         * 条目的 `source` 必须是**条目自己的文本**，不能沿用整页。
+         *
+         * 后续字段规则（`$.name`、`@js:JSON.parse(result).name`）都在这份文本上求值：
+         * 沿用整页的话，`$.name` 是在整页 JSON 的根节点上找键 —— 根节点上没有 name，
+         * 于是**每个条目都取不到字段、全被丢掉**，表现就是「搜索 0 条、不报错」。
+         */
+        return values.map((text) => selectionFromText(text, text))
     }
 
     /**

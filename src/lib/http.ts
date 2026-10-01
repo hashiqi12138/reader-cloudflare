@@ -12,8 +12,16 @@
 
 import type { FetchPlan } from '../engine/types'
 
-/** 单次响应最多读取多少字节，超出直接截断并标记 */
-const MAX_BYTES = 4 * 1024 * 1024
+/**
+ * 单次响应最多读取多少字节，超出直接截断并标记
+ *
+ * 上限是为了挡住「被重定向到视频/下载页」这类意外，而不是为了卡正文长度 ——
+ * 所以它必须高于**正常页面的最大体积**。原先定 4 MiB 太紧：
+ * 音频源（喜马拉雅）的一章接口返回 5 MB JSON，正文直接读不出来，
+ * 报的还是「体积超限」这种与书源无关的错。现在放到 16 MiB，
+ * 既覆盖了这类接口型书源，也仍远低于 Workers 的 128 MB 内存上限。
+ */
+const MAX_BYTES = 16 * 1024 * 1024
 
 export class UpstreamError extends Error {
     constructor(

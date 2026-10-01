@@ -42,6 +42,7 @@ import {
 
 import type { SandboxHttp } from './types'
 import { DEFAULT_TIME_OFFSET_HOURS, formatJavaTime } from '../lib/javatime'
+import { md5Hex } from '../lib/hash'
 
 // 相对路径 import WASM：wrangler 会把它编译成 WebAssembly.Module 直接交给运行时。
 // 这是 Workers 上唯一可用的加载方式 —— 运行时既禁止 WebAssembly.compile，
@@ -102,6 +103,40 @@ var java = {
   encodeURI: function (s) { return encodeURIComponent(String(s)) },
   htmlFormat: function (s) { return String(s).replace(/<[^>]*>/g, '') },
   log: function (s) { __host.log(String(s)) },
+
+  // MD5 走同步桥，实现放在宿主侧（src/lib/hash.ts）—— WebCrypto 不提供 MD5，
+  // 放宿主侧还能直接拿 node:crypto 对拍。禁漫天堂API、书音M 都靠它拼签名。
+  md5Encode: function (s) { return __host.md5(String(s)) },
+
+  // 十六进制与字符串互转，按 UTF-8 取字节（和 Java 的写法一致）
+  hexDecodeToString: function (s) {
+    var t = String(s).replace(/[^0-9a-fA-F]/g, '')
+    var esc = ''
+    for (var i = 0; i + 1 < t.length; i += 2) esc += '%' + t.substr(i, 2)
+    try { return decodeURIComponent(esc) } catch (e) { return esc }
+  },
+  hexEncodeToString: function (s) {
+    var enc = encodeURIComponent(String(s))
+    var out = ''
+    for (var i = 0; i < enc.length; i++) {
+      // encodeURIComponent 给的是大写十六进制，这里统一转小写 ——
+      // 与 md5Encode 的输出习惯一致，hexDecodeToString 大小写都收
+      if (enc.charAt(i) === '%') { out += enc.substr(i + 1, 2).toLowerCase(); i += 2 }
+      else { out += ('0' + enc.charCodeAt(i).toString(16)).slice(-2) }
+    }
+    return out
+  },
+
+  // 纯 UI 动作。服务端没有界面可弹，但**不能没有这些函数** ——
+  // 书源里它们常和取数据写在同一个 try 里，缺一个就是
+  // 「not a function」把整条规则带走（线上 12 条源在用）。这里记进日志，
+  // 既不丢信息，也不让规则失败。
+  toast: function (s) { __host.log('[toast] ' + String(s)) },
+  longToast: function (s) { __host.log('[toast] ' + String(s)) },
+  refreshExplore: function () {},
+  getWebViewUA: function () {
+    return 'Mozilla/5.0 (Linux; Android 13; Pixel 7 Build/TQ3A.230805.001; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/114.0.5735.196 Mobile Safari/537.36'
+  },
 
   // 把一条规则当成字符串求值。当前节点只有规则求值层知道，所以要过宿主桥。
   // 时机上它是 asyncify 的：脚本里是同步调用，宿主侧 await。
@@ -245,6 +280,7 @@ export async function runInSandbox(
 
         defineHostFn('b64encode', (arg) => vm.newString(btoa(String(vm.dump(arg)))))
         defineHostFn('b64decode', (arg) => vm.newString(atob(String(vm.dump(arg)))))
+        defineHostFn('md5', (arg) => vm.newString(md5Hex(String(vm.dump(arg)))))
         defineHostFn('log', (arg) => {
             logs.push(String(vm.dump(arg)))
         })
