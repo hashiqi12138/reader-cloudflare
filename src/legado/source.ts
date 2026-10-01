@@ -174,6 +174,38 @@ export async function buildPlan(
     }
 }
 
+function hasHeader(headers: Record<string, string>, name: string): boolean {
+    const target = name.toLowerCase()
+    return Object.keys(headers).some((key) => key.toLowerCase() === target)
+}
+
+/**
+ * 取媒体（图片/音频/文件）用的请求头
+ *
+ * 与页面请求只差两处，但这两处决定媒体能不能取回来：
+ *
+ *   1. **Referer 要用书源站点的地址**。防盗链校验的正是它，而图片 CDN 的域名
+ *      通常与站点域名完全不同 —— 拿媒体地址自己的 origin 当 Referer 一定过不了。
+ *   2. **Accept 放宽成通配**。默认头声明只要 html，部分 CDN 会照此直接返回 406。
+ *
+ * 书源自己配了 Referer 时以书源为准：有些站点的媒体确实要专门的 Referer 或 Cookie。
+ */
+export function mediaRequestHeaders(source: BookSource, mediaUrl: string): Record<string, string> {
+    const fromSource = parseSourceHeaders(source.header)
+    const headers: Record<string, string> = { ...defaultHeaders(mediaUrl), ...fromSource }
+
+    headers.Accept = '*/*'
+
+    if (!hasHeader(fromSource, 'referer')) {
+        try {
+            headers.Referer = new URL(source.bookSourceUrl).origin + '/'
+        } catch {
+            /* bookSourceUrl 不是合法地址就保持默认 */
+        }
+    }
+    return headers
+}
+
 /**
  * 构造沙箱内 `java.ajax` / `java.get` / `java.post` 用的取网能力
  *

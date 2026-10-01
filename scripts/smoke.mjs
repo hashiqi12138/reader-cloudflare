@@ -95,8 +95,12 @@ console.log('\n=== 2. 书源列表 ===')
 const sources = await getJson('/api/sources')
 check(sources.status === 200, 'GET /api/sources 返回 200')
 const list = sources.json?.sources ?? []
-// 必须是三个：对照验证要求 CSS / XPath / JS 三条路径都在场
-check(list.length >= 3, '三个测试书源齐备（CSS / XPath / JS 各一）', `count=${list.length}`)
+// 必须是五个：对照验证要求 CSS / XPath / JS / JSON / @js:result 五条路径都在场
+check(
+    list.length >= 5,
+    '五个测试书源齐备（CSS / XPath / JS / JSON / @js:result 各一）',
+    `count=${list.length}`,
+)
 if (list.length === 0) {
     console.error('\n没有可用书源。是否忘记在 .dev.vars 里设置 ENABLE_FIXTURE=true？')
     process.exit(1)
@@ -171,8 +175,12 @@ async function runChain(source, label) {
 }
 
 console.log('\n=== 3. 逐源跑通链路 ===')
+// 第 3、4 节只跑**文本源**：它们比的是三种规则方言在同一个页面上的提取结果。
+// 媒体源（图片/音频/文件）的正文形态本来就不同，混进来会让「逐字一致」这个断言失真 ——
+// 比如图片源返回的根本不是文字，比出来必然不等。它们在下面第 13 节单独验证。
+const textSources = list.filter((source) => (source.type ?? 0) === 0)
 const results = {}
-for (const source of list) {
+for (const source of textSources) {
     console.log(`\n--- ${source.name} ---`)
     results[source.id] = await runChain(source, source.id)
 }
@@ -873,58 +881,92 @@ console.log('\n=== 11. 分页目录（nextTocUrl） ===')
     //
     // 顺带覆盖 `text.下一页@href` 这种「按文字找链接」的写法 —— 真实书源就是这么写翻页的。
 
-    const id = `user:${BASE}`
-    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+    // 两种翻页写法都要走通：
+    //   - `text.下一页@href`：HTML 里的链接，绝大多数站点这样写
+    //   - `@js:` 返回**地址数组**：接口型站点一次给出后面所有页，喜马拉雅就是这样
+    //
+    // 后者如果被当成「一个地址」处理，几条地址会被 URL 解析器粘成一条
+    // （解析器会把换行当非法字符删掉），得到一个必然 404 的怪地址 ——
+    // 「只取第一页」于是伪装成「上游报错」，排查方向被带偏。
+    const forms = [
+        { label: 'HTML 链接', nextTocUrl: 'text.下一页@href', expect: 3 },
+        {
+            label: 'JS 地址数组',
+            nextTocUrl:
+                `@js:(function(){var m=String(baseUrl).match(/\\/paged-toc\\/(\\w+)\\/(\\d+)$/);` +
+                `if(!m){return []} var n=Number(m[2]); if(n>=2){return []}` +
+                `var out=[]; for(var i=2;i<=3;i++){out.push('${BASE}/fixture/paged-toc/'+m[1]+'/'+i)}` +
+                `return out})()`,
+            expect: 3,
+        },
+        {
+            // 第 1 页拿到 1 章之后，下一页指向一个必然 404 的地址。
+            // 正确行为是「保留已拿到的章节 + 给出 warning」，而不是把整份目录丢掉。
+            label: '下一页失效',
+            nextTocUrl: `@js:['${BASE}/fixture/paged-toc/nope']`,
+            expect: 1,
+            expectWarning: true,
+        },
+    ]
 
-    await call(
-        'POST',
-        '/api/sources',
-        JSON.stringify([
-            {
-                bookSourceName: '分页目录测试源',
-                bookSourceUrl: BASE,
-                searchUrl: `${BASE}/fixture/search?q={{key}}&p={{page}}`,
-                ruleSearch: {
-                    bookList: '.result-item',
-                    name: 'h3.title@text',
-                    bookUrl: 'h3.title a@href',
+    for (const form of forms) {
+        const id = `user:${BASE}`
+        await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+
+        await call(
+            'POST',
+            '/api/sources',
+            JSON.stringify([
+                {
+                    bookSourceName: `分页目录测试源（${form.label}）`,
+                    bookSourceUrl: BASE,
+                    searchUrl: `${BASE}/fixture/search?q={{key}}&p={{page}}`,
+                    ruleSearch: {
+                        bookList: '.result-item',
+                        name: 'h3.title@text',
+                        bookUrl: 'h3.title a@href',
+                    },
+                    ruleToc: {
+                        chapterList: '@css:ul.chapter-list li',
+                        chapterName: '@css:a@text',
+                        chapterUrl: '@css:a@href',
+                        nextTocUrl: form.nextTocUrl,
+                    },
+                    ruleContent: { content: '@css:div#content@textNodes' },
                 },
-                ruleToc: {
-                    chapterList: '@css:ul.chapter-list li',
-                    chapterName: '@css:a@text',
-                    chapterUrl: '@css:a@href',
-                    // 按文字找「下一页」链接，与真实书源的写法一致
-                    nextTocUrl: 'text.下一页@href',
-                },
-                ruleContent: { content: '@css:div#content@textNodes' },
-            },
-        ]),
-    )
+            ]),
+        )
 
-    const toc = await getJson(
-        `/api/toc?sourceId=${encodeURIComponent(id)}&url=${encodeURIComponent(`${BASE}/fixture/paged-toc/1/1`)}`,
-    )
-    const chapters = toc.json?.chapters ?? []
-    check(toc.status === 200, '目录接口返回 200', `status=${toc.status}`)
-    check(
-        chapters.length === 3,
-        '两页目录被合并成 3 章（不是只取第一页的 1 章）',
-        toc.json?.error ?? `count=${chapters.length}`,
-    )
-    check(
-        chapters[0]?.name === '第一章 起风了',
-        '章节顺序以第一页的为准',
-        JSON.stringify(chapters[0]?.name),
-    )
-    check(
-        new Set(chapters.map((c) => c.url)).size === chapters.length,
-        '合并后没有重复章节',
-        JSON.stringify(chapters.map((c) => c.name)),
-    )
+        const toc = await getJson(
+            `/api/toc?sourceId=${encodeURIComponent(id)}&url=${encodeURIComponent(`${BASE}/fixture/paged-toc/1/1`)}`,
+        )
+        const chapters = toc.json?.chapters ?? []
+        check(toc.status === 200, `[${form.label}] 目录接口返回 200`, `status=${toc.status}`)
+        check(
+            chapters.length === form.expect,
+            `[${form.label}] 拿到 ${form.expect} 章`,
+            toc.json?.error ?? `count=${chapters.length}`,
+        )
+        check(
+            chapters[0]?.name === '第一章 起风了',
+            `[${form.label}] 章节顺序以第一页的为准`,
+            JSON.stringify(chapters[0]?.name),
+        )
+        check(
+            new Set(chapters.map((c) => c.url)).size === chapters.length,
+            `[${form.label}] 合并后没有重复章节`,
+            JSON.stringify(chapters.map((c) => c.name)),
+        )
+        check(
+            form.expectWarning ? Boolean(toc.json?.warning) : !toc.json?.warning,
+            `[${form.label}] ${form.expectWarning ? '给出了「目录不完整」说明' : '没有多余的告警'}`,
+            String(toc.json?.warning ?? ''),
+        )
 
-    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+        await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+    }
     const left = (await getJson('/api/sources')).json?.sources ?? []
-    check(!left.some((s) => s.id === id), '分页目录测试源已清理')
+    check(!left.some((s) => s.id === `user:${BASE}`), '分页目录测试源已清理（两种写法各一轮）')
 }
 
 console.log('\n=== 12. 分页正文（nextContentUrl） ===')
@@ -1002,10 +1044,226 @@ console.log('\n=== 12. 分页正文（nextContentUrl） ===')
     check(!left.some((s) => s.id === id), '分页正文测试源已清理')
 }
 
+console.log('\n=== 13. 图片 / 音频 / 文件源 ===')
+{
+    /**
+     * 这三类源原先一律走文本那条路，表现是「读不出来」：
+     *   - 图片源：返回一串 `<img src=...>` 源码，前端当正文渲染成满屏标签
+     *   - 音频源：content 为空时报「未配置正文规则」；有 content 的只拿到一条网址文本
+     *   - 文件源：content 为空（下载地址在 ruleBookInfo.downloadUrls 里，压根没读）
+     *
+     * 这里逐类型验证返回形态、媒体代取、Range 透传与签名保护。
+     */
+    const media = (path) => getJson(path)
+
+    // ---- 图片源 ----
+    const imageChapter = `${BASE}/fixture/image-chapter/img1/1/1`
+    const imageRes = await media(
+        `/api/content?sourceId=${encodeURIComponent('builtin:fixture-image')}&url=${encodeURIComponent(imageChapter)}`,
+    )
+    const imageList = imageRes.json?.images ?? []
+    check(imageRes.json?.kind === 'images', '图片源返回 kind=images', imageRes.json?.error ?? '')
+    check(
+        imageList.length === 4,
+        '翻页把两页的图片都取回来了（第 1 页 2 张 + 第 2 页 2 张，含一个陷阱地址）',
+        `count=${imageList.length}`,
+    )
+    check(
+        imageList.every((img) => String(img.url).includes('/fixture/media/')),
+        '取到的是真地址而不是占位图',
+        JSON.stringify(imageList.map((img) => img.url)),
+    )
+    check(
+        !imageList.some((img) => img.url.includes('placeholder')),
+        '占位图（src 上的 1x1 gif）没有被当成图片',
+    )
+    check(
+        imageList.every((img) => String(img.proxyUrl ?? '').startsWith('/api/media/')),
+        '图片地址换成了本站的签名代取地址',
+    )
+
+    // 代取回来的字节必须与上游**逐字节一致**，否则「能打开」只是假象
+    const directPng = await fetch(`${BASE}/fixture/media/page-1.png`)
+    const directBytes = new Uint8Array(await directPng.arrayBuffer())
+    const proxiedPng = await fetch(`${BASE}${imageList[0]?.proxyUrl ?? ''}`)
+    const proxiedBytes = new Uint8Array(await proxiedPng.arrayBuffer())
+    check(proxiedPng.status === 200, '图片代取返回 200', `status=${proxiedPng.status}`)
+    check(
+        proxiedPng.headers.get('content-type')?.startsWith('image/png') === true,
+        '图片代取带回了正确的 content-type',
+        proxiedPng.headers.get('content-type') ?? '',
+    )
+    check(
+        proxiedBytes.length === directBytes.length &&
+            proxiedBytes.every((b, i) => b === directBytes[i]),
+        '代取的字节与上游逐字节一致',
+        `代理=${proxiedBytes.length} 上游=${directBytes.length}`,
+    )
+
+    // 「图片地址」其实指向 HTML 时必须降级：这个接口是**同源**的，
+    // 以 text/html 透传等于在我们自己的域上执行别人的脚本，
+    // 而 localStorage 里正放着身份令牌。
+    const trapLink = imageList.find((img) => String(img.url).includes('not-really.png'))
+    check(
+        Boolean(trapLink),
+        '陷阱地址确实被取回来了（否则下面两条断言测不到东西）',
+        JSON.stringify(imageList.map((img) => img.url)),
+    )
+    const trapResponse = await fetch(`${BASE}${trapLink?.proxyUrl ?? ''}`)
+    check(
+        trapResponse.headers.get('content-type') === 'application/octet-stream',
+        '上游返回 text/html 时代取接口降级成 octet-stream',
+        trapResponse.headers.get('content-type') ?? '',
+    )
+    check(
+        String(trapResponse.headers.get('content-disposition') ?? '').startsWith('attachment'),
+        '并且加了 Content-Disposition，不会在同源下被执行',
+        trapResponse.headers.get('content-disposition') ?? '',
+    )
+
+    // ---- 音频源：正文规则取 <audio> 的 src ----
+    const audioChapter = `${BASE}/fixture/audio-chapter/aud1/1`
+    const audioRes = await media(
+        `/api/content?sourceId=${encodeURIComponent('builtin:fixture-audio')}&url=${encodeURIComponent(audioChapter)}`,
+    )
+    check(audioRes.json?.kind === 'audio', '音频源返回 kind=audio', audioRes.json?.error ?? '')
+    check(
+        String(audioRes.json?.audio?.url ?? '').endsWith('/fixture/media/tone.mp3'),
+        '音频源取到的是音频直链（不是页面地址、也不是一段 HTML）',
+        audioRes.json?.audio?.url ?? '',
+    )
+
+    const proxiedAudio = await fetch(`${BASE}${audioRes.json?.audio?.proxyUrl ?? ''}`)
+    const audioBytes = new Uint8Array(await proxiedAudio.arrayBuffer())
+    check(proxiedAudio.status === 200, '音频代取返回 200', `status=${proxiedAudio.status}`)
+    check(
+        proxiedAudio.headers.get('content-type') === 'audio/mpeg',
+        '音频代取带回了 audio/mpeg',
+        proxiedAudio.headers.get('content-type') ?? '',
+    )
+    check(audioBytes.length === 4096, '音频字节完整（4096）', `len=${audioBytes.length}`)
+    check(
+        proxiedAudio.headers.get('accept-ranges') === 'bytes',
+        '音频代取保留了 accept-ranges（否则拖不动进度条）',
+        proxiedAudio.headers.get('accept-ranges') ?? '',
+    )
+
+    // Range 必须透传：只测 200 的话，「Range 有没有传下去」根本没被验证
+    const ranged = await fetch(`${BASE}${audioRes.json?.audio?.proxyUrl ?? ''}`, {
+        headers: { Range: 'bytes=10-19' },
+    })
+    const rangedBytes = new Uint8Array(await ranged.arrayBuffer())
+    check(ranged.status === 206, '带 Range 的请求返回 206', `status=${ranged.status}`)
+    check(
+        ranged.headers.get('content-range') === 'bytes 10-19/4096',
+        '206 带回了正确的 content-range',
+        ranged.headers.get('content-range') ?? '',
+    )
+    check(rangedBytes.length === 10, '只返回了请求的那 10 个字节', `len=${rangedBytes.length}`)
+    check(
+        rangedBytes.every((b, i) => b === audioBytes[10 + i]),
+        '切片内容与完整内容对应位置一致',
+    )
+
+    // ---- 音频源：不写正文规则，章节地址本身就是直链 ----
+    const noRule = await media(
+        `/api/content?sourceId=${encodeURIComponent('builtin:fixture-audio-norule')}&url=${encodeURIComponent(`${BASE}/fixture/media/tone.mp3`)}`,
+    )
+    check(
+        noRule.json?.kind === 'audio',
+        '无正文规则的音频源返回 kind=audio',
+        noRule.json?.error ?? '',
+    )
+    check(
+        String(noRule.json?.audio?.url ?? '').endsWith('/fixture/media/tone.mp3'),
+        'content 为空时回落到章节地址（这类源最常见的写法）',
+        noRule.json?.audio?.url ?? '',
+    )
+
+    // ---- 文件源 ----
+    const fileBook = `${BASE}/fixture/book/file1`
+    const fileToc = await media(
+        `/api/toc?sourceId=${encodeURIComponent('builtin:fixture-file')}&url=${encodeURIComponent(fileBook)}`,
+    )
+    check(
+        fileToc.json?.chapters?.length === 1 && fileToc.json?.synthetic === true,
+        '文件源没有目录时给一个合成的下载入口（否则整本书打不开）',
+        JSON.stringify(fileToc.json?.chapters ?? fileToc.json?.error ?? ''),
+    )
+
+    const fileRes = await media(
+        `/api/content?sourceId=${encodeURIComponent('builtin:fixture-file')}&url=${encodeURIComponent(fileBook)}`,
+    )
+    const downloads = fileRes.json?.downloads ?? []
+    check(
+        fileRes.json?.kind === 'downloads',
+        '文件源返回 kind=downloads',
+        fileRes.json?.error ?? '',
+    )
+    check(
+        downloads.length === 1 &&
+            String(downloads[0]?.url ?? '').endsWith('/fixture/media/book.txt'),
+        '下载地址取自 ruleBookInfo.downloadUrls',
+        JSON.stringify(downloads),
+    )
+    check(downloads[0]?.name === 'book.txt', '下载项带上了文件名', String(downloads[0]?.name))
+
+    const proxiedFile = await fetch(`${BASE}${downloads[0]?.proxyUrl ?? ''}`)
+    const fileBody = await proxiedFile.text()
+    check(proxiedFile.status === 200, '文件代取返回 200', `status=${proxiedFile.status}`)
+    check(
+        String(proxiedFile.headers.get('content-disposition') ?? '').startsWith('attachment'),
+        '文件代取强制下载（带 Content-Disposition）',
+        proxiedFile.headers.get('content-disposition') ?? '',
+    )
+    check(
+        fileBody.includes('这是下载文件的内容'),
+        '文件内容取回正确',
+        JSON.stringify(fileBody.slice(0, 30)),
+    )
+
+    // ---- 签名保护：代取接口不能被当成开放代理 ----
+    const validProxy = String(imageList[0]?.proxyUrl ?? '')
+    const dot = validProxy.lastIndexOf('.')
+    const head = validProxy.slice(0, dot)
+    const signature = validProxy.slice(dot + 1)
+
+    // 改签名要改**开头**那一位：base64url 的最后一个字符里有几位是被丢弃的
+    // （32 字节的摘要编成 43 个字符，最后一位只有 2 位有效），
+    // 改末位有可能解出**完全相同的字节**，那样的断言是碰运气。
+    const forged = `${head}.${signature[0] === 'A' ? 'B' : 'A'}${signature.slice(1)}`
+    const forgedResponse = await fetch(`${BASE}${forged}`)
+    check(
+        forgedResponse.status === 403,
+        '签名被改过的媒体地址返回 403',
+        `status=${forgedResponse.status}`,
+    )
+
+    const bogus = await fetch(`${BASE}/api/media/not-a-real-token`)
+    check(bogus.status === 403, '没签名的媒体地址返回 403', `status=${bogus.status}`)
+
+    // 直接把 URL 塞进代取接口 —— 如果放行，它就是一个对全网开放的代理
+    const openProxy = await fetch(
+        `${BASE}/api/media/${encodeURIComponent('https://example.com/x.jpg')}`,
+    )
+    check(
+        openProxy.status === 403,
+        '把 URL 直接当代取参数会被拒（不是开放代理）',
+        `status=${openProxy.status}`,
+    )
+
+    check(
+        validProxy.startsWith('/api/media/') && !validProxy.includes('://'),
+        '代取地址里不含上游地址明文（凭证拼不出来）',
+        validProxy,
+    )
+}
+
 console.log('\n=== 结果 ===')
 if (failures.length === 0) {
     console.log(
-        `全部通过：搜索 → 详情 → 目录 → 正文，${succeeded.length} 个书源（CSS / XPath / JS）结果一致，书源管理与书架往返正常`,
+        `全部通过：搜索 → 详情 → 目录 → 正文，${succeeded.length} 个书源（CSS / XPath / JS / JSON / @js:result）结果一致，` +
+            '图片/音频/文件源各自取回对应形态，媒体代取与签名保护正常',
     )
 } else {
     console.log(`失败 ${failures.length} 项：\n - ${failures.join('\n - ')}`)

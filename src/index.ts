@@ -13,13 +13,19 @@ import type { RegistryOptions } from './data/sources'
 import { addToShelf, getProgress, listShelf, removeFromShelf, saveProgress } from './data/library'
 import type { AddToShelfInput, SaveProgressInput } from './data/library'
 import { DataError, bookKey } from './data/types'
+import { getOrCreateMediaSecret } from './data/settings'
 import { UnsupportedRuleError } from './engine/analyze'
+import { SOURCE_TYPE, type MediaLink } from './engine/types'
 import { SandboxError, runInSandbox } from './engine/js'
 import { parseHtml } from './engine/select'
 import { handleFixture } from './fixture'
-import { fetchBookInfo, fetchChapters, fetchContent, searchBooks } from './legado/ops'
+import { fetchBookInfo, fetchChapters, searchBooks } from './legado/ops'
+import { fetchChapterContent } from './legado/media'
+import { mediaRequestHeaders } from './legado/source'
 import { UpstreamError } from './lib/http'
 import { USER_HEADER, parseUserToken } from './lib/identity'
+import { MediaTokenError, signMediaToken, verifyMediaToken } from './lib/signing'
+import type { MediaTokenPayload } from './lib/signing'
 
 const app = new Hono<{ Bindings: Env }>()
 
@@ -31,12 +37,13 @@ const app = new Hono<{ Bindings: Env }>()
  */
 const MAX_IMPORT_BODY_BYTES = 4 * 1024 * 1024
 
-type ErrorStatus = 400 | 404 | 413 | 422 | 500 | 502
+type ErrorStatus = 400 | 403 | 404 | 413 | 422 | 500 | 502
 
 /** 把各类失败映射成明确的 HTTP 状态，而不是一律 500 */
 function statusFor(err: unknown): { status: ErrorStatus; code: string } {
     if (err instanceof UnsupportedRuleError) return { status: 422, code: 'unsupported_rule' }
     if (err instanceof SandboxError) return { status: 422, code: 'sandbox_error' }
+    if (err instanceof MediaTokenError) return { status: 403, code: 'bad_media_token' }
     if (err instanceof UpstreamError) return { status: 502, code: 'upstream_error' }
     if (err instanceof DataError) return { status: err.status as ErrorStatus, code: err.code }
     return { status: 500, code: 'internal_error' }
@@ -381,14 +388,161 @@ app.get('/api/toc', async (c) => {
     if (!target) return c.json({ error: '缺少 url 参数' }, 400)
 
     try {
-        const chapters = await fetchChapters(source, target, { baseUrl: source.bookSourceUrl })
-        return c.json({ sourceId: source.id, count: chapters.length, chapters })
+        // 文件源（bookSourceType=3）通常**没有目录**：它的下载地址挂在书籍详情页上，
+        // 规则里 ruleToc 是空对象。硬去跑目录规则只会得到「未配置目录列表规则」，
+        // 于是整本书打不开 —— 明明搜索和详情都是好的，却卡在目录那一步。
+        // 这里把书籍地址本身当作唯一一章，前端才有一个可点的下载入口。
+        if (
+            (source.bookSourceType ?? SOURCE_TYPE.text) === SOURCE_TYPE.file &&
+            !source.ruleToc?.chapterList
+        ) {
+            return c.json({
+                sourceId: source.id,
+                count: 1,
+                synthetic: true,
+                chapters: [{ name: '获取下载地址', url: target }],
+            })
+        }
+
+        const { chapters, warning } = await fetchChapters(source, target, {
+            baseUrl: source.bookSourceUrl,
+        })
+        return c.json({
+            sourceId: source.id,
+            count: chapters.length,
+            chapters,
+            // 翻页中途失败时把原因带出去：前端要能告诉用户「这份目录不完整」
+            ...(warning ? { warning } : {}),
+        })
     } catch (err) {
         return fail(c, err)
     }
 })
 
-/** 正文 */
+/**
+ * 媒体地址的有效期
+ *
+ * 每打开一章都会重新签发，所以不需要长有效期；短一点能缩小凭证被转发的窗口。
+ * 24 小时足够覆盖「打开一章、慢慢看完、中间刷新几次」。
+ */
+const MEDIA_TOKEN_TTL_SECONDS = 24 * 60 * 60
+
+/** 把一条上游媒体地址换成本站的代取地址（原因见 lib/signing.ts） */
+async function proxiedMedia(
+    db: D1Database,
+    sourceId: string,
+    link: MediaLink,
+): Promise<MediaLink & { proxyUrl: string }> {
+    const secret = await getOrCreateMediaSecret(db)
+    const token = await signMediaToken(secret, { sourceId, url: link.url }, MEDIA_TOKEN_TTL_SECONDS)
+    return { ...link, proxyUrl: `/api/media/${token}` }
+}
+
+/** 允许原样透传的媒体类型。其余一律降级，理由见 mediaResponseHeaders */
+const SAFE_MEDIA_TYPE =
+    /^(?:image|audio|video|font)\/|^application\/(?:pdf|epub\+zip|zip|x-rar|x-7z-compressed|octet-stream|vnd\.apple\.mpegurl|x-mpegurl|ogg)|^text\/plain\b/i
+
+/** 上游没给 content-type 时按扩展名补一个 */
+const MIME_BY_EXT: Record<string, string> = {
+    jpg: 'image/jpeg',
+    jpeg: 'image/jpeg',
+    png: 'image/png',
+    gif: 'image/gif',
+    webp: 'image/webp',
+    avif: 'image/avif',
+    bmp: 'image/bmp',
+    svg: 'image/svg+xml',
+    mp3: 'audio/mpeg',
+    m4a: 'audio/mp4',
+    aac: 'audio/aac',
+    ogg: 'audio/ogg',
+    wav: 'audio/wav',
+    flac: 'audio/flac',
+    mp4: 'video/mp4',
+    txt: 'text/plain; charset=utf-8',
+    epub: 'application/epub+zip',
+    pdf: 'application/pdf',
+    zip: 'application/zip',
+    rar: 'application/x-rar-compressed',
+}
+
+function extensionOf(url: string): string {
+    try {
+        const last = new URL(url).pathname.split('/').pop() ?? ''
+        return last.includes('.') ? (last.split('.').pop() ?? '').toLowerCase() : ''
+    } catch {
+        return ''
+    }
+}
+
+function fileNameOf(url: string, fallback: string): string {
+    try {
+        const last = new URL(url).pathname.split('/').filter(Boolean).pop() ?? ''
+        return last === '' ? fallback : decodeURIComponent(last)
+    } catch {
+        return fallback
+    }
+}
+
+function contentDisposition(name: string): string {
+    // 中文文件名必须走 filename*：头部里出现非 ASCII 会被直接拒绝
+    const ascii = name.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_')
+    return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}`
+}
+
+/**
+ * 组装媒体的响应头
+ *
+ * 有一处必须小心：**不能把上游的 HTML 以 text/html 透传回来**。这个接口是同源的，
+ * 若某个书源的「图片地址」其实指向一段 HTML，用户点开就等于在我们自己的域上
+ * 执行了别人的脚本，而 localStorage 里正放着身份令牌。所以只放行媒体类型，
+ * 其余一律降级成 octet-stream 并强制下载。
+ */
+function mediaResponseHeaders(upstream: Response, target: string, isFileSource: boolean): Headers {
+    const headers = new Headers()
+    const upstreamType = upstream.headers.get('content-type') ?? ''
+
+    let contentType = 'application/octet-stream'
+    let safe = false
+
+    if (SAFE_MEDIA_TYPE.test(upstreamType)) {
+        contentType = upstreamType
+        safe = true
+    } else if (upstreamType === '' || /^application\/octet-stream/i.test(upstreamType)) {
+        // 上游没表态，按扩展名猜；猜不出来才用 octet-stream
+        contentType = MIME_BY_EXT[extensionOf(target)] ?? 'application/octet-stream'
+        safe = true
+    }
+
+    headers.set('Content-Type', contentType)
+    headers.set('X-Content-Type-Options', 'nosniff')
+
+    // 音频拖动进度条要靠这几个头，漏了就只能从头听到尾
+    for (const name of ['content-range', 'accept-ranges', 'etag', 'last-modified']) {
+        const value = upstream.headers.get(name)
+        if (value) headers.set(name, value)
+    }
+
+    if (!safe) {
+        headers.set('Content-Disposition', contentDisposition(fileNameOf(target, 'download')))
+        headers.set('Cache-Control', 'no-store')
+        return headers
+    }
+
+    if (isFileSource) {
+        headers.set('Content-Disposition', contentDisposition(fileNameOf(target, 'download')))
+    }
+    headers.set('Cache-Control', isFileSource ? 'private, max-age=600' : 'public, max-age=86400')
+    return headers
+}
+
+/**
+ * 正文
+ *
+ * 返回形态由书源类型决定：文本源给 `content`，图片源给 `images`，
+ * 音频源给 `audio`，文件源给 `downloads`。**媒体一律换成 /api/media 的签名地址**，
+ * 原因见 lib/signing.ts（防盗链、混合内容、跨域）。
+ */
 app.get('/api/content', async (c) => {
     const sourceId = c.req.query('sourceId') ?? ''
     const target = c.req.query('url') ?? ''
@@ -398,11 +552,96 @@ app.get('/api/content', async (c) => {
     if (!target) return c.json({ error: '缺少 url 参数' }, 400)
 
     try {
-        const content = await fetchContent(source, target, { baseUrl: source.bookSourceUrl })
-        return c.json({ sourceId: source.id, url: target, length: content.length, content })
+        const content = await fetchChapterContent(source, target, {
+            baseUrl: source.bookSourceUrl,
+        })
+        const head = { sourceId: source.id, url: target, kind: content.kind }
+
+        switch (content.kind) {
+            case 'text':
+                return c.json({ ...head, length: content.text.length, content: content.text })
+
+            case 'images': {
+                const images = await Promise.all(
+                    content.images.map((link) => proxiedMedia(c.env.DB, source.id, link)),
+                )
+                return c.json({ ...head, count: images.length, images })
+            }
+
+            case 'audio':
+                return c.json({
+                    ...head,
+                    audio: await proxiedMedia(c.env.DB, source.id, content.audio),
+                })
+
+            default: {
+                const downloads = await Promise.all(
+                    content.downloads.map((link) => proxiedMedia(c.env.DB, source.id, link)),
+                )
+                return c.json({ ...head, count: downloads.length, downloads })
+            }
+        }
     } catch (err) {
         return fail(c, err)
     }
+})
+
+/**
+ * 媒体代取
+ *
+ * 浏览器不能直接取上游的图片/音频（防盗链、混合内容、跨域），所以由这里代取。
+ * **只有本站自己签发的地址才认**，否则它就是一个对全网开放的反向代理。
+ *
+ * 响应体直接转发上游的流，不做缓冲：音频动辄几十 MB，
+ * 全读进内存既慢又逼近 Worker 的内存上限。
+ */
+app.get('/api/media/:token', async (c) => {
+    let payload: MediaTokenPayload
+    try {
+        payload = await verifyMediaToken(
+            await getOrCreateMediaSecret(c.env.DB),
+            c.req.param('token'),
+        )
+    } catch (err) {
+        return fail(c, err)
+    }
+
+    // 书源被删掉之后，之前签出去的地址也该失效，否则等于留下一个永久后门
+    const origin = new URL(c.req.url).origin
+    const source = await findSource(c.env.DB, origin, payload.sourceId, registryOf(c.env))
+    if (!source) return c.json({ error: `找不到书源：${payload.sourceId}` }, 404)
+
+    let target: URL
+    try {
+        target = new URL(payload.url)
+    } catch {
+        return c.json({ error: '媒体地址不是合法 URL' }, 400)
+    }
+    if (target.protocol !== 'http:' && target.protocol !== 'https:') {
+        return c.json({ error: `不支持的媒体协议：${target.protocol}` }, 400)
+    }
+
+    const headers = mediaRequestHeaders(source, payload.url)
+    // 透传 Range，音频才能拖进度条
+    const range = c.req.header('range')
+    if (range) headers.Range = range
+
+    let upstream: Response
+    try {
+        upstream = await fetch(payload.url, { headers, redirect: 'follow' })
+    } catch (err) {
+        return c.json({ error: `取媒体失败：${describe(err)}` }, 502)
+    }
+
+    if (!upstream.ok || !upstream.body) {
+        return c.json({ error: `上游取媒体返回 HTTP ${upstream.status}` }, 502)
+    }
+
+    const isFileSource = (source.bookSourceType ?? SOURCE_TYPE.text) === SOURCE_TYPE.file
+    return new Response(upstream.body, {
+        status: upstream.status,
+        headers: mediaResponseHeaders(upstream, payload.url, isFileSource),
+    })
 })
 
 /** 其余路径交给静态资源（含 SPA 回退） */
@@ -433,7 +672,7 @@ export default {
 
         // 内置测试站点：默认关闭，只在本地开发与 CI 里打开
         if (env.ENABLE_FIXTURE === 'true') {
-            const handled = handleFixture(url.pathname, url)
+            const handled = handleFixture(request, url)
             if (handled) return handled
         }
 

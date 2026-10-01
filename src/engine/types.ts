@@ -110,6 +110,11 @@ export interface BookSource {
         coverUrl?: string
         tocUrl?: string
         wordCount?: string
+        /**
+         * 下载地址。**只有 bookSourceType=3（文件源）会用到**，
+         * 文本/图片/音频源的正文走 ruleContent，这个字段留空。
+         */
+        downloadUrls?: string
     }
 
     ruleToc?: {
@@ -123,6 +128,13 @@ export interface BookSource {
         content?: string
         nextContentUrl?: string
         replaceRegex?: string
+        /**
+         * 媒体地址嗅探正则。音频源常把章节地址标成 `{webView:true}`，
+         * 再由 App 拦截 WebView 流量、用这条正则从里面挑出 mp3。
+         * 本引擎没有 WebView，因此这条规则**只会被识别、不会被使用** ——
+         * 遇到时明确报错，而不是把整页 HTML 当成音频地址返回。
+         */
+        sourceRegex?: string
     }
 
     /** 书源级请求头 */
@@ -151,6 +163,40 @@ export interface Chapter {
     name: string
     url: string
 }
+
+/**
+ * 书源类型
+ *
+ * 取自 Legado 的 BookSourceType。类型决定「正文」到底是什么东西：
+ * 文本源取回段落文字，图片源取回一串图片地址，音频源取回一条直链，
+ * 文件源则根本不走正文规则、只给下载地址。用同一套逻辑处理这四种，
+ * 结果必然是其中三种都读不了。
+ */
+export const SOURCE_TYPE = {
+    text: 0,
+    audio: 1,
+    image: 2,
+    file: 3,
+} as const
+
+/** 一条媒体地址（图片/音频/文件），name 只在文件源里有意义 */
+export interface MediaLink {
+    url: string
+    name?: string
+}
+
+/**
+ * 一章的正文，按书源类型分化
+ *
+ * 用可辨识联合而不是「一个 content 字符串 + 一个 type 字段」：
+ * 后者允许出现「type 说这是图片、content 里却是普通文字」这种非法组合，
+ * 而非法组合在读取端只会表现为「显示得很奇怪」，很难往回追。
+ */
+export type ChapterContent =
+    | { kind: 'text'; text: string }
+    | { kind: 'images'; images: MediaLink[] }
+    | { kind: 'audio'; audio: MediaLink }
+    | { kind: 'downloads'; downloads: MediaLink[] }
 
 /** 一次 HTTP 请求的计划，由 URL 规则和选项解析而来 */
 export interface FetchPlan {

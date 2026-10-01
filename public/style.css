@@ -426,6 +426,71 @@ label.check {
     flex: 1;
 }
 
+/* ---------- 媒体正文（图片 / 音频 / 下载） ---------- */
+
+/* 图片源：一章就是一串整页图，首尾相接才像在读漫画，所以不留间距 */
+.comic {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.comic-page {
+    display: block;
+    width: 100%;
+    height: auto;
+    background: var(--surface-2);
+}
+
+/* 单张图失败时就地说明是第几张，既不静默也不让整话变空白 */
+.comic-failed {
+    padding: 32px 12px;
+    text-align: center;
+    font-size: 0.9rem;
+    color: var(--warn);
+    background: var(--warn-soft);
+    border: 1px dashed var(--border);
+    border-radius: var(--radius);
+}
+
+.comic-meta {
+    margin-top: 10px;
+    text-align: center;
+    font-size: 0.85rem;
+    color: var(--text-dim);
+}
+
+/* 正文段落有 2em 首行缩进，说明性文字得取消掉，否则像正文的一部分 */
+#reading .hint {
+    text-indent: 0;
+    font-size: 0.85rem;
+    color: var(--text-dim);
+}
+
+.audio-box {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.audio-player {
+    width: 100%;
+}
+
+.downloads {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+}
+
+.downloads .btn.dl {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 .drawer-backdrop {
     position: fixed;
     inset: 0;

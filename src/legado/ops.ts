@@ -17,7 +17,7 @@ import { UpstreamError, fetchText } from '../lib/http'
 import { buildPlan, sandboxHttp } from './source'
 
 /** 把规则取到的地址补全成绝对地址（书源里相对路径很常见） */
-function resolveUrl(value: string, base: string): string {
+export function resolveUrl(value: string, base: string): string {
     const v = value.trim()
     if (!v) return ''
     try {
@@ -37,11 +37,23 @@ function resolveUrl(value: string, base: string): string {
  * 而它既不报错、又永远打不开 —— 典型的静默错数据。
  *
  * 地址只可能是一个，所以这里取第一个非空值。
+ *
+ * 而且要取到「第一个非空**行**」而不只是「第一个非空值」：值本身可能就是多行的 ——
+ * `@js:` 返回一个地址数组时，沙箱结果会按换行拼起来。整段拿去解析地址的话，
+ * 换行会被 URL 解析器当成非法字符删掉，得到几条地址首尾相接的串：
+ * 喜马拉雅的 nextTocUrl 正是这样拼出 9 条地址，然后请求一个必然 404 的怪地址。
  */
 async function analyzeAddress(item: Selection, rule: string, ctx: RuleContext): Promise<string> {
     if (rule.trim() === '') return ''
     const values = await analyzeStrings(item, rule, ctx)
-    return values.find((v) => v.trim() !== '') ?? ''
+    for (const value of values) {
+        const line = value
+            .split('\n')
+            .map((part) => part.trim())
+            .find((part) => part !== '')
+        if (line) return line
+    }
+    return ''
 }
 
 /** 正文清洗：规整空白、去掉空行，但不动段落本身 */
@@ -153,12 +165,22 @@ export async function fetchBookInfo(
  */
 const MAX_TOC_PAGES = 20
 
+/** 目录结果 */
+export interface TocResult {
+    chapters: Chapter[]
+    /**
+     * 翻页中途失败时的说明。**有值时章节列表是不完整的** ——
+     * 与其让前端以为「这本书就这么长」，不如把「少了一截」说出来。
+     */
+    warning?: string
+}
+
 /** 目录页：返回章节列表。带 nextTocUrl 时会把后续页一并取回并合起来 */
 export async function fetchChapters(
     source: BookSource,
     tocUrl: string,
     ctx: RuleContext,
-): Promise<Chapter[]> {
+): Promise<TocResult> {
     const rule = source.ruleToc
     if (!rule?.chapterList) throw new UpstreamError('书源未配置目录列表规则（ruleToc.chapterList）')
 
@@ -166,14 +188,29 @@ export async function fetchChapters(
     // 按地址去重：多页之间、以及站点的「最新章节」区块与完整目录之间都可能重复
     const seenChapterUrls = new Set<string>()
     const visitedTocUrls = new Set<string>()
+    let warning: string | undefined
 
     let currentUrl = tocUrl
     for (let page = 0; page < MAX_TOC_PAGES; page += 1) {
         if (visitedTocUrls.has(currentUrl)) break
         visitedTocUrls.add(currentUrl)
 
-        const plan = await buildPlan(currentUrl, source, { ...ctx, baseUrl: currentUrl })
-        const html = await fetchText(plan)
+        let plan
+        let html: string
+        try {
+            plan = await buildPlan(currentUrl, source, { ...ctx, baseUrl: currentUrl })
+            html = await fetchText(plan)
+        } catch (err) {
+            // 第一页就失败：手上没有任何章节，如实报错
+            if (chapters.length === 0) throw err
+            // 后续页失败：**保留已经拿到的章节**，只记一条说明。
+            // 真实站点上这很常见 —— 最后一页被删、或书源的翻页地址算错，
+            // 一次 404 就把前面几百章全丢掉，比「章节不全」更糟：
+            // 用户看到的是一个错误页，而其实书是能读的。
+            warning = `翻页到第 ${page + 1} 页时中断：${err instanceof Error ? err.message : String(err)}`
+            break
+        }
+
         const sel = rootSelection(html)
         const tocCtx: RuleContext = {
             ...ctx,
@@ -203,7 +240,7 @@ export async function fetchChapters(
         currentUrl = nextUrl
     }
 
-    return chapters
+    return warning ? { chapters, warning } : { chapters }
 }
 
 /**
@@ -218,21 +255,30 @@ export async function fetchChapters(
  */
 const MAX_CONTENT_PAGES = 10
 
+/** 取回的一页正文 */
+export interface ContentPage {
+    /** 该页规则取到的原始文本：未清洗、未拼净化正则 */
+    raw: string
+    /** 该页的真实地址。图片/音频的相对地址要按**自己那一页**补全，不能按第一章的地址 */
+    url: string
+}
+
 /**
- * 正文：返回清洗后的文本
+ * 按 `nextContentUrl` 逐页取回正文，返回每一页的原始文本与地址
  *
- * 带 `nextContentUrl` 时会把后续页也取回并接在正文后面 —— 顺序很重要，
- * 页与页之间不加分隔符以外的任何东西，否则段落会被拼错。
+ * 文本、图片、音频三种类型共用这一段翻页逻辑，各自的差异放在下游处理：
+ * 翻页是站点结构的事，与「这一页取回来的是什么」无关。分成两份实现的话，
+ * 一边修好的翻页 bug，另一边还会留着。
  */
-export async function fetchContent(
+export async function collectContentPages(
     source: BookSource,
     chapterUrl: string,
     ctx: RuleContext,
-): Promise<string> {
+): Promise<ContentPage[]> {
     const rule = source.ruleContent
     if (!rule?.content) throw new UpstreamError('书源未配置正文规则（ruleContent.content）')
 
-    const pageTexts: string[] = []
+    const pages: ContentPage[] = []
     const visitedUrls = new Set<string>()
 
     let currentUrl = chapterUrl
@@ -250,8 +296,8 @@ export async function fetchContent(
         }
 
         const values = await analyzeStrings(sel, rule.content, contentCtx)
-        const pageText = values.join('\n')
-        if (pageText.trim() !== '') pageTexts.push(pageText)
+        const raw = values.join('\n')
+        if (raw.trim() !== '') pages.push({ raw, url: plan.url })
 
         // 没有 nextContentUrl 规则就是单页章节，到此为止
         if (!rule.nextContentUrl) break
@@ -264,26 +310,44 @@ export async function fetchContent(
         currentUrl = nextUrl
     }
 
-    // 净化正则作用于**整章**而不是单页：书源里那些跨段的规则（`[\s\S]*` 之类）
-    // 只有拿到完整正文才成立
-    let text = pageTexts.join('\n')
+    return pages
+}
 
-    // 书源自带的净化正则
-    if (rule.replaceRegex) {
-        for (const part of rule.replaceRegex.split('\n')) {
-            const line = part.trim()
-            if (!line) continue
-            const m = /^(.*?)##(.*?)##(.*)$/.exec(line)
-            if (!m) continue
-            try {
-                text = text.replace(new RegExp(m[1]!, 'g'), m[3] ?? '')
-            } catch {
-                /* 单条净化规则写坏不影响正文本身 */
-            }
+/** 书源自带的净化正则。单条写坏不影响正文本身 */
+function applyReplaceRegex(replaceRegex: string | undefined, text: string): string {
+    if (!replaceRegex) return text
+    let out = text
+    for (const part of replaceRegex.split('\n')) {
+        const line = part.trim()
+        if (!line) continue
+        const m = /^(.*?)##(.*?)##(.*)$/.exec(line)
+        if (!m) continue
+        try {
+            out = out.replace(new RegExp(m[1]!, 'g'), m[3] ?? '')
+        } catch {
+            /* 忽略写坏的净化规则 */
         }
     }
+    return out
+}
 
-    return normalizeContent(text)
+/**
+ * 正文（文本源）：返回清洗后的文本
+ *
+ * 带 `nextContentUrl` 时会把后续页也取回并接在正文后面 —— 顺序很重要，
+ * 页与页之间不加分隔符以外的任何东西，否则段落会被拼错。
+ */
+export async function fetchContent(
+    source: BookSource,
+    chapterUrl: string,
+    ctx: RuleContext,
+): Promise<string> {
+    const pages = await collectContentPages(source, chapterUrl, ctx)
+
+    // 净化正则作用于**整章**而不是单页：书源里那些跨段的规则（`[\s\S]*` 之类）
+    // 只有拿到完整正文才成立
+    const text = pages.map((p) => p.raw).join('\n')
+    return normalizeContent(applyReplaceRegex(source.ruleContent?.replaceRegex, text))
 }
 
 /** 供上层复用：把一个已取回的页面变成规则求值上下文 */

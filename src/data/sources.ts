@@ -161,9 +161,296 @@ export function fixtureJsSource(origin: string): RegisteredSource {
     }
 }
 
+/**
+ * 同一个测试站点，改用 **JSONPath** 规则（搜索走 JSON 接口）
+ *
+ * 存在的意义是**对照验证**：接口型站点在真实书源里占比极高（音频、漫画的接口站几乎全是），
+ * 而它们的搜索规则长这样：`bookList: "$.data.list"` —— 命中的是整个数组。
+ *
+ * 这一条同时钉住 JSON 列表规则的两个坑：数组要摊平成条目、条目要用自己的 JSON 作 source。
+ * 两处任一没做对，结果都是「搜不到书」而且**不报任何错**，是最难查的一类问题。
+ *
+ * 它与其他三个源打的是同一份数据，因此照常参与第 3、4 节的逐字对照。
+ */
+export function fixtureJsonSource(origin: string): RegisteredSource {
+    return {
+        id: 'builtin:fixture-json',
+        builtin: true,
+        sortOrder: 3,
+        bookSourceName: '内置测试站点（JSON 接口规则）',
+        bookSourceUrl: origin,
+        bookSourceGroup: '测试',
+        bookSourceComment: '项目自带的测试站点，搜索走 JSON 接口、用 JSONPath 规则驱动',
+        bookSourceType: 0,
+        enabled: true,
+
+        searchUrl: `${origin}/fixture/api/search?q={{key}}&p={{page}}`,
+        ruleSearch: {
+            bookList: '$.data.list',
+            // 子规则刻意用**裸字段名**：真实接口型书源就是这么写的
+            // （喜马拉雅的章节规则是 `title`、`playPathAacv224||playUrl64`）。
+            // 裸名面对 JSON 内容时等价于 `$.名`；不当 JSON 处理的话会去找同名 HTML 标签，
+            // 于是一个字段都取不到，整条源「搜不到书」。
+            name: 'name',
+            author: 'author',
+            intro: 'intro',
+            // 同一个源里两种写法都要能用
+            kind: '$.kind',
+            bookUrl: 'url',
+        },
+        ruleBookInfo: {
+            name: '@css:h1.book-name@text',
+            author: '@css:span.book-author@text',
+            intro: '@css:div.book-intro@text',
+            tocUrl: '@css:a.toc-link@href',
+        },
+        ruleToc: {
+            chapterList: '@css:ul.chapter-list li',
+            chapterName: '@css:a@text',
+            chapterUrl: '@css:a@href',
+        },
+        ruleContent: {
+            content: '@css:div#content@textNodes',
+        },
+    }
+}
+
+/**
+ * 正文规则写成**顶格 `@js:`**、并且引用 `result` 的源
+ *
+ * `result` 在这种写法里应当绑成**当前页面的原文**（Legado 的语义）。
+ * 绑错的话（比如绑成空串）有两个后果，都很难查：
+ *   - 规则「执行成功但什么都取不到」→ 表现为空正文
+ *   - 规则直接崩 → 表现为「规则脚本执行出错」
+ *
+ * 真实书源里这个形态非常普遍：图片源常用 `@js:var start = result.indexOf('id="cp_img"')`
+ * 从整页里切出图片区，音频源的目录规则常用 `@js:JSON.parse(result)…` 算翻页。
+ *
+ * 它在这里不用任何选择器，靠正则从整页里抠出正文，因此结果必须与其他源逐字一致。
+ */
+export function fixtureJsResultSource(origin: string): RegisteredSource {
+    return {
+        id: 'builtin:fixture-js-result',
+        builtin: true,
+        sortOrder: 4,
+        bookSourceName: '内置测试站点（@js:result 规则）',
+        bookSourceUrl: origin,
+        bookSourceGroup: '测试',
+        bookSourceComment: '项目自带的测试站点，正文用顶格 @js: 引用 result 驱动',
+        bookSourceType: 0,
+        enabled: true,
+
+        searchUrl: `${origin}/fixture/search?q={{key}}&p={{page}}`,
+        ruleSearch: {
+            bookList: '@css:div.result-item',
+            name: '@css:h3.title@text',
+            author: '@css:span.author@text',
+            kind: '@css:span.kind@text',
+            intro: '@css:p.intro@text',
+            bookUrl: '@css:h3.title a@href',
+        },
+        ruleBookInfo: {
+            name: '@css:h1.book-name@text',
+            author: '@css:span.book-author@text',
+            intro: '@css:div.book-intro@text',
+            tocUrl: '@css:a.toc-link@href',
+        },
+        ruleToc: {
+            chapterList: '@css:ul.chapter-list li',
+            chapterName: '@css:a@text',
+            chapterUrl: '@css:a@href',
+        },
+        ruleContent: {
+            content:
+                `@js:(function(){` +
+                `var html = String(result);` +
+                `var m = html.match(/<div id="content">([\\s\\S]*?)<\\/div>/);` +
+                `if (!m) { throw new Error('整页里没有找到正文容器') }` +
+                `var text = m[1].replace(/<\\/?p>/g, '\\n').replace(/<[^>]+>/g, '');` +
+                `return text.split('\\n').map(function(s){return s.trim()})` +
+                `.filter(function(s){return s !== ''}).join('\\n')` +
+                `})()`,
+        },
+    }
+}
+
+/**
+ * 图片源（bookSourceType=2）
+ *
+ * 正文规则取的是 `<img>` 标签，而且**真地址在 data-src 上**，与真实漫画站一致。
+ * 这一条同时覆盖三件事：懒加载地址的选取、相对地址的补全、nextContentUrl 翻页。
+ */
+export function fixtureImageSource(origin: string): RegisteredSource {
+    return {
+        id: 'builtin:fixture-image',
+        builtin: true,
+        sortOrder: 5,
+        bookSourceName: '内置测试站点（图片源）',
+        bookSourceUrl: origin,
+        bookSourceGroup: '测试',
+        bookSourceComment: '验证 bookSourceType=2：正文是一串图片地址',
+        bookSourceType: 2,
+        enabled: true,
+
+        searchUrl: `${origin}/fixture/search?q={{key}}&p={{page}}`,
+        ruleSearch: {
+            bookList: '@css:div.result-item',
+            name: '@css:h3.title@text',
+            author: '@css:span.author@text',
+            bookUrl: '@css:h3.title a@href',
+        },
+        ruleBookInfo: {
+            name: '@css:h1.book-name@text',
+            tocUrl: '@css:a.toc-link@href',
+        },
+        ruleToc: {
+            chapterList: '@css:ul.chapter-list li',
+            chapterName: '@css:a@text',
+            // 目录指向通用章节页，这里改写成图片专用的正文页（第 1 页）
+            chapterUrl: "@js:result.replace('/fixture/chapter/', '/fixture/image-chapter/') + '/1'",
+        },
+        ruleContent: {
+            // 取容器的**内部** HTML，一次拿到里面所有 <img> ——
+            // 禁漫大王那类真实书源就是 `class.container@img@html` 这个写法。
+            // 注意不能对 <img> 本身用 @html：img 是空元素，内部 HTML 恒为空串，
+            // 规则会「正常执行但什么都没取到」，是图片源很容易踩的一个坑。
+            content: '@css:div#cp_img@html',
+            nextContentUrl: '@css:div.pager a@href',
+        },
+    }
+}
+
+/**
+ * 音频源（bookSourceType=1）：正文规则取 `<audio>` 的 src
+ *
+ * 对应真实书源里 `ruleContent.content` 写成 `$id.jp_audio_0@src` 的那一类。
+ */
+export function fixtureAudioSource(origin: string): RegisteredSource {
+    return {
+        id: 'builtin:fixture-audio',
+        builtin: true,
+        sortOrder: 6,
+        bookSourceName: '内置测试站点（音频源）',
+        bookSourceUrl: origin,
+        bookSourceGroup: '测试',
+        bookSourceComment: '验证 bookSourceType=1：正文是一条音频直链',
+        bookSourceType: 1,
+        enabled: true,
+
+        searchUrl: `${origin}/fixture/search?q={{key}}&p={{page}}`,
+        ruleSearch: {
+            bookList: '@css:div.result-item',
+            name: '@css:h3.title@text',
+            author: '@css:span.author@text',
+            bookUrl: '@css:h3.title a@href',
+        },
+        ruleBookInfo: {
+            name: '@css:h1.book-name@text',
+            tocUrl: '@css:a.toc-link@href',
+        },
+        ruleToc: {
+            chapterList: '@css:ul.chapter-list li',
+            chapterName: '@css:a@text',
+            chapterUrl: "@js:result.replace('/fixture/chapter/', '/fixture/audio-chapter/')",
+        },
+        ruleContent: {
+            content: '@css:audio#jp_audio_0@src',
+        },
+    }
+}
+
+/**
+ * 不写正文规则的音频源（bookSourceType=1）
+ *
+ * 真实音频源里这一步很常见：喜马拉雅、asmr 这类接口型站点的**章节地址本身就是音频直链**，
+ * 书源根本不配 ruleContent。这条用来钉住「content 为空时回落到章节地址」的行为 ——
+ * 少了这个回落，这类源会直接报「未配置正文规则」。
+ */
+export function fixtureAudioNoRuleSource(origin: string): RegisteredSource {
+    return {
+        id: 'builtin:fixture-audio-norule',
+        builtin: true,
+        sortOrder: 7,
+        bookSourceName: '内置测试站点（音频源·无正文规则）',
+        bookSourceUrl: origin,
+        bookSourceGroup: '测试',
+        bookSourceComment: '验证 bookSourceType=1 且 ruleContent 为空：章节地址本身就是音频直链',
+        bookSourceType: 1,
+        enabled: true,
+
+        searchUrl: `${origin}/fixture/search?q={{key}}&p={{page}}`,
+        ruleSearch: {
+            bookList: '@css:div.result-item',
+            name: '@css:h3.title@text',
+            bookUrl: '@css:h3.title a@href',
+        },
+        ruleBookInfo: {
+            name: '@css:h1.book-name@text',
+            tocUrl: '@css:a.toc-link@href',
+        },
+        ruleToc: {
+            chapterList: '@css:ul.chapter-list li',
+            chapterName: '@css:a@text',
+            // 章节地址直接就是音频文件
+            chapterUrl: `@js:'${origin}/fixture/media/tone.mp3'`,
+        },
+        ruleContent: {},
+    }
+}
+
+/**
+ * 文件源（bookSourceType=3）
+ *
+ * 三个与其它类型不同的地方，也正是这类源「读不出来」的原因，全部照搬真实写法：
+ *   - 正文规则为空：下载地址不在 ruleContent 里
+ *   - 目录规则为空：它没有目录
+ *   - 下载地址在 ruleBookInfo.downloadUrls 上，要回到详情页才取得到
+ */
+export function fixtureFileSource(origin: string): RegisteredSource {
+    return {
+        id: 'builtin:fixture-file',
+        builtin: true,
+        sortOrder: 8,
+        bookSourceName: '内置测试站点（文件源）',
+        bookSourceUrl: origin,
+        bookSourceGroup: '测试',
+        bookSourceComment: '验证 bookSourceType=3：只提供下载，地址在 ruleBookInfo.downloadUrls',
+        bookSourceType: 3,
+        enabled: true,
+
+        searchUrl: `${origin}/fixture/search?q={{key}}&p={{page}}`,
+        ruleSearch: {
+            bookList: '@css:div.result-item',
+            name: '@css:h3.title@text',
+            author: '@css:span.author@text',
+            bookUrl: '@css:h3.title a@href',
+        },
+        ruleBookInfo: {
+            name: '@css:h1.book-name@text',
+            author: '@css:span.book-author@text',
+            intro: '@css:div.book-intro@text',
+            // 没有目录页，目录地址就是详情页自己 —— 与 Legado 把 bookUrl 当作下载入口的做法一致
+            tocUrl: '@js:baseUrl',
+            downloadUrls: '@css:a.download-link@href',
+        },
+        ruleToc: {},
+        ruleContent: {},
+    }
+}
+
 /** 内置测试源，仅在测试站点挂载时可用 */
 export function builtinSources(origin: string): RegisteredSource[] {
-    return [fixtureSource(origin), fixtureXPathSource(origin), fixtureJsSource(origin)]
+    return [
+        fixtureSource(origin),
+        fixtureXPathSource(origin),
+        fixtureJsSource(origin),
+        fixtureJsonSource(origin),
+        fixtureJsResultSource(origin),
+        fixtureImageSource(origin),
+        fixtureAudioSource(origin),
+        fixtureAudioNoRuleSource(origin),
+        fixtureFileSource(origin),
+    ]
 }
 
 /** 全部书源：内置（可选）在前，用户导入的在后 */

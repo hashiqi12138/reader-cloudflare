@@ -765,12 +765,14 @@ async function viewBook(host) {
 
     const chapters = []
     let tocError = null
+    let tocWarning = null
     if (info.tocUrl) {
         try {
-            chapters.push(
-                ...((await api(`/api/toc?${paramsOf({ sourceId, url: info.tocUrl })}`)).chapters ??
-                    []),
-            )
+            const toc = await api(`/api/toc?${paramsOf({ sourceId, url: info.tocUrl })}`)
+            chapters.push(...(toc.chapters ?? []))
+            // 翻页中途失败时服务端会给出 warning：目录能用，但很可能不完整。
+            // 不显示的话，用户会以为「这本书就这么几章」——那是静默的少数据。
+            tocWarning = toc.warning ?? null
         } catch (err) {
             tocError = err
         }
@@ -835,6 +837,9 @@ async function viewBook(host) {
         host.append(alertBox('error', '目录读取失败', tocError.message))
         return
     }
+    if (tocWarning) {
+        host.append(alertBox('warn', '这份目录可能不完整', tocWarning))
+    }
     if (chapters.length === 0) {
         host.append(alertBox('warn', '这个书源没给目录', '可能规则里的 chapterList 没匹配到内容。'))
         return
@@ -896,6 +901,7 @@ async function viewRead(host) {
                 name: info.name || name || '未命名',
                 author: info.author || author,
                 chapters: toc.chapters ?? [],
+                tocWarning: toc.warning ?? null,
             }
         } catch (err) {
             host.replaceChildren(
@@ -988,26 +994,134 @@ async function viewRead(host) {
         return
     }
 
-    const text = String(content.content ?? '').trim()
-    const body = el('div')
-    if (text === '') {
-        // 空正文是真实存在的问题（规则没匹配到），不能装成「这一章没内容」糊过去
-        body.append(
-            alertBox(
-                'warn',
-                '这一章取到的是空正文',
-                '通常是书源的 content 规则没匹配到内容，或站点改版了。',
-            ),
-        )
-    } else {
+    /**
+     * 按类型渲染正文
+     *
+     * 文本 / 图片 / 音频 / 下载是四种不同的东西。以前四种一律按文本渲染，
+     * 于是图片源显示成一堆 `<img>` 源码、音频源显示成一条网址、文件源直接报错 ——
+     * 不是四个毛病，是把四种东西当成了一种。
+     *
+     * 媒体地址用的是服务端签发的 /api/media 地址（代理原因见项目 README）。
+     */
+    function renderText(text) {
+        const box = el('div')
+        if (text === '') {
+            // 空正文是真实存在的问题（规则没匹配到），不能装成「这一章没内容」糊过去
+            box.append(
+                alertBox(
+                    'warn',
+                    '这一章取到的是空正文',
+                    '通常是书源的 content 规则没匹配到内容，或站点改版了。',
+                ),
+            )
+            return box
+        }
         for (const line of text.split('\n')) {
             const trimmed = line.trim()
-            if (trimmed !== '') body.append(el('p', { text: trimmed }))
+            if (trimmed !== '') box.append(el('p', { text: trimmed }))
+        }
+        return box
+    }
+
+    function renderImages(images) {
+        const box = el('div', { class: 'comic' })
+        if (!images || images.length === 0) {
+            box.append(
+                alertBox(
+                    'warn',
+                    '这一话没有取到图片',
+                    '通常是书源的 content 规则没匹配到图片地址。',
+                ),
+            )
+            return box
+        }
+        images.forEach((image, index) => {
+            box.append(
+                el('img', {
+                    class: 'comic-page',
+                    src: image.proxyUrl,
+                    alt: `第 ${index + 1} 页`,
+                    loading: 'lazy',
+                    // 单张图失败不该让整话变空白，也不该静默：就地说明是第几张没取到
+                    onerror: (event) => {
+                        event.target.replaceWith(
+                            el('div', {
+                                class: 'comic-failed',
+                                text: `第 ${index + 1} 张加载失败`,
+                            }),
+                        )
+                    },
+                }),
+            )
+        })
+        box.append(el('div', { class: 'comic-meta', text: `共 ${images.length} 张` }))
+        return box
+    }
+
+    function renderAudio(audio) {
+        const box = el('div', { class: 'audio-box' })
+        if (!audio?.proxyUrl) {
+            box.append(alertBox('warn', '没有取到音频地址', '书源的正文规则没匹配到可播放的直链。'))
+            return box
+        }
+        box.append(
+            el('audio', {
+                class: 'audio-player',
+                controls: true,
+                preload: 'metadata',
+                src: audio.proxyUrl,
+            }),
+        )
+        box.append(
+            el('p', {
+                class: 'hint',
+                text: '拖动进度条依赖上游支持 Range；若一直加载不出来，多半是上游站点限制了访问。',
+            }),
+        )
+        return box
+    }
+
+    function renderDownloads(downloads) {
+        const box = el('div', { class: 'downloads' })
+        if (!downloads || downloads.length === 0) {
+            box.append(
+                alertBox('warn', '没有取到下载地址', '书源的 downloadUrls 规则没匹配到地址。'),
+            )
+            return box
+        }
+        downloads.forEach((item, index) => {
+            box.append(
+                el('a', {
+                    class: 'btn dl',
+                    href: item.proxyUrl,
+                    download: item.name || '',
+                    text: item.name || `下载 ${index + 1}`,
+                }),
+            )
+        })
+        box.append(el('p', { class: 'hint', text: '下载由本站代取，因此不受上游防盗链影响。' }))
+        return box
+    }
+
+    function renderContent(payload) {
+        switch (payload.kind) {
+            case 'images':
+                return renderImages(payload.images)
+            case 'audio':
+                return renderAudio(payload.audio)
+            case 'downloads':
+                return renderDownloads(payload.downloads)
+            default:
+                return renderText(String(payload.content ?? '').trim())
         }
     }
 
+    const body = renderContent(content)
+
     readingHost.replaceChildren(
         el('h1', { text: chapter.name }),
+        // 目录不完整时说一句：否则用户会把「少了一截」当成「这本书就这么长」
+        ...(book.tocWarning ? [alertBox('warn', '这份目录可能不完整', book.tocWarning)] : []),
         body,
         el('div', { class: 'reader-nav' }, [
             el('button', {

@@ -151,6 +151,38 @@ function selectByCss(sel: Selection, css: string): any[] {
     return nodes
 }
 
+/** 当前内容是不是一个 JSON 对象/数组（而不是 HTML） */
+function isJsonContent(source: string): boolean {
+    const trimmed = source.trim()
+    // 先看首字符，避免把每一条 HTML 规则都拖进 JSON.parse
+    if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return false
+    try {
+        const parsed: unknown = JSON.parse(trimmed)
+        return typeof parsed === 'object' && parsed !== null
+    } catch {
+        return false
+    }
+}
+
+/**
+ * 把「裸字段名」当成 JSON 字段
+ *
+ * 真实接口型书源里这是常规写法：喜马拉雅的章节名就是 `title`、章节地址就是
+ * `playPathAacv224||playPathAacv164||playUrl64||playUrl32`，前面都不带 `$.`。
+ *
+ * 不这么认的话，`title` 会走 CSS 选择器去找 `<title>` 标签 —— 而当前内容是一段 JSON，
+ * 于是**一个章节都取不到**，整个目录变成空的，还不报任何错。
+ *
+ * 只在「规则是纯标识符」且「当前内容确实是 JSON」时才这么认：否则 `a`、`div`、`title`
+ * 很可能是正常的 HTML 标签选择器，不能乱改语义。
+ */
+function bareJsonField(rule: string, source: string): string | null {
+    const t = rule.trim()
+    if (!/^[A-Za-z_][\w-]*$/.test(t)) return null
+    if (!isJsonContent(source)) return null
+    return `$.${t}`
+}
+
 /**
  * 把 `//x` 改写成 `.//x`
  *
@@ -326,17 +358,29 @@ async function evalSingleSegment(
     const head = jsAt === -1 ? segment : segment.slice(0, jsAt).replace(/@$/, '')
     const jsCode = jsAt === -1 ? null : segment.slice(jsAt + jsMark.length)
 
-    // 整条规则只有 @js:，没有前置选择器
+    // 整条规则只有 `@js:`，没有前置选择器
+    //
+    // 此时 `result` 必须绑成**当前页面的原文**。真实书源里这是常规写法
+    // （天脉漫画的正文就是 `@js:var start = result.indexOf('id="cp_img"')…`），
+    // 而 `result` 若是空串，规则会「执行成功但什么都取不到」；
+    // 喜马拉雅的目录规则更直接：对空串 JSON.parse 就地报错。
     if (head.trim() === '' && jsCode !== null) {
         const result = await runInSandbox(
             jsCode,
-            { ...baseGlobals(ctx), result: ctx.result ?? '' },
+            { ...baseGlobals(ctx), result: ctx.result ?? sel.source, src: sel.source },
             { http: ctx.http },
         )
         return [sandboxResultToString(result)]
     }
 
-    const kind = detectKind(head)
+    let kind = detectKind(head)
+
+    // 裸字段名面对 JSON 内容时等价于 `$.字段名`（见 bareJsonField 的说明）
+    if (kind.kind === 'css' || kind.kind === 'jsoup') {
+        const asField = bareJsonField(head, sel.source)
+        if (asField) kind = { kind: 'json', body: asField }
+    }
+
     let values: string[]
 
     if (kind.kind === 'allinone') {
@@ -397,7 +441,13 @@ export async function analyzeSelections(
     }
 
     const { selector, ops } = splitRegexChain(trimmed)
-    const kind = detectKind(selector)
+    let kind = detectKind(selector)
+
+    // 裸字段名面对 JSON 内容时等价于 `$.字段名`（见 bareJsonField 的说明）
+    if (kind.kind === 'css' || kind.kind === 'jsoup') {
+        const asField = bareJsonField(selector, sel.source)
+        if (asField) kind = { kind: 'json', body: asField }
+    }
 
     let nodes: any[] | null = null
     let reversed = false
@@ -434,9 +484,43 @@ export async function analyzeSelections(
         return nodes.map((node) => ({ $: sel.$, nodes: [node], source: sel.source }))
     }
 
-    // JSONPath / XPath 这类列表规则给不出节点，退化成「取字符串再各自解析」
+    // JSONPath 这类列表规则给不出节点，退化成「取字符串再各自解析」
     const values = await analyzeStrings(sel, selector, ctx)
-    return values.map((text) => selectionFromText(text, sel.source))
+
+    if (kind.kind !== 'json') {
+        return values.map((text) => selectionFromText(text, sel.source))
+    }
+
+    /**
+     * JSON 列表规则有两个坑，都在这一层修；两个都会让**整个源搜不到书**，
+     * 而且全程不报错 —— 接口型书源（音频、漫画里的接口站）几乎都是这个形态。
+     *
+     *   1. `$.info.Datas` 这种写法命中的是**整个数组**。不摊平的话条目数恒为 1，
+     *      而条目的内容是一段数组 JSON。真实站点里这种写法极多。
+     *   2. 条目的 `source` 必须换成**条目自己的文本**。沿用整页的 source 的话，
+     *      后续按 `$.name` 取字段时是在整页 JSON 的根节点上取键 ——
+     *      根节点上当然没有 name，于是所有条目都取不到字段，全被丢掉。
+     */
+    const items: string[] = []
+    for (const value of values) {
+        const candidate = value.trim()
+        if (candidate.startsWith('[')) {
+            try {
+                const parsed: unknown = JSON.parse(candidate)
+                if (Array.isArray(parsed)) {
+                    for (const element of parsed) {
+                        if (element === null || element === undefined) continue
+                        items.push(typeof element === 'string' ? element : JSON.stringify(element))
+                    }
+                    continue
+                }
+            } catch {
+                /* 不是 JSON 数组就按原样处理 */
+            }
+        }
+        items.push(value)
+    }
+    return items.map((text) => selectionFromText(text, text))
 }
 
 /** 便捷方法：在节点集上求单值 */
