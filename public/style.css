@@ -480,6 +480,19 @@ label.check {
     color: var(--accent);
 }
 
+/* 身份显示靠右：它是「本机状态」，与左边的许可信息不是一类东西，用位置分开 */
+.identity {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    margin-left: auto;
+}
+
+.identity .btn {
+    padding: 2px 8px;
+    font-size: 0.8rem;
+}
+
 @media (max-width: 560px) {
     .topbar .brand {
         display: none;

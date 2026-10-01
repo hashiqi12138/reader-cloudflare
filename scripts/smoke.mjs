@@ -35,6 +35,28 @@ async function getJson(path) {
 }
 
 /**
+ * 书架与阅读进度按身份隔离，这几个接口必须带身份头。
+ * 冒烟里固定用两个身份，专门用来验「互相看不到」。
+ */
+const USER_HEADER = 'x-reader-user'
+const USER_A = 'smoke-user-a-0123456789'
+const USER_B = 'smoke-user-b-0123456789'
+
+async function callAs(user, method, path, body) {
+    const response = await fetch(BASE + path, {
+        method,
+        headers: {
+            ...(user === null ? {} : { [USER_HEADER]: user }),
+            ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+        },
+        body:
+            body === undefined ? undefined : typeof body === 'string' ? body : JSON.stringify(body),
+    })
+    const text = await response.text()
+    return { status: response.status, json: parseMaybeJson(text), text }
+}
+
+/**
  * 带请求体的调用。写一次给下面各段共用 ——
  * 之前每段各抄一份，其中一份漏了「已经是字符串就不再序列化」这一条，
  * 结果导入接口收到一个 JSON 字符串而不是数组，报 invalid_shape，
@@ -398,15 +420,18 @@ console.log('\n=== 7. 书架与阅读进度 ===')
     const bookUrl = `${BASE}/fixture/book/1`
     const chapterUrl = `${BASE}/fixture/chapter/1/1`
 
-    const shelfOf = async () => (await getJson('/api/shelf')).json?.entries ?? []
+    // 本段所有书架/进度请求都用 USER_A 这个身份（服务端按身份隔离，不带头会被拒）
+    const callA = (method, path, body) => callAs(USER_A, method, path, body)
+    const shelfOf = async (user = USER_A) =>
+        (await callAs(user, 'GET', '/api/shelf')).json?.entries ?? []
 
     // 清掉上一次可能留下的条目，保证可重复运行
     const existing = (await shelfOf()).find((e) => e.sourceId === sourceId && e.bookUrl === bookUrl)
-    if (existing) await call('DELETE', `/api/shelf?key=${encodeURIComponent(existing.bookKey)}`)
+    if (existing) await callA('DELETE', `/api/shelf?key=${encodeURIComponent(existing.bookKey)}`)
 
     const baseline = (await shelfOf()).length
 
-    const added = await call('POST', '/api/shelf', {
+    const added = await callA('POST', '/api/shelf', {
         sourceId,
         bookUrl,
         name: '测试小说·甲',
@@ -419,7 +444,7 @@ console.log('\n=== 7. 书架与阅读进度 ===')
     )
     check((await shelfOf()).length === baseline + 1, '书架条目数加一')
 
-    const again = await call('POST', '/api/shelf', {
+    const again = await callA('POST', '/api/shelf', {
         sourceId,
         bookUrl,
         name: '测试小说·甲',
@@ -439,7 +464,7 @@ console.log('\n=== 7. 书架与阅读进度 ===')
         JSON.stringify(beforeRead.chapterName),
     )
 
-    const saved = await call('PUT', '/api/progress', {
+    const saved = await callA('PUT', '/api/progress', {
         sourceId,
         bookUrl,
         chapterUrl,
@@ -459,7 +484,9 @@ console.log('\n=== 7. 书架与阅读进度 ===')
         JSON.stringify({ name: afterRead.chapterName, index: afterRead.chapterIndex }),
     )
 
-    const readBack = await getJson(
+    const readBack = await callAs(
+        USER_A,
+        'GET',
         `/api/progress?sourceId=${encodeURIComponent(sourceId)}&bookUrl=${encodeURIComponent(bookUrl)}`,
     )
     check(
@@ -468,7 +495,7 @@ console.log('\n=== 7. 书架与阅读进度 ===')
         JSON.stringify(readBack.json?.progress?.chapterUrl),
     )
 
-    const advanced = await call('PUT', '/api/progress', {
+    const advanced = await callA('PUT', '/api/progress', {
         sourceId,
         bookUrl,
         chapterUrl: `${BASE}/fixture/chapter/1/2`,
@@ -481,7 +508,7 @@ console.log('\n=== 7. 书架与阅读进度 ===')
         JSON.stringify(advanced.json?.progress?.chapterIndex),
     )
 
-    const removed = await call(
+    const removed = await callA(
         'DELETE',
         `/api/shelf?key=${encodeURIComponent(afterRead.bookKey ?? '')}`,
     )
@@ -492,7 +519,9 @@ console.log('\n=== 7. 书架与阅读进度 ===')
     )
     check((await shelfOf()).length === baseline, '移出后回到原来的条目数')
 
-    const progressGone = await getJson(
+    const progressGone = await callAs(
+        USER_A,
+        'GET',
         `/api/progress?sourceId=${encodeURIComponent(sourceId)}&bookUrl=${encodeURIComponent(bookUrl)}`,
     )
     check(
@@ -501,7 +530,7 @@ console.log('\n=== 7. 书架与阅读进度 ===')
         JSON.stringify(progressGone.json?.progress),
     )
 
-    const removeAgain = await call(
+    const removeAgain = await callA(
         'DELETE',
         `/api/shelf?key=${encodeURIComponent(afterRead.bookKey ?? '')}`,
     )
@@ -510,6 +539,84 @@ console.log('\n=== 7. 书架与阅读进度 ===')
         '重复移出报 404 shelf_entry_not_found',
         JSON.stringify(removeAgain.json?.code),
     )
+
+    // ------------------------------------------------------------ 按身份隔离
+
+    // 这一组是这层功能存在的理由本身：**换个身份就看不到别人的书架**。
+    // 只测「自己的书架能读写」是测不出漏隔离的 —— 那只要所有查询都不带 owner 也能通过。
+
+    const addForA = await callA('POST', '/api/shelf', {
+        sourceId,
+        bookUrl,
+        name: '甲的书',
+        author: '甲',
+    })
+    check(addForA.status === 201, '身份 A 加一本书', JSON.stringify(addForA.json?.created))
+
+    const shelfA = await shelfOf(USER_A)
+    const shelfB = await shelfOf(USER_B)
+    check(shelfA.length > 0, '身份 A 能看到自己的书架', `count=${shelfA.length}`)
+    check(
+        shelfB.length === 0,
+        '身份 B 的书架是空的（看不到 A 的）',
+        `count=${shelfB.length} ${JSON.stringify(shelfB.map((e) => e.name))}`,
+    )
+
+    // 进度也要隔离：A 读了这一章，B 读同一章应当仍没有进度
+    await callA('PUT', '/api/progress', {
+        sourceId,
+        bookUrl,
+        chapterUrl,
+        chapterName: '第一章 起风了',
+        chapterIndex: 0,
+    })
+    const progressQuery = `/api/progress?sourceId=${encodeURIComponent(sourceId)}&bookUrl=${encodeURIComponent(bookUrl)}`
+    const progressA = await callAs(USER_A, 'GET', progressQuery)
+    const progressB = await callAs(USER_B, 'GET', progressQuery)
+    check(progressA.json?.progress !== null, '身份 A 有阅读进度')
+    check(
+        progressB.json?.progress === null,
+        '身份 B 没有阅读进度（看不到 A 的）',
+        JSON.stringify(progressB.json?.progress),
+    )
+
+    // B 删不掉 A 的书架条目：按 owner 过滤之后应当报「找不到」而不是删掉别人的
+    const keyOfA = shelfA.find((e) => e.name === '甲的书')?.bookKey ?? ''
+    const deleteByB = await callAs(USER_B, 'DELETE', `/api/shelf?key=${encodeURIComponent(keyOfA)}`)
+    check(
+        deleteByB.status === 404,
+        '身份 B 删不掉 A 的书架条目（404 而不是删掉）',
+        `status=${deleteByB.status} code=${deleteByB.json?.code}`,
+    )
+    check(
+        (await shelfOf(USER_A)).some((e) => e.bookKey === keyOfA),
+        'A 的书架条目仍在',
+    )
+
+    // 不带身份必须明确报错，而不是「当作某个默认用户」
+    const noHeader = await callAs(null, 'GET', '/api/shelf')
+    check(
+        noHeader.status === 400 && noHeader.json?.code === 'missing_identity',
+        '不带身份头时返回 400 missing_identity（而不是共用一份书架）',
+        `status=${noHeader.status} code=${noHeader.json?.code}`,
+    )
+
+    // 用 ASCII 的非法值来测：HTTP 头本身就不允许非 ASCII 字符，
+    // 拿中文当用例的话请求根本发不出去，测到的是 fetch 的限制而不是服务端校验
+    // （非 ASCII 那侧由 test/identity.test.ts 直接覆盖 parseUserToken）
+    for (const bad of ['short-token', 'abcdefghijklmnopqrs!']) {
+        const badHeader = await callAs(bad, 'GET', '/api/shelf')
+        check(
+            badHeader.status === 400 && badHeader.json?.code === 'missing_identity',
+            `身份「${bad}」被拒（400）`,
+            `status=${badHeader.status}`,
+        )
+    }
+
+    // 收尾：把 A 造的数据清掉，保证可重复运行
+    await callA('DELETE', `/api/shelf?key=${encodeURIComponent(keyOfA)}`)
+    check((await shelfOf(USER_A)).length === baseline, '身份 A 的数据已清理')
+    check((await shelfOf(USER_B)).length === 0, '身份 B 始终没有数据')
 }
 
 console.log('\n=== 8. 相对地址以书源地址为基准 ===')

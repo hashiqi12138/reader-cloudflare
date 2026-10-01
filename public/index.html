@@ -59,6 +59,11 @@
                 源代码
             </a>
             <span>· 许可 AGPL-3.0-or-later</span>
+            <!--
+                书架按「本机身份」隔离。把身份显示出来（并提供复制/切换）是必要的：
+                否则使用者只会遇到「换个浏览器书架就空了」，却不知道原因。
+            -->
+            <span id="identity" class="identity"></span>
         </footer>
 
         <script type="module" src="/app.js"></script>

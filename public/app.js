@@ -28,9 +28,37 @@ function el(tag, props = {}, children = []) {
     return node
 }
 
+/**
+ * 本机身份
+ *
+ * 书架与阅读进度按身份隔离，服务端要求每个请求带上这个头。
+ * 头名必须与 src/lib/identity.ts 里的 USER_HEADER 一致 —— 两边各写一份是没办法的事
+ * （前端不能用那个模块），所以改动时记得同时改。
+ *
+ * token 首次访问时生成、存在 localStorage 里。由此带来两个必须让使用者知道的事实：
+ *   1. 换浏览器/设备、或清了站点数据，就看到另一份（空的）书架；
+ *   2. 想在另一台设备上接着读，把这里的 token 复制过去即可 —— 页脚提供了这个入口。
+ */
+const USER_HEADER = 'x-reader-user'
+const USER_STORAGE_KEY = 'readerUser'
+const TOKEN_SHAPE = /^[A-Za-z0-9_-]{20,64}$/
+
+function userToken() {
+    let token = localStorage.getItem(USER_STORAGE_KEY) ?? ''
+    if (!TOKEN_SHAPE.test(token)) {
+        // 两段 UUID 去掉连字符正好 64 位，够长也够随机
+        token = (crypto.randomUUID() + crypto.randomUUID()).replace(/-/g, '')
+        localStorage.setItem(USER_STORAGE_KEY, token)
+    }
+    return token
+}
+
 /** 调用接口。失败时抛出带 code 的错误，调用方据此决定怎么提示 */
 async function api(path, options = {}) {
-    const response = await fetch(path, options)
+    const response = await fetch(path, {
+        ...options,
+        headers: { ...(options.headers ?? {}), [USER_HEADER]: userToken() },
+    })
     const text = await response.text()
     let json = null
     try {
@@ -60,6 +88,57 @@ const paramsOf = (obj) => {
         if (value !== undefined && value !== null && value !== '') search.set(key, String(value))
     }
     return search.toString()
+}
+
+/**
+ * 分批导入书源
+ *
+ * 导入接口对**单次请求体**有上限（防止一次误传把 Worker 内存打满），
+ * 而社区合集动辄好几 MB（yckceo 的精选合集 6.5 MB / 821 条），一次传不进去。
+ * 所以这里按大小切片分批提交，再把各批的结果合并成一份报告。
+ *
+ * 切片而不是直接调大上限：上限是为了护住 Worker 内存，调大等于把风险让给线上；
+ * 而分批对任何规模的合集都成立。
+ */
+async function importSourcesChunked(text) {
+    const CHUNK_BYTES = 1.5 * 1024 * 1024
+    const totals = { imported: 0, updated: 0, rejected: [] }
+
+    let list = null
+    try {
+        const parsed = JSON.parse(text)
+        list = Array.isArray(parsed)
+            ? parsed
+            : Array.isArray(parsed?.sources)
+              ? parsed.sources
+              : null
+    } catch {
+        /* 不是合法 JSON 就整段发过去，让接口给出准确的报错 */
+    }
+
+    // 小文件、或结构不对（不是数组）时不切，交给接口统一判定
+    if (!list || list.length === 0 || text.length <= CHUNK_BYTES) {
+        return api('/api/sources', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: text,
+        })
+    }
+
+    const batches = Math.max(1, Math.ceil(text.length / CHUNK_BYTES))
+    const perBatch = Math.ceil(list.length / batches)
+    for (let start = 0; start < list.length; start += perBatch) {
+        const slice = list.slice(start, start + perBatch)
+        const report = await api('/api/sources', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(slice),
+        })
+        totals.imported += report.imported ?? 0
+        totals.updated += report.updated ?? 0
+        if (report.rejected?.length) totals.rejected.push(...report.rejected)
+    }
+    return totals
 }
 
 function parseRoute() {
@@ -120,6 +199,55 @@ function applyTheme() {
 
 function applyFontSize() {
     document.documentElement.style.setProperty('--reader-font-size', `${prefs.fontSize}px`)
+}
+
+/**
+ * 页脚里的身份显示
+ *
+ * 身份是「书架跟着谁走」的唯一依据，把它藏起来只会让人困惑于
+ * 「为什么换个浏览器书架就空了」。显示出来，并给出复制/切换两个入口 ——
+ * 这样在另一台设备上接着读是可行的，而不是只能重来。
+ */
+function renderIdentity() {
+    const host = document.querySelector('#identity')
+    if (!host) return
+    const token = userToken()
+
+    host.replaceChildren(
+        el('span', { text: `本机身份 ${token.slice(0, 6)}…${token.slice(-4)}` }),
+        el('button', {
+            class: 'btn sm',
+            text: '复制',
+            title: '复制本机身份，可在另一台设备上「切换身份」粘贴',
+            onclick: async () => {
+                try {
+                    await navigator.clipboard.writeText(token)
+                    toast('身份已复制')
+                } catch {
+                    // 剪贴板权限可能被浏览器拒绝，那就把完整的贴出来让人手动复制
+                    toast(`复制失败，请手动复制：${token}`, 'error')
+                }
+            },
+        }),
+        el('button', {
+            class: 'btn sm',
+            text: '切换',
+            title: '粘贴另一台设备的身份，接着读那边的书架',
+            onclick: () => {
+                const next = prompt('粘贴另一台设备的身份（留空取消）：', '')
+                if (!next) return
+                const trimmed = next.trim()
+                if (!TOKEN_SHAPE.test(trimmed)) {
+                    toast('身份格式不对（应为 20～64 位字母、数字或 - _）', 'error')
+                    return
+                }
+                localStorage.setItem(USER_STORAGE_KEY, trimmed)
+                shelfCache = null
+                toast('已切换身份')
+                render()
+            },
+        }),
+    )
 }
 
 // ---------------------------------------------------------------- 书架缓存
@@ -511,11 +639,7 @@ async function viewSources(host) {
                         event.target.disabled = true
                         event.target.textContent = '导入中…'
                         try {
-                            const report = await api('/api/sources', {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: text,
-                            })
+                            const report = await importSourcesChunked(text)
                             lastImportReport = report
                             toast(`新增 ${report.imported} 条，更新 ${report.updated} 条`)
                             render()
@@ -1006,6 +1130,7 @@ window.addEventListener('hashchange', render)
 window.addEventListener('DOMContentLoaded', () => {
     applyTheme()
     applyFontSize()
+    renderIdentity()
     for (const tab of document.querySelectorAll('.tab')) {
         tab.addEventListener('click', () => go(`#/${tab.dataset.route}`))
     }

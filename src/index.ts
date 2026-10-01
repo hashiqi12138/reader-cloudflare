@@ -19,6 +19,7 @@ import { parseHtml } from './engine/select'
 import { handleFixture } from './fixture'
 import { fetchBookInfo, fetchChapters, fetchContent, searchBooks } from './legado/ops'
 import { UpstreamError } from './lib/http'
+import { USER_HEADER, parseUserToken } from './lib/identity'
 
 const app = new Hono<{ Bindings: Env }>()
 
@@ -57,6 +58,21 @@ function fail(
 /** 本次请求的注册表选项 */
 function registryOf(env: Env): RegistryOptions {
     return { includeFixture: env.ENABLE_FIXTURE === 'true' }
+}
+
+/**
+ * 取出本次请求的身份
+ *
+ * 书架与阅读进度按身份隔离；**书源不隔离** ——
+ * 书源是「这份实例怎么取网」的配置，属于部署者；书架是使用者自己的数据。
+ * 两者混在一起管，只会让「换个浏览器书架空了、书源却还在」这种预期外的行为变多。
+ */
+function ownerOf(c: { req: { header: (name: string) => string | undefined } }): string {
+    try {
+        return parseUserToken(c.req.header(USER_HEADER))
+    } catch (err) {
+        throw new DataError(describe(err), 400, 'missing_identity')
+    }
 }
 
 /**
@@ -208,13 +224,17 @@ app.delete('/api/sources', async (c) => {
  * 与搜索一样，书架条目本身不在这里校验书源是否存在 —— 书源是可增删的，
  * 书架记的是「这本书来自哪个源、地址是什么」。源被删掉之后书架条目还在，
  * 打开时由前端按源是否可用给出提示，而不是让书架悄悄少几本。
+ *
+ * 这几个接口都要求带身份头（见 ownerOf）。
  */
 app.get('/api/shelf', async (c) => {
-    const entries = await listShelf(c.env.DB)
+    const entries = await listShelf(c.env.DB, ownerOf(c))
     return c.json({ count: entries.length, entries })
 })
 
 app.post('/api/shelf', async (c) => {
+    const owner = ownerOf(c)
+
     let body: AddToShelfInput
     try {
         body = await c.req.json()
@@ -223,7 +243,7 @@ app.post('/api/shelf', async (c) => {
     }
 
     try {
-        const { entry, created } = await addToShelf(c.env.DB, body)
+        const { entry, created } = await addToShelf(c.env.DB, owner, body)
         return c.json({ entry, created }, created ? 201 : 200)
     } catch (err) {
         return fail(c, err)
@@ -231,11 +251,12 @@ app.post('/api/shelf', async (c) => {
 })
 
 app.delete('/api/shelf', async (c) => {
+    const owner = ownerOf(c)
     const key = c.req.query('key') ?? ''
     if (key === '') return c.json({ error: '缺少 key 参数' }, 400)
 
     try {
-        const removed = await removeFromShelf(c.env.DB, key)
+        const removed = await removeFromShelf(c.env.DB, owner, key)
         return c.json({ removed: removed.bookKey, name: removed.name })
     } catch (err) {
         return fail(c, err)
@@ -244,17 +265,20 @@ app.delete('/api/shelf', async (c) => {
 
 /** 阅读位置。不在书架里的书也记 —— 否则「读了两章再搜回来」就得从头翻 */
 app.get('/api/progress', async (c) => {
+    const owner = ownerOf(c)
     const sourceId = c.req.query('sourceId') ?? ''
     const bookUrl = c.req.query('bookUrl') ?? ''
     if (sourceId === '' || bookUrl === '') {
         return c.json({ error: '缺少 sourceId 或 bookUrl 参数' }, 400)
     }
 
-    const progress = await getProgress(c.env.DB, bookKey(sourceId, bookUrl))
+    const progress = await getProgress(c.env.DB, owner, bookKey(sourceId, bookUrl))
     return c.json({ progress: progress ?? null })
 })
 
 app.put('/api/progress', async (c) => {
+    const owner = ownerOf(c)
+
     let body: SaveProgressInput
     try {
         body = await c.req.json()
@@ -263,7 +287,7 @@ app.put('/api/progress', async (c) => {
     }
 
     try {
-        const progress = await saveProgress(c.env.DB, body)
+        const progress = await saveProgress(c.env.DB, owner, body)
         return c.json({ progress })
     } catch (err) {
         return fail(c, err)
