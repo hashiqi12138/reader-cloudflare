@@ -207,12 +207,21 @@ export const setUnauthorizedHandler = (fn) => {
     onUnauthorized = fn
 }
 
+/**
+ * `authAttempt` 标记「这次请求本来就没有会话」
+ *
+ * 登录、注册的 401 意思是**账号或密码不对**，不是「会话过期了」。
+ * 两者都走全局的失效处理，用户输错一次密码就会看到「登录状态已失效，请重新登录」，
+ * 于是以为系统坏了、反复重试 —— 线上真实出现过这个误导。
+ * 所以这类请求自己把错误显示在表单上，不触发跳转。
+ */
 export async function api(path, options = {}) {
+    const { authAttempt = false, ...rest } = options
     const response = await fetch(path, {
-        ...options,
+        ...rest,
         // 会话是 HttpOnly cookie，同源请求会自动带上
         credentials: 'same-origin',
-        headers: { ...(options.headers ?? {}), 'x-reader-user': anonToken() },
+        headers: { ...(rest.headers ?? {}), 'x-reader-user': anonToken() },
     })
 
     const raw = await response.text()
@@ -224,21 +233,31 @@ export async function api(path, options = {}) {
     }
 
     if (!response.ok) {
-        const error = new Error(json?.error ?? `请求失败（HTTP ${response.status}）`)
+        // 非 JSON 的错误体几乎都是 Cloudflare 自己生成的（1102 资源超限、502 等），
+        // 原样拼进提示只会是一堆 HTML。这里换成一句能看懂的，并把状态码留着便于排查。
+        const fallback =
+            json === null && response.status >= 500
+                ? `服务暂时不可用（HTTP ${response.status}），请稍后再试`
+                : `请求失败（HTTP ${response.status}）`
+        const error = new Error(json?.error ?? fallback)
         error.code = json?.code ?? 'http_error'
         error.status = response.status
-        if (response.status === 401) onUnauthorized?.(error)
+        if (response.status === 401 && !authAttempt) onUnauthorized?.(error)
         throw error
     }
     return json
 }
 
-export const postJson = (path, body) =>
+export const postJson = (path, body, options = {}) =>
     api(path, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
+        ...options,
     })
+
+/** 与 postJson 相同，但 401 由调用方自己处理（见 api 的 authAttempt 说明） */
+export const postAuth = (path, body) => postJson(path, body, { authAttempt: true })
 
 // ---------------------------------------------------------------- 登录态
 
@@ -258,13 +277,13 @@ export function clearSession() {
 }
 
 export async function register(username, password) {
-    const data = await postJson('/api/auth/register', { username, password })
+    const data = await postAuth('/api/auth/register', { username, password })
     session = { loaded: true, user: data.user, claimable: false }
     return data.user
 }
 
 export async function login(username, password) {
-    const data = await postJson('/api/auth/login', { username, password })
+    const data = await postAuth('/api/auth/login', { username, password })
     // 登录成功后重新问一次 /me：它会顺带告诉本机有没有可并入的旧匿名书架
     session = { loaded: false, user: data.user, claimable: false }
     return loadSession(true)
