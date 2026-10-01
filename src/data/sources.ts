@@ -21,12 +21,12 @@ export interface RegisteredSource extends BookSource {
 /** 内置测试站点的书源定义。地址随请求来源变化，因此按 origin 现造 */
 export function fixtureSource(origin: string): RegisteredSource {
   return {
-    id: 'builtin:fixture',
+    id: 'builtin:fixture-css',
     builtin: true,
-    bookSourceName: '内置测试站点',
+    bookSourceName: '内置测试站点（CSS 规则）',
     bookSourceUrl: origin,
     bookSourceGroup: '测试',
-    bookSourceComment: '项目自带的测试站点，用于验证引擎链路，不含任何第三方内容',
+    bookSourceComment: '项目自带的测试站点，用 @css: 规则驱动',
     bookSourceType: 0,
     enabled: true,
 
@@ -56,9 +56,53 @@ export function fixtureSource(origin: string): RegisteredSource {
   }
 }
 
+/**
+ * 同一个测试站点，改用 XPath 规则
+ *
+ * 存在的意义是**对照验证**：两套方言打同一个页面，提取结果必须完全一致。
+ * 只测一套的话，XPath 这条路径上的问题（上下文节点、取属性、取文本节点）
+ * 都可以被掩盖过去。
+ */
+export function fixtureXPathSource(origin: string): RegisteredSource {
+  return {
+    id: 'builtin:fixture-xpath',
+    builtin: true,
+    bookSourceName: '内置测试站点（XPath 规则）',
+    bookSourceUrl: origin,
+    bookSourceGroup: '测试',
+    bookSourceComment: '项目自带的测试站点，用 XPath 规则驱动，用于与 CSS 版本对照',
+    bookSourceType: 0,
+    enabled: true,
+
+    searchUrl: `${origin}/fixture/search?q={{key}}&p={{page}}`,
+    ruleSearch: {
+      bookList: '//div[@class="result-item"]',
+      name: '//h3[@class="title"]/a/text()',
+      author: '//span[@class="author"]/text()',
+      kind: '//span[@class="kind"]/text()',
+      intro: '//p[@class="intro"]/text()',
+      bookUrl: '//h3[@class="title"]/a/@href',
+    },
+    ruleBookInfo: {
+      name: '//h1[@class="book-name"]/text()',
+      author: '//span[@class="book-author"]/text()',
+      intro: '//div[@class="book-intro"]/text()',
+      tocUrl: '//a[@class="toc-link"]/@href',
+    },
+    ruleToc: {
+      chapterList: '//ul[@class="chapter-list"]/li',
+      chapterName: '//a/text()',
+      chapterUrl: '//a/@href',
+    },
+    ruleContent: {
+      content: '//div[@id="content"]//text()',
+    },
+  }
+}
+
 /** 当前可用的书源列表 */
 export function listSources(origin: string): RegisteredSource[] {
-  return [fixtureSource(origin)]
+  return [fixtureSource(origin), fixtureXPathSource(origin)]
 }
 
 /** 按 id 取一条书源 */

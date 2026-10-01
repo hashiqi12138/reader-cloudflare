@@ -19,6 +19,7 @@ import { parseJsoupRule } from './jsoup'
 import { extractValues, parseHtml, reparseFragment, selectNodes } from './select'
 import { jsonPathToStrings } from './jsonpath'
 import { runInSandbox, sandboxResultToString } from './js'
+import { isAttributeView, runXPath } from './xpath'
 
 /** 一次规则求值所面对的上下文：一个可继续筛选的节点集 */
 export interface Selection {
@@ -119,6 +120,38 @@ function selectByCss(sel: Selection, css: string): any[] {
   return nodes
 }
 
+/**
+ * 把 `//x` 改写成 `.//x`
+ *
+ * XPath 里 `//x` 是「从文档根往下找」，但书源里它始终表示**从当前节点往下找**：
+ * 字段规则是跑在搜索结果的某一个条目上的，若真按文档根解释，就会抓到整页里
+ * 第一个匹配的 `<a>`，而不是这一条里的那个 —— 数据看起来"有"，但全串了行。
+ *
+ * `//x` 展开就是 `/descendant-or-self::node()/child::x`，前面加 `.` 变成 `.//x`，
+ * 即「以当前节点为起点往下找」。作用在文档根上时两者等价，所以这一改写
+ * 同时满足「整页规则」和「条目内规则」两种场景。
+ *
+ * 不以 `//` 开头的表达式（`string(...)`、`count(...)`、`/html/body/...`）
+ * 本身就是文档级的，保持原样。
+ */
+function toRelativeXPath(body: string): string {
+  return body.startsWith('//') ? `.${body}` : body
+}
+
+/**
+ * 取一个 XPath 结果节点的值
+ *
+ * XPath 与 JSOUP 规则不同：**取什么由表达式自己决定**（`/text()` 给文本节点、
+ * `/@href` 给属性节点、选中元素则取它的文本），所以这里没有 `@text` / `@href`
+ * 那样的取值后缀。
+ */
+function xpathNodeValue($: Selection['$'], node: any): string {
+  if (isAttributeView(node)) return node.value.trim()
+  if (node?.type === 'text') return String(node.data ?? '').trim()
+  if (!node || typeof node !== 'object') return ''
+  return $(node).text().trim()
+}
+
 /** 在给定节点集上跑一条「纯选择器」规则，返回字符串列表 */
 function evalSelector(sel: Selection, body: string, kind: string): string[] {
   if (kind === 'json') {
@@ -132,10 +165,20 @@ function evalSelector(sel: Selection, body: string, kind: string): string[] {
   }
 
   if (kind === 'xpath') {
-    throw new UnsupportedRuleError(
-      `XPath 规则暂未实现：${body.slice(0, 60)}。` +
-        `本引擎目前支持 JSOUP 默认语法、@css: 与 @json:，XPath 需要额外引入 XPath 解析库`,
-    )
+    const expression = toRelativeXPath(body)
+    const values: string[] = []
+    for (const node of sel.nodes) {
+      const outcome = runXPath(sel.$, expression, node)
+      if (outcome.kind === 'scalar') {
+        if (outcome.value !== '') values.push(outcome.value)
+        continue
+      }
+      for (const hit of outcome.nodes) {
+        const value = xpathNodeValue(sel.$, hit)
+        if (value !== '') values.push(value)
+      }
+    }
+    return values
   }
 
   if (kind === 'css') {
@@ -172,7 +215,8 @@ export async function analyzeStrings(
       case '||':
         // 取第一个有值的
         return results.find((r) => r.length > 0) ?? []
-      case '%%': { // 依次取数：第 1 个列表取第 1 个，第 2 个列表取第 1 个……再回头取第 2 轮
+      case '%%': {
+        // 依次取数：第 1 个列表取第 1 个，第 2 个列表取第 1 个……再回头取第 2 轮
         const out: string[] = []
         const max = Math.max(...results.map((r) => r.length), 0)
         for (let i = 0; i < max; i++) {
@@ -317,6 +361,19 @@ export async function analyzeSelections(
 
   if (kind.kind === 'css') {
     nodes = selectByCss(sel, splitCssExtract(kind.body).css)
+  } else if (kind.kind === 'xpath') {
+    // 列表规则同样要把 `//` 当相对路径用：目录规则要的是「本页里的章节项」，
+    // 而不是"全文档里的第一个"
+    const expression = toRelativeXPath(kind.body)
+    const collected: any[] = []
+    for (const node of sel.nodes) {
+      const outcome = runXPath(sel.$, expression, node)
+      if (outcome.kind === 'nodes') {
+        // 属性节点不能作为后续规则继续筛选的上下文，丢掉
+        collected.push(...outcome.nodes.filter((n) => !isAttributeView(n)))
+      }
+    }
+    nodes = collected
   } else if (kind.kind === 'jsoup') {
     const plan = parseJsoupRule(kind.body)
     nodes = selectNodes(sel.$, sel.nodes, plan.steps)

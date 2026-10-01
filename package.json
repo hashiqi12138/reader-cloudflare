@@ -1,6 +1,6 @@
 {
   "name": "reader-cloudflare",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "书源聚合阅读器：兼容 Legado 书源格式的规则引擎，整套跑在 Cloudflare 上",
   "engines": {
@@ -29,7 +29,8 @@
   "dependencies": {
     "cheerio": "^1.2.0",
     "hono": "^4.13.12",
-    "quickjs-emscripten": "^0.32.0"
+    "quickjs-emscripten": "^0.32.0",
+    "xpath": "^0.0.34"
   },
   "devDependencies": {
     "@types/node": "^26.6.3",
