@@ -95,10 +95,10 @@ console.log('\n=== 2. 书源列表 ===')
 const sources = await getJson('/api/sources')
 check(sources.status === 200, 'GET /api/sources 返回 200')
 const list = sources.json?.sources ?? []
-// 必须是五个：对照验证要求 CSS / XPath / JS / JSON / @js:result 五条路径都在场
+// 必须是六个：对照验证要求 CSS / XPath / JS / JSON / @js:result / 字段模板 六条路径都在场
 check(
-    list.length >= 5,
-    '五个测试书源齐备（CSS / XPath / JS / JSON / @js:result 各一）',
+    list.length >= 6,
+    '六个测试书源齐备（CSS / XPath / JS / JSON / @js:result / 字段模板 各一）',
     `count=${list.length}`,
 )
 if (list.length === 0) {
@@ -1259,10 +1259,163 @@ console.log('\n=== 13. 图片 / 音频 / 文件源 ===')
     )
 }
 
+console.log('\n=== 14. 字段规则里的 {{}} 模板 ===')
+{
+    /**
+     * 线上 816 条书源里有 939 处字段模板，是最容易「静默取空」的一类写法：
+     * 展开之后如果还当选择器去筛，只会得到空串，症状就是「这个字段读不出来」。
+     *
+     * 这里把几种真实形态各验一遍。asmr 那条源卡住的就是第一种：
+     * `bookUrl: "/api/tracks/{{$.id}}"` 一直取到空串。
+     */
+    const id = `user:${BASE}`
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: '模板形态测试源',
+                bookSourceUrl: BASE,
+                searchUrl: `${BASE}/fixture/api/search?q={{key}}&p={{page}}`,
+                ruleSearch: {
+                    bookList: '$.data.list',
+                    // 字面文本 + 模板
+                    name: '《{{$.name}}》',
+                    author: '{{$.author}}',
+                    // 模板 + 正则链：展开成字面值之后再套 `##`
+                    kind: '{{$.kind}}##玄幻##类型：玄幻',
+                    // 裸标识符 → 走沙箱取全局（书源里 `{{key}}`、`{{baseUrl}}` 就是这么用的）
+                    lastChapter: '关键词：{{key}}',
+                    intro: '{{$.intro}}',
+                    // 这一条就是 asmr 的形状：模板 + 相对路径
+                    bookUrl: `/fixture/book/{{$.id}}`,
+                },
+                ruleBookInfo: {
+                    name: '@css:h1.book-name@text',
+                    // 冗余 `@` 标记 + 规则（真实书源里有 214 处这么写）
+                    intro: '{{@@h1.book-name@text}}',
+                    // 纯模板当字面值，再套 `##` 正则链
+                    tocUrl: '{{baseUrl}}##/book/##/toc/',
+                },
+                ruleToc: {
+                    chapterList: '@css:ul.chapter-list li',
+                    chapterName: '@css:a@text',
+                    chapterUrl: '@css:a@href',
+                },
+                ruleContent: {
+                    // 模板出现在 `##` 的查找串里：把章节标题从正文中删掉
+                    content: '@css:div#content@textNodes##{{@css:h1.chapter-title@text}}',
+                },
+            },
+        ]),
+    )
+
+    const searchRes = await call('POST', '/api/search', {
+        keyword: '测试',
+        sourceIds: [id],
+    })
+    const per = searchRes.json?.sources?.[0]
+    const books = per?.books ?? []
+    check(books.length === 2, '模板源搜到 2 本书', per?.error ?? `count=${books.length}`)
+
+    if (books.length > 0) {
+        const book = books[0]
+        check(book.name === '《测试小说·甲》', '字面 + 模板：书名带上了书名号', book.name)
+        check(book.author === '作者甲', '纯模板：作者取到了', book.author)
+        check(book.kind === '类型：玄幻', '模板 + 正则链：`##` 作用在展开后的字面值上', book.kind)
+        check(
+            book.lastChapter === '关键词：测试',
+            '裸标识符走沙箱：取到了 key 全局',
+            book.lastChapter,
+        )
+        check(
+            book.bookUrl === `${BASE}/fixture/book/1`,
+            '模板 + 相对路径：地址拼对了（asmr 卡住的就是这一条）',
+            book.bookUrl,
+        )
+
+        const info = await getJson(
+            `/api/book?sourceId=${encodeURIComponent(id)}&url=${encodeURIComponent(book.bookUrl)}`,
+        )
+        check(
+            info.json?.intro === '测试小说·甲',
+            '冗余 `@` 标记：规则照常生效',
+            info.json?.intro ?? '',
+        )
+        check(
+            info.json?.tocUrl === `${BASE}/fixture/toc/1`,
+            '纯模板当字面值 + `##` 正则链：目录地址替换正确',
+            info.json?.tocUrl ?? '',
+        )
+
+        const toc = await getJson(
+            `/api/toc?sourceId=${encodeURIComponent(id)}&url=${encodeURIComponent(info.json?.tocUrl ?? '')}`,
+        )
+        const chapters = toc.json?.chapters ?? []
+        check(
+            chapters.length === 3,
+            '目录能正常打开',
+            toc.json?.error ?? `count=${chapters.length}`,
+        )
+
+        if (chapters.length > 0) {
+            const content = await getJson(
+                `/api/content?sourceId=${encodeURIComponent(id)}&url=${encodeURIComponent(chapters[0].url)}`,
+            )
+            const text = String(content.json?.content ?? '')
+            check(
+                text.includes('正文第一段'),
+                '正文取到了',
+                content.json?.error ?? JSON.stringify(text.slice(0, 40)),
+            )
+            check(
+                !text.includes('第一章 起风了'),
+                '模板进 `##` 查找串：章节标题被从正文里删掉了',
+                JSON.stringify(text.slice(0, 60)),
+            )
+        }
+    }
+
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+
+    // ---- 不支持的复合过滤器必须报错，而不是「没搜到」 ----
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: '复合过滤器测试源',
+                bookSourceUrl: BASE,
+                searchUrl: `${BASE}/fixture/api/search?q={{key}}&p={{page}}`,
+                ruleSearch: {
+                    bookList: '$.data.list[?(@.name&&@.author)]',
+                    name: '{{$.name}}',
+                    bookUrl: '/fixture/book/{{$.id}}',
+                },
+                ruleToc: {},
+                ruleContent: {},
+            },
+        ]),
+    )
+    const badFilter = await call('POST', '/api/search', { keyword: '测试', sourceIds: [id] })
+    const badPer = badFilter.json?.sources?.[0]
+    check(
+        badPer?.ok === false && String(badPer?.error ?? '').includes('复合过滤器'),
+        '不支持的过滤器明确报错，而不是静默返回 0 条',
+        JSON.stringify(badPer?.error ?? badPer?.books),
+    )
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+
+    const left = (await getJson('/api/sources')).json?.sources ?? []
+    check(!left.some((s) => s.id === id), '模板测试源已清理')
+}
+
 console.log('\n=== 结果 ===')
 if (failures.length === 0) {
     console.log(
-        `全部通过：搜索 → 详情 → 目录 → 正文，${succeeded.length} 个书源（CSS / XPath / JS / JSON / @js:result）结果一致，` +
+        `全部通过：搜索 → 详情 → 目录 → 正文，${succeeded.length} 个书源（CSS / XPath / JS / JSON / @js:result / 字段模板）结果一致，` +
             '图片/音频/文件源各自取回对应形态，媒体代取与签名保护正常',
     )
 } else {

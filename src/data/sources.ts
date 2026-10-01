@@ -275,6 +275,57 @@ export function fixtureJsResultSource(origin: string): RegisteredSource {
 }
 
 /**
+ * 字段规则里带 `{{...}}` 模板的源
+ *
+ * 线上 816 条书源里有 939 处字段模板，是最容易「静默取空」的一类写法：
+ * 展开之后如果还当选择器去筛，只会得到空串，而症状就是「这个字段读不出来」。
+ *
+ * 这一条把两种形态凑在一起，并且**结果与其他源逐字一致**，
+ * 因此照常参与第 3、4 节的对照：
+ *   - `{{$.name}}`             纯模板 → 展开即结果
+ *   - `/fixture/book/{{$.id}}`  模板 + 字面文本（asmr 的 `/api/tracks/{{$.id}}` 就是这个形状）
+ *
+ * JS 表达式模板、冗余 `@` 标记、模板进 `##` 正则链这几种，在第 14 节单独验。
+ */
+export function fixtureTemplateSource(origin: string): RegisteredSource {
+    return {
+        id: 'builtin:fixture-template',
+        builtin: true,
+        sortOrder: 5,
+        bookSourceName: '内置测试站点（字段模板规则）',
+        bookSourceUrl: origin,
+        bookSourceGroup: '测试',
+        bookSourceComment: '项目自带的测试站点，字段规则用 {{}} 模板驱动',
+        bookSourceType: 0,
+        enabled: true,
+
+        searchUrl: `${origin}/fixture/api/search?q={{key}}&p={{page}}`,
+        ruleSearch: {
+            bookList: '$.data.list',
+            name: '{{$.name}}',
+            author: '{{$.author}}',
+            kind: '{{$.kind}}',
+            intro: '{{$.intro}}',
+            bookUrl: `/fixture/book/{{$.id}}`,
+        },
+        ruleBookInfo: {
+            name: '@css:h1.book-name@text',
+            author: '@css:span.book-author@text',
+            intro: '@css:div.book-intro@text',
+            tocUrl: '@css:a.toc-link@href',
+        },
+        ruleToc: {
+            chapterList: '@css:ul.chapter-list li',
+            chapterName: '@css:a@text',
+            chapterUrl: '@css:a@href',
+        },
+        ruleContent: {
+            content: '@css:div#content@textNodes',
+        },
+    }
+}
+
+/**
  * 图片源（bookSourceType=2）
  *
  * 正文规则取的是 `<img>` 标签，而且**真地址在 data-src 上**，与真实漫画站一致。
@@ -284,7 +335,7 @@ export function fixtureImageSource(origin: string): RegisteredSource {
     return {
         id: 'builtin:fixture-image',
         builtin: true,
-        sortOrder: 5,
+        sortOrder: 6,
         bookSourceName: '内置测试站点（图片源）',
         bookSourceUrl: origin,
         bookSourceGroup: '测试',
@@ -329,7 +380,7 @@ export function fixtureAudioSource(origin: string): RegisteredSource {
     return {
         id: 'builtin:fixture-audio',
         builtin: true,
-        sortOrder: 6,
+        sortOrder: 7,
         bookSourceName: '内置测试站点（音频源）',
         bookSourceUrl: origin,
         bookSourceGroup: '测试',
@@ -370,7 +421,7 @@ export function fixtureAudioNoRuleSource(origin: string): RegisteredSource {
     return {
         id: 'builtin:fixture-audio-norule',
         builtin: true,
-        sortOrder: 7,
+        sortOrder: 8,
         bookSourceName: '内置测试站点（音频源·无正文规则）',
         bookSourceUrl: origin,
         bookSourceGroup: '测试',
@@ -410,7 +461,7 @@ export function fixtureFileSource(origin: string): RegisteredSource {
     return {
         id: 'builtin:fixture-file',
         builtin: true,
-        sortOrder: 8,
+        sortOrder: 9,
         bookSourceName: '内置测试站点（文件源）',
         bookSourceUrl: origin,
         bookSourceGroup: '测试',
@@ -446,6 +497,7 @@ export function builtinSources(origin: string): RegisteredSource[] {
         fixtureJsSource(origin),
         fixtureJsonSource(origin),
         fixtureJsResultSource(origin),
+        fixtureTemplateSource(origin),
         fixtureImageSource(origin),
         fixtureAudioSource(origin),
         fixtureAudioNoRuleSource(origin),

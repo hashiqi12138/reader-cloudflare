@@ -14,11 +14,12 @@
  */
 
 import { applyAllInOne, applyRegexOps, splitRegexChain } from './regex'
-import type { RuleContext, RuleResult } from './types'
+import { UnsupportedRuleError, type RuleContext, type RuleResult } from './types'
 import { parseJsoupRule } from './jsoup'
 import { extractValues, parseHtml, reparseFragment, selectNodes } from './select'
 import { jsonPathToStrings } from './jsonpath'
 import { runInSandbox, sandboxResultToString } from './js'
+import { classifyTemplate, hasRuleSyntax, stripRuleMarker, templatePattern } from './template'
 import { isAttributeView, runXPath } from './xpath'
 
 /** 一次规则求值所面对的上下文：一个可继续筛选的节点集 */
@@ -30,12 +31,7 @@ export interface Selection {
 }
 
 /** 规则用了本引擎尚未实现的能力时抛这个，好让上层把「不支持」和「没匹配到」区分开 */
-export class UnsupportedRuleError extends Error {
-    constructor(message: string) {
-        super(message)
-        this.name = 'UnsupportedRuleError'
-    }
-}
+export { UnsupportedRuleError }
 
 export function rootSelection(source: string): Selection {
     const $ = parseHtml(source)
@@ -54,14 +50,64 @@ function selectionFromText(text: string, source: string): Selection {
     return { $, nodes: $.root().find('div').toArray(), source }
 }
 
-/** 拆同级连接符；返回 null 表示没有连接符 */
+/**
+ * 拆同级连接符；返回 null 表示没有连接符
+ *
+ * **方括号里与引号里的连接符不算**：`$.list[?(@.a&&@.b)]` 里的 `&&` 是 JSONPath 的与，
+ * `@js:"a||b"` 里的 `||` 是字符串内容。
+ *
+ * 不排除的话规则会被从中间切开，每一块看起来都「合法」，只是结果全不对 ——
+ * 更糟的是**报错信息会指向切开后的半截规则**（`过滤器缺少收尾的 )：$.list[?(@.a`），
+ * 让人以为是过滤器写错了格式，而真正的问题在别处。
+ */
 function splitConnectors(rule: string): { parts: string[]; joiner: '&&' | '||' | '%%' } | null {
     for (const joiner of ['&&', '||', '%%'] as const) {
-        if (rule.includes(joiner)) {
-            return { parts: rule.split(joiner), joiner }
-        }
+        const parts = splitOutsideBrackets(rule, joiner)
+        if (parts) return { parts, joiner }
     }
     return null
+}
+
+/** 按分隔符切分，但跳过方括号内与引号内的内容；没有分隔符时返回 null */
+function splitOutsideBrackets(rule: string, delimiter: string): string[] | null {
+    const parts: string[] = []
+    let depth = 0
+    let quote = ''
+    let last = 0
+    let found = false
+
+    for (let i = 0; i < rule.length; i += 1) {
+        const ch = rule[i]!
+
+        if (quote !== '') {
+            if (ch === quote) quote = ''
+            continue
+        }
+        if (ch === '"' || ch === "'") {
+            quote = ch
+            continue
+        }
+        if (ch === '[') {
+            depth += 1
+            continue
+        }
+        if (ch === ']') {
+            depth = Math.max(0, depth - 1)
+            continue
+        }
+        if (depth > 0) continue
+
+        if (rule.startsWith(delimiter, i)) {
+            parts.push(rule.slice(last, i))
+            i += delimiter.length - 1
+            last = i + 1
+            found = true
+        }
+    }
+
+    if (!found) return null
+    parts.push(rule.slice(last))
+    return parts
 }
 
 /** 把选择器部分拆成 [选择器, JS, 选择器, JS, ...]，对应 `<js></js>` 分隔 */
@@ -255,7 +301,76 @@ function evalSelector(sel: Selection, body: string, kind: string): string[] {
     return plan.reverse ? values.reverse() : values
 }
 
-/** 规则求值：返回字符串列表 */
+/**
+ * 求值一个 `{{...}}` 里的内容
+ *
+ * 这里是 `{{}}` 与 `searchUrl` 模板（`source.ts` 的 resolveTemplate）的区别：
+ * URL 模板里只可能是 JS 变量，而字段规则模板里**两种都可能是**。
+ */
+async function evalTemplate(sel: Selection, inner: string, ctx: RuleContext): Promise<string> {
+    const text = stripRuleMarker(inner.trim())
+    if (text === '') return ''
+
+    if (classifyTemplate(text) === 'js') {
+        try {
+            const value = await runInSandbox(
+                text,
+                { ...baseGlobals(ctx), result: sel.source, src: sel.source },
+                { http: ctx.http },
+            )
+            return sandboxResultToString(value)
+        } catch {
+            // 模板里常用的 `java.timeFormat` / `java.getString` 这类助手我们还没实现。
+            // 这里**只让这一小段变空**，而不是让整个字段报错 ——
+            // 一个展示用的标签取不到，不该导致整本书的详情页打不开。
+            // 缺哪些助手记在 README 的「已知缺口」里。
+            return ''
+        }
+    }
+
+    const values = await analyzeStrings(sel, text, ctx)
+    return values.filter((v) => v !== '').join('\n')
+}
+
+/**
+ * 展开规则里的 `{{...}}`
+ *
+ * 同时返回一份**骨架**：把每个 `{{...}}` 换成空串之后的规则。
+ * 骨架用来判断「展开结果还该不该当规则求值」—— 不能拿展开结果本身去判断，
+ * 因为值里可能正好含 `@`（简介里有个邮箱就够了），那样会把纯文本误当成规则。
+ */
+async function expandTemplates(
+    sel: Selection,
+    rule: string,
+    ctx: RuleContext,
+): Promise<{ expanded: string; skeleton: string }> {
+    let expanded = ''
+    let skeleton = ''
+    let last = 0
+
+    // 每次新建正则：带 lastIndex 的全局正则在并发请求之间会互相踩
+    const pattern = templatePattern()
+    let match: RegExpExecArray | null
+    while ((match = pattern.exec(rule)) !== null) {
+        const plain = rule.slice(last, match.index)
+        expanded += plain
+        skeleton += plain
+        expanded += await evalTemplate(sel, match[1] ?? '', ctx)
+        last = match.index + match[0].length
+    }
+    const tail = rule.slice(last)
+    expanded += tail
+    skeleton += tail
+
+    return { expanded, skeleton }
+}
+
+/**
+ * 规则求值：返回字符串列表
+ *
+ * `skeleton` 是去掉模板内容之后的骨架，`null` 表示这条规则里没有模板。
+ * 只为 `null` 与「有模板」两种情况服务，不参与其它判断。
+ */
 export async function analyzeStrings(
     sel: Selection,
     rule: string,
@@ -264,12 +379,31 @@ export async function analyzeStrings(
     const trimmed = rule.trim()
     if (trimmed === '') return []
 
+    if (!trimmed.includes('{{')) return evalRule(sel, trimmed, null, ctx)
+
+    // 模板先展开：`{{}}` 里可能有 `||`、`##`，先展开才不会把它们当成分隔符
+    // 把规则切碎（`{{$.a||$.b}}`、`{{$.desc##x##y}}` 都是真实写法）
+    const { expanded, skeleton } = await expandTemplates(sel, trimmed, ctx)
+    return evalRule(sel, expanded, skeleton, ctx)
+}
+
+/** 连接符与正则链的解析；`skeleton` 与 `rule` 结构对应 */
+async function evalRule(
+    sel: Selection,
+    rule: string,
+    skeleton: string | null,
+    ctx: RuleContext,
+): Promise<string[]> {
     // 同级连接符优先：`a||b` 两块是并列关系，各自独立求值
-    const connectors = splitConnectors(trimmed)
+    const connectors = splitConnectors(rule)
     if (connectors) {
+        const skeletonParts = skeleton === null ? null : (splitConnectors(skeleton)?.parts ?? null)
         const results: string[][] = []
-        for (const part of connectors.parts) {
-            results.push(await analyzeStrings(sel, part, ctx))
+        for (let i = 0; i < connectors.parts.length; i += 1) {
+            const part = connectors.parts[i]!
+            // 连接符本身来自模板里展开出来的值时，骨架对不上，退回「有模板」的保守判断
+            const partSkeleton = skeletonParts?.[i] ?? skeleton
+            results.push(await evalRule(sel, part, partSkeleton, ctx))
         }
         switch (connectors.joiner) {
             case '&&':
@@ -290,11 +424,18 @@ export async function analyzeStrings(
         }
     }
 
-    const { selector, ops } = splitRegexChain(trimmed)
+    const { selector, ops } = splitRegexChain(rule)
+    const skeletonSelector = skeleton === null ? null : splitRegexChain(skeleton).selector
 
-    const values = await evalSelectorChain(sel, selector, ctx)
-    const transformed = ops.length ? values.map((v) => applyRegexOps(v, ops)) : values
-    return transformed
+    let values: string[]
+    if (skeletonSelector !== null && !hasRuleSyntax(skeletonSelector)) {
+        // 展开之后是字面文本（`"/api/tracks/{{$.id}}"` 这类），直接当结果
+        values = selector.trim() === '' ? [] : [selector]
+    } else {
+        values = await evalSelectorChain(sel, selector, ctx)
+    }
+
+    return ops.length ? values.map((v) => applyRegexOps(v, ops)) : values
 }
 
 /** 处理 `<js></js>` 链与 `@js:` 尾巴 */

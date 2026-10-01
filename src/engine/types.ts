@@ -9,6 +9,19 @@
 /** 规则求值的结果：可能是单值，也可能是列表（列表规则一定返回数组） */
 export type RuleResult = string | string[]
 
+/**
+ * 规则用了本引擎尚未实现的能力时抛这个，好让上层把「不支持」和「没匹配到」区分开
+ *
+ * 放在这里而不是 `analyze.ts`：`jsonpath.ts` 也要用它（不支持的过滤器同属「不支持」），
+ * 而从 `jsonpath.ts` 反向引 `analyze.ts` 会成环。
+ */
+export class UnsupportedRuleError extends Error {
+    constructor(message: string) {
+        super(message)
+        this.name = 'UnsupportedRuleError'
+    }
+}
+
 /** 求值上下文，对应 Legado 在 js 里暴露的那些全局变量 */
 export interface RuleContext {
     /**

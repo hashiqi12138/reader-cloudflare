@@ -208,7 +208,81 @@ describe('JSONPath', () => {
         expect(queryJsonPath(data, '$..name')).toEqual(['甲', '乙'])
     })
 
-    it('不支持的过滤器表达式要明确报错，而不是静默返回空', () => {
-        expect(() => queryJsonPath(data, '$.data.list[?(@.name=="甲")]')).toThrow(/过滤器/)
+    it('不支持的方括号内容要明确报错，而不是静默返回空', () => {
+        expect(() => queryJsonPath(data, '$.data.list[?]')).toThrow(/过滤器缺少收尾/)
+        expect(() => queryJsonPath(data, '$.data[abc]')).toThrow(/方括号/)
+    })
+
+    // 过滤器只实现两种形态：线上 816 条书源里一共 8 处，全都是这两种
+    describe('过滤器', () => {
+        const tracks = {
+            tracks: {
+                list: [
+                    { title: '音频一', type: 'audio', volume: false, size: 30 },
+                    { title: '图片一', type: 'image', volume: false, size: 5 },
+                    { title: '音频二', type: 'audio', volume: true, size: 40 },
+                ],
+            },
+        }
+
+        it('等值比较（书源里的 `?(@.type=="audio")`）', () => {
+            expect(queryJsonPath(tracks, '$.tracks.list[?(@.type=="audio")]')).toEqual([
+                tracks.tracks.list[0],
+                tracks.tracks.list[2],
+            ])
+        })
+
+        it('递归下降 + 过滤器（书源里的 `$..[?(@.type=="audio")]`）', () => {
+            // asmr 那类接口站点的章节列表就是这么写的。
+            // `$..` 会把数组和它的元素都收成候选，同一个对象因此可能被选中两次，
+            // 必须去重 —— 不然章节列表会出现重复项
+            const hits = queryJsonPath(tracks, '$..[?(@.type=="audio")]')
+            expect(hits).toEqual([tracks.tracks.list[0], tracks.tracks.list[2]])
+            expect(new Set(hits).size).toBe(hits.length)
+        })
+
+        it('存在性判断（`?(@.bookName)`）', () => {
+            expect(queryJsonPath(tracks, '$.tracks.list[?(@.title)]')).toHaveLength(3)
+            expect(queryJsonPath(tracks, '$.tracks.list[?(@.mediaStreamUrl)]')).toEqual([])
+        })
+
+        it('布尔字面量（书源里的 `?(@.volume==false)`）', () => {
+            expect(queryJsonPath(tracks, '$.tracks.list[?(@.volume==false)]')).toEqual([
+                tracks.tracks.list[0],
+                tracks.tracks.list[1],
+            ])
+        })
+
+        it('不等与数值比较', () => {
+            expect(queryJsonPath(tracks, '$.tracks.list[?(@.type!="audio")]')).toEqual([
+                tracks.tracks.list[1],
+            ])
+            expect(queryJsonPath(tracks, '$.tracks.list[?(@.size>10)]')).toEqual([
+                tracks.tracks.list[0],
+                tracks.tracks.list[2],
+            ])
+            expect(queryJsonPath(tracks, '$.tracks.list[?(@.size<=30)]')).toEqual([
+                tracks.tracks.list[0],
+                tracks.tracks.list[1],
+            ])
+        })
+
+        it('字段不存在时不匹配（而不是报错）', () => {
+            expect(queryJsonPath(tracks, '$.tracks.list[?(@.nope=="x")]')).toEqual([])
+        })
+
+        it('复合过滤器明确报错，不当成「没匹配到」', () => {
+            // 当成没匹配到的后果是整条源「搜不到书」，且不报任何错，最难查
+            expect(() => queryJsonPath(tracks, '$.tracks.list[?(@.type=="a"&&@.size>1)]')).toThrow(
+                /复合过滤器/,
+            )
+            expect(() => queryJsonPath(tracks, '$.tracks.list[?(@.type=="a"||@.size>1)]')).toThrow(
+                /复合过滤器/,
+            )
+        })
+
+        it('比较运算用在非数值上要明确报错', () => {
+            expect(() => queryJsonPath(tracks, '$.tracks.list[?(@.type>"a")]')).toThrow(/数值/)
+        })
     })
 })

@@ -446,6 +446,7 @@ export function fixtureSearchJson(keyword: string, pageNo: number): string {
         code: 0,
         data: {
             list: hits.map((b) => ({
+                id: b.id,
                 name: b.name,
                 author: b.author,
                 kind: '玄幻',
