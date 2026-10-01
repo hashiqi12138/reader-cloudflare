@@ -1523,6 +1523,89 @@ console.log('\n=== 15. 沙箱助手（java.getString / java.timeFormat） ===')
     check(!left.some((s) => s.id === id), '沙箱助手测试源已清理')
 }
 
+console.log('\n=== 16. JS 里的连接符不能被切碎 ===')
+{
+    /**
+     * `&&` / `||` / `%%` 是规则的同级连接符，但 JS 代码里的它们是运算符。
+     * 线上 816 条书源里有 303 处规则同时含 JS 与连接符，三种形态都会被切碎：
+     *   - 整条是 `@js:`（禁漫天堂API、七猫、听小说APP）
+     *   - 连接符在 `<js>` 块内（书旗小说、微信读书、晋江文学）
+     *   - `选择器@js:代码`（鸟鸟韩漫、存书啦、塔读文学）
+     *
+     * 被切开的后果不是报「规则不支持」，而是一句莫名其妙的 JS 语法错误
+     * （实测听小说APP 报的是 `expecting ','`），排查方向被带偏。
+     */
+    const id = `user:${BASE}`
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: 'JS 连接符测试源',
+                bookSourceUrl: BASE,
+                searchUrl: `${BASE}/fixture/api/search?q={{key}}&p={{page}}`,
+                ruleSearch: {
+                    bookList: '$.data.list',
+                    name: '{{$.name}}',
+                    bookUrl: '/fixture/book/{{$.id}}',
+                    // 整条是 @js:，代码里有 ||（用表达式形式，沙箱不把脚本包进函数）。
+                    // 特意把 `||` 用在括号里：被切碎的话括号不配平 → JS 报错，
+                    // 而不会「碰巧取到前半段仍是非空值」把断言蒙过去
+                    author: "@js:(java.getString('$.author') || '（无作者）') + '·已读'",
+                    // <js> 块里有 &&
+                    kind: "<js>if (1 === 1 && 2 === 2) { result = '一致性通过' } else { result = '不该走到这里' }</js>",
+                },
+                ruleBookInfo: {
+                    name: '@css:h1.book-name@text',
+                    tocUrl: '@css:a.toc-link@href',
+                    // 选择器 + @js:（代码里有 ||）+ 净化链：三段都要完好
+                    intro: '@css:div.book-intro@text@js:String(result || "") + "（已处理）"##已处理##OK',
+                },
+                ruleToc: {
+                    chapterList: '@css:ul.chapter-list li',
+                    chapterName: '@css:a@text',
+                    chapterUrl: '@css:a@href',
+                },
+                ruleContent: { content: '@css:div#content@textNodes' },
+            },
+        ]),
+    )
+
+    const searchRes = await call('POST', '/api/search', { keyword: '测试', sourceIds: [id] })
+    const per = searchRes.json?.sources?.[0]
+    const books = per?.books ?? []
+    check(books.length === 2, '含 JS 连接符的源能搜到书', per?.error ?? `count=${books.length}`)
+
+    if (books.length > 0) {
+        check(
+            books[0].author === '作者甲·已读',
+            '整条 @js: 里的 || 没被切碎（切碎会变成 JS 语法错误或取到半截值）',
+            String(books[0].author),
+        )
+        check(books[0].kind === '一致性通过', '<js> 块里的 && 没被切碎', String(books[0].kind))
+
+        const info = await getJson(
+            `/api/book?sourceId=${encodeURIComponent(id)}&url=${encodeURIComponent(books[0].bookUrl)}`,
+        )
+        check(
+            info.json?.intro === '这是一本用于验证链路的小说。（OK）',
+            '选择器 + @js:（代码里有 ||）+ 净化链：三段都完好',
+            JSON.stringify(info.json?.intro ?? info.json?.error),
+        )
+        check(
+            String(info.json?.tocUrl ?? '').endsWith('/fixture/toc/1'),
+            '同一份规则里的普通字段不受影响',
+            String(info.json?.tocUrl),
+        )
+    }
+
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+    const left = (await getJson('/api/sources')).json?.sources ?? []
+    check(!left.some((s) => s.id === id), 'JS 连接符测试源已清理')
+}
+
 console.log('\n=== 结果 ===')
 if (failures.length === 0) {
     console.log(

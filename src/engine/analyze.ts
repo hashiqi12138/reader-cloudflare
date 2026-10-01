@@ -21,6 +21,7 @@ import { jsonPathToStrings } from './jsonpath'
 import { runInSandbox, sandboxResultToString } from './js'
 import type { SandboxGetString, SandboxLimits } from './js'
 import { classifyTemplate, hasRuleSyntax, stripRuleMarker, templatePattern } from './template'
+import { splitRuleText } from './ruleText'
 import { isAttributeView, runXPath } from './xpath'
 
 /** 一次规则求值所面对的上下文：一个可继续筛选的节点集 */
@@ -54,61 +55,17 @@ function selectionFromText(text: string, source: string): Selection {
 /**
  * 拆同级连接符；返回 null 表示没有连接符
  *
- * **方括号里与引号里的连接符不算**：`$.list[?(@.a&&@.b)]` 里的 `&&` 是 JSONPath 的与，
- * `@js:"a||b"` 里的 `||` 是字符串内容。
- *
- * 不排除的话规则会被从中间切开，每一块看起来都「合法」，只是结果全不对 ——
- * 更糟的是**报错信息会指向切开后的半截规则**（`过滤器缺少收尾的 )：$.list[?(@.a`），
- * 让人以为是过滤器写错了格式，而真正的问题在别处。
+ * 跳过 JS 区域（`@js:` 代码、`<js>` 块）、方括号与引号 —— 详见 `ruleText.ts`。
+ * 不跳过的话规则会被从中间切开，每一块看起来都「合法」，只是结果全不对；
+ * 更糟的是**报错信息会指向切开后的半截规则**（例如 JS 语法错误 `expecting ','`），
+ * 而真正的问题在别处。
  */
 function splitConnectors(rule: string): { parts: string[]; joiner: '&&' | '||' | '%%' } | null {
     for (const joiner of ['&&', '||', '%%'] as const) {
-        const parts = splitOutsideBrackets(rule, joiner)
+        const parts = splitRuleText(rule, joiner)
         if (parts) return { parts, joiner }
     }
     return null
-}
-
-/** 按分隔符切分，但跳过方括号内与引号内的内容；没有分隔符时返回 null */
-function splitOutsideBrackets(rule: string, delimiter: string): string[] | null {
-    const parts: string[] = []
-    let depth = 0
-    let quote = ''
-    let last = 0
-    let found = false
-
-    for (let i = 0; i < rule.length; i += 1) {
-        const ch = rule[i]!
-
-        if (quote !== '') {
-            if (ch === quote) quote = ''
-            continue
-        }
-        if (ch === '"' || ch === "'") {
-            quote = ch
-            continue
-        }
-        if (ch === '[') {
-            depth += 1
-            continue
-        }
-        if (ch === ']') {
-            depth = Math.max(0, depth - 1)
-            continue
-        }
-        if (depth > 0) continue
-
-        if (rule.startsWith(delimiter, i)) {
-            parts.push(rule.slice(last, i))
-            i += delimiter.length - 1
-            last = i + 1
-            found = true
-        }
-    }
-
-    if (!found) return null
-    parts.push(rule.slice(last))
-    return parts
 }
 
 /** 把选择器部分拆成 [选择器, JS, 选择器, JS, ...]，对应 `<js></js>` 分隔 */

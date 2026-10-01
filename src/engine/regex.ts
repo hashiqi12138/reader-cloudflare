@@ -12,6 +12,8 @@
  * 转义：正则里如果本身要写 `#`，用 `@#` 代替。
  */
 
+import { splitRuleText } from './ruleText'
+
 export interface RegexOp {
     pattern: string
     replacement: string
@@ -40,7 +42,14 @@ function restoreEscapes(raw: string): string {
  * 按 `##` 切分后它会在末尾多出一个孤立的 `#`，据此识别。
  */
 export function splitRegexChain(rule: string): { selector: string; ops: RegexOp[] } {
-    const parts = protectEscapes(rule).split('##')
+    // 切 `##` 时跳过 `@js:` 后面那段代码（`@js:代码##正则##替换` 里的第一个 `##`
+    // 才是净化链的起点，代码里引号内的 `##` 不算），但**不跳 `<js>` 块**：
+    // `<js>##正则##</js>` 是书源里合法的净化写法。
+    const protectedRule = protectEscapes(rule)
+    const parts = splitRuleText(protectedRule, '##', {
+        skipJsBlocks: false,
+        skipQuotes: false,
+    }) ?? [protectedRule]
     const selector = restoreEscapes(parts[0] ?? '')
 
     const rest = parts.slice(1)
