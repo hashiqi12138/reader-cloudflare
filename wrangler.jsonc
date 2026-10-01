@@ -1,0 +1,24 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "reader-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true,
+  },
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    // 必须显式声明：默认是「先查静态资源、匹配不到才进 Worker」，
+    // 而 SPA 回退会把所有未命中的路径都当页面喂回 index.html，
+    // 结果就是 /api/* 永远进不到 Worker。这里把接口与测试站点提出来先走 Worker。
+    "run_worker_first": ["/api/*", "/fixture/*"],
+  },
+  "vars": {
+    "ENGINE_VERSION": "0.1.0",
+    // 内置测试站点默认关闭，只在本地与 CI 打开
+    "ENABLE_FIXTURE": "false",
+  },
+}

@@ -1,0 +1,21 @@
+# 一律按 LF 存储。
+#
+# Windows 上 core.autocrlf=true 时，检出会把 LF 换成 CRLF，结果是「从没改过的
+# 文件」在 git status 里显示为已修改、而 diff 又是空的 —— 这种噪音会让真正的改动
+# 淹没在假改动里。SPlayer 项目踩过一次，这里直接杜绝。
+* text=auto eol=lf
+
+# 二进制文件不参与换行符归一化
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff2 binary
+*.wasm binary
+
+# .ps1 必须是 UTF-8 BOM + CRLF：
+# PowerShell 5.1 对「无 BOM」的脚本按系统 ANSI 代码页读取，中文注释会被解成乱码
+# 并破坏语法解析（表现为莫名其妙的「& 不能用于此处」）。声明成 -text 后，
+# git 不再对它做任何换行符处理，BOM 也不会被剥掉。
+*.ps1 -text

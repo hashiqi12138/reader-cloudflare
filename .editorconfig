@@ -1,0 +1,24 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+[*.{js,jsx,mjs,cjs,ts,tsx,json,jsonc,css,scss,html,md,yml,yaml}]
+indent_size = 2
+
+[*.ps1]
+# PowerShell 5.1 需要 BOM 才能正确解析非 ASCII 字符，换行也按 Windows 惯例
+charset = utf-8-bom
+end_of_line = crlf
+
+[*.sh]
+# shell 脚本必须是 LF，否则 bash 会报 $'\r': command not found
+end_of_line = lf
+
+[Makefile]
+indent_style = tab

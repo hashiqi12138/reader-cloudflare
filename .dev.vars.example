@@ -1,0 +1,8 @@
+# 本地开发环境变量模板
+#
+# 用法：复制为 .dev.vars（该文件已被 gitignore），按需修改。
+#
+# ENABLE_FIXTURE=true 会挂载项目自带的测试站点 /fixture/*，
+# 用于在离线、无第三方依赖的前提下验证引擎链路。
+# 线上保持 false —— 它是测试内容，不该对外提供。
+ENABLE_FIXTURE=true
