@@ -362,11 +362,7 @@ export async function runInSandbox(
         if (outcome.error) {
             const dumped = vm.dump(outcome.error)
             outcome.error.dispose()
-            const msg =
-                dumped && typeof dumped === 'object' && 'message' in dumped
-                    ? String((dumped as { message: unknown }).message)
-                    : String(dumped)
-            throw new SandboxError(`规则脚本执行出错：${msg}`)
+            throw new SandboxError(`规则脚本执行出错：${describeSandboxError(dumped)}`)
         }
 
         const value = vm.dump(outcome.value)
@@ -511,6 +507,35 @@ async function handleHttpRequest(
             error: err instanceof Error ? err.message : String(err),
         })
     }
+}
+
+/**
+ * 把沙箱抛出的异常描述成一行
+ *
+ * QuickJS 的 `TypeError: not a function` 只说「不是函数」，不说**是哪一个** ——
+ * 而书源脚本动辄几十行，光凭这句话根本定位不到。这里补上错误类型与出错行号：
+ * 类型能区分 `ReferenceError`（缺全局，比如 `source` 还没实现）
+ * 与 `TypeError`（调了不存在的方法），行号直接指向脚本里的那一句。
+ */
+function describeSandboxError(dumped: unknown): string {
+    if (dumped === null || dumped === undefined) return String(dumped)
+    if (typeof dumped !== 'object') return String(dumped)
+
+    const box = dumped as { name?: unknown; message?: unknown; stack?: unknown }
+    const name = typeof box.name === 'string' && box.name !== '' ? `${box.name}: ` : ''
+    const message = box.message === undefined ? JSON.stringify(dumped) : String(box.message)
+    return `${name}${message}${frameOf(box.stack)}`
+}
+
+/** 取堆栈里第一个带行号的帧，形如「（脚本第 3 行）」 */
+function frameOf(stack: unknown): string {
+    if (typeof stack !== 'string') return ''
+    for (const line of stack.split('\n')) {
+        if (!line.includes('at ')) continue
+        const m = /:(\d+)(?::\d+)?/.exec(line)
+        if (m?.[1]) return `（脚本第 ${m[1]} 行）`
+    }
+    return ''
 }
 
 /** 把沙箱结果规整成字符串（JS 里 return 数组是常见写法） */

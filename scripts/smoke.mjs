@@ -1744,6 +1744,173 @@ console.log('\n=== 17. @js: 列表规则（接口型书源的关键路径） ===
     check(!left.some((s) => s.id === id), 'JS 列表规则测试源已清理')
 }
 
+console.log('\n=== 18. URL 字段里的 JS（searchUrl 的 @js: / <js>） ===')
+{
+    /**
+     * 顶层 URL 字段（`searchUrl`）里可以直接写 JS。线上 816 条源里 `searchUrl`
+     * 带 JS 的有 85 条，三种写法都要认（`@js:` 整条 64、`<js>` 整条 17、
+     * 「前缀 + `@js:`」4）。认不出来时的表现是**照字面去请求**
+     * —— 得到一个 404/403，或者更糟：一个能返回 200 但内容全错的地址。
+     *
+     * 这里还专门钉住两件容易写反的顺序：
+     *   - 请求选项要在**脚本跑完之后**再拆（脚本自己会写 `,{...}`）
+     *   - 脚本的 `result` 是**没展开过 `{{}}` 的原文**，展开要放在脚本之后
+     */
+    const id = `user:${BASE}`
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+
+    const base = `${BASE}/fixture/api/search?q={{key}}&p={{page}}`
+
+    // ---- 1. 整条 @js:，且脚本自己拼请求选项 ----
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: 'URL JS 整条测试源',
+                bookSourceUrl: BASE,
+                searchUrl: `@js:'${base}' + ',{"method":"GET","headers":{"X-Probe":"url-js"}}'`,
+                ruleSearch: {
+                    bookList: '$.data.list',
+                    name: '{{$.name}}',
+                    author: '{{$.author}}',
+                    bookUrl: '/fixture/book/{{$.id}}',
+                },
+                ruleToc: {},
+                ruleContent: {},
+            },
+        ]),
+    )
+    let res = await call('POST', '/api/search', { keyword: '测试', sourceIds: [id] })
+    let per = res.json?.sources?.[0]
+    check(
+        (per?.books ?? []).length === 2,
+        '整条 @js: 的 searchUrl：脚本跑完、{{key}} 在脚本之后展开、选项在脚本之后拆',
+        per?.error ?? `count=${(per?.books ?? []).length}`,
+    )
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+
+    // ---- 2. 整条 <js> 块 ----
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: 'URL JS 块测试源',
+                bookSourceUrl: BASE,
+                searchUrl: `<js>\nvar u = '${base}';\nu;\n</js>`,
+                ruleSearch: {
+                    bookList: '$.data.list',
+                    name: '{{$.name}}',
+                    bookUrl: '/fixture/book/{{$.id}}',
+                },
+                ruleToc: {},
+                ruleContent: {},
+            },
+        ]),
+    )
+    res = await call('POST', '/api/search', { keyword: '测试', sourceIds: [id] })
+    per = res.json?.sources?.[0]
+    check(
+        (per?.books ?? []).length === 2,
+        '整条 <js> 块的 searchUrl：脚本的收尾表达式就是地址',
+        per?.error ?? `count=${(per?.books ?? []).length}`,
+    )
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+
+    // ---- 3. 「地址 + 请求选项」再跟 @js:：result 是前面那段原文 ----
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: 'URL JS 前缀测试源',
+                bookSourceUrl: BASE,
+                // 脚本自己先验证 result 的形状：既要带请求选项、又要是没展开的 {{key}}。
+                // 形状不对就直接返回一个必然请求失败的地址，好让断言红掉。
+                searchUrl: `${base},{"charset":"auto"}\n@js:result.indexOf(',{"charset":"auto"}') > 0 && result.indexOf('{{key}}') > 0 ? result.split(',{')[0] + '&probe=ok' : '${BASE}/fixture/api/broken?got=' + encodeURIComponent(result)`,
+                ruleSearch: {
+                    bookList: '$.data.list',
+                    name: '{{$.name}}',
+                    bookUrl: '/fixture/book/{{$.id}}',
+                },
+                ruleToc: {},
+                ruleContent: {},
+            },
+        ]),
+    )
+    res = await call('POST', '/api/search', { keyword: '测试', sourceIds: [id] })
+    per = res.json?.sources?.[0]
+    check(
+        (per?.books ?? []).length === 2,
+        '「地址 + 选项」+ @js: 时，result 是那段原文（含选项、含未展开的 {{key}}），且不会被当成前缀拼回去',
+        per?.error ?? `count=${(per?.books ?? []).length}`,
+    )
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+
+    // ---- 4. 脚本能自己发请求（URL 字段里的 java.ajax 必须可用） ----
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: 'URL JS 取网测试源',
+                bookSourceUrl: BASE,
+                // 真实书源就是这么干的：先抓一次页面、看内容决定最终地址。
+                // 取网能力没注入的话会报「java.ajax 不可用」—— 与书源无关的错。
+                //
+                // 注意这里取网用的是**不带 `{{}}` 的地址**：沙箱里的 java.ajax 走的是
+                // `planFromResolvedUrl`，刻意不做模板展开（否则模板求值要进沙箱，
+                // 而沙箱里的取网又回头进模板，绕成递归）。返回的地址仍然用 `{{key}}`，
+                // 顺带证明「展开发生在脚本之后」。
+                searchUrl: `@js:var body = java.ajax('${BASE}/fixture/api/search?q=' + encodeURIComponent('测试') + '&p=1'); body.indexOf('测试小说') >= 0 ? '${base}' : '${BASE}/fixture/api/nowhere'`,
+                ruleSearch: {
+                    bookList: '$.data.list',
+                    name: '{{$.name}}',
+                    bookUrl: '/fixture/book/{{$.id}}',
+                },
+                ruleToc: {},
+                ruleContent: {},
+            },
+        ]),
+    )
+    res = await call('POST', '/api/search', { keyword: '测试', sourceIds: [id] })
+    per = res.json?.sources?.[0]
+    check(
+        (per?.books ?? []).length === 2,
+        'URL 字段里的脚本能用 java.ajax（取网能力必须注入进去）',
+        per?.error ?? `count=${(per?.books ?? []).length}`,
+    )
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+
+    // ---- 5. 脚本出错要显式失败，不能静默变成「搜不到书」 ----
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: 'URL JS 报错测试源',
+                bookSourceUrl: BASE,
+                searchUrl: `@js:throw new Error('url-js-boom')`,
+                ruleSearch: { bookList: '$.data.list', name: '{{$.name}}' },
+                ruleToc: {},
+                ruleContent: {},
+            },
+        ]),
+    )
+    res = await call('POST', '/api/search', { keyword: '测试', sourceIds: [id] })
+    per = res.json?.sources?.[0]
+    check(
+        per?.ok === false && String(per?.error ?? '').includes('url-js-boom'),
+        'URL 字段里的脚本出错时明确报错，而不是静默 0 条',
+        JSON.stringify(per?.error ?? per?.books),
+    )
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+
+    const left = (await getJson('/api/sources')).json?.sources ?? []
+    check(!left.some((s) => s.id === id), 'URL JS 测试源已清理')
+}
+
 console.log('\n=== 结果 ===')
 if (failures.length === 0) {
     console.log(

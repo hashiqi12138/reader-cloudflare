@@ -14,6 +14,7 @@ import { runInSandbox, sandboxResultToString } from '../engine/js'
 import type { BookSource, FetchPlan, RuleContext, SandboxHttp } from '../engine/types'
 import { parseLooseJson } from '../lib/json'
 import { defaultHeaders, fetchText, UpstreamError } from '../lib/http'
+import { findUrlJs } from './urlJs'
 
 /** 书源 URL 尾部可带的请求选项 */
 export interface UrlOptions {
@@ -153,11 +154,60 @@ export async function buildPlan(
     source: BookSource,
     ctx: RuleContext,
 ): Promise<FetchPlan> {
-    const { url: rawTarget, options } = splitUrlAndOptions(rawUrl)
     // 模板里的 baseUrl 同样应该是书源地址，而不是请求来源
-    const templateCtx: RuleContext = { ...ctx, baseUrl: source.bookSourceUrl }
-    const resolved = await resolveTemplate(rawTarget, templateCtx)
-    const plan = planFromResolvedUrl(resolved, source, source.bookSourceUrl)
+    const templateCtx: RuleContext = {
+        ...ctx,
+        baseUrl: source.bookSourceUrl,
+        /**
+         * 取网能力必须给进去：URL 字段里的脚本经常要**自己先发一次请求**
+         * 才知道真正的地址在哪（米读小说要跟一次 302 拿新域名、小书本网要先把
+         * 搜索页抓回来读 `form[action]`、夜寒书库要先过一遍 cookie）。
+         * 缺了它脚本会报「java.ajax 不可用」—— 一个看起来与书源无关的错，
+         * 而书源本身完全没问题。
+         *
+         * 这里用 `bookSourceUrl` 当脚本内取网的相对基准：书源写 searchUrl 时的
+         * 参照物就是自己的站点地址。
+         */
+        http: ctx.http ?? sandboxHttp(source, source.bookSourceUrl),
+    }
+
+    const js = findUrlJs(rawUrl)
+    let resolvedUrl: string
+    let options: Partial<UrlOptions>
+
+    if (js) {
+        /**
+         * 顺序很关键，尤其是**请求选项要在 JS 跑完之后再拆**：
+         * 脚本本身就可能写出 `,{...}`（露西弗、少年梦阅读都是自己拼选项的），
+         * 先拆选项会把脚本代码从中间切断，得到一个「合法但完全不是那个地址」的 URL。
+         *
+         * 反过来，脚本的输入 `result` 是**没展开过 `{{}}` 的原文**：
+         * `全本同人小说网` 的脚本里就有 `String(result).replace("{{key}}", key)`，
+         * 说明它拿到的确实是带模板的原样文本；而脚本的输出里还可能有 `{{page-1}}`
+         * 这种表达式，所以展开要放在脚本之后再做一次。
+         */
+        const value = await runInSandbox(
+            js.code,
+            {
+                key: templateCtx.key ?? '',
+                page: templateCtx.page ?? 1,
+                book: templateCtx.book ?? {},
+                baseUrl: templateCtx.baseUrl,
+                result: js.prefix,
+            },
+            { http: templateCtx.http },
+        )
+        const produced = sandboxResultToString(value)
+        const split = splitUrlAndOptions(await resolveTemplate(produced, templateCtx))
+        resolvedUrl = split.url
+        options = split.options
+    } else {
+        const split = splitUrlAndOptions(rawUrl)
+        resolvedUrl = await resolveTemplate(split.url, templateCtx)
+        options = split.options
+    }
+
+    const plan = planFromResolvedUrl(resolvedUrl, source, source.bookSourceUrl)
 
     if (options.webView) {
         throw new UpstreamError(
