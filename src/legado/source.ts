@@ -11,17 +11,17 @@
  */
 
 import { runInSandbox, sandboxResultToString } from '../engine/js'
-import type { BookSource, FetchPlan, RuleContext } from '../engine/types'
-import { defaultHeaders, UpstreamError } from '../lib/http'
+import type { BookSource, FetchPlan, RuleContext, SandboxHttp } from '../engine/types'
+import { defaultHeaders, fetchText, UpstreamError } from '../lib/http'
 
 /** 书源 URL 尾部可带的请求选项 */
 export interface UrlOptions {
-  method: string
-  charset: string
-  headers: Record<string, string>
-  body?: string
-  /** 需要 WebView 渲染的站点本引擎不支持，必须显式拒绝 */
-  webView: boolean
+    method: string
+    charset: string
+    headers: Record<string, string>
+    body?: string
+    /** 需要 WebView 渲染的站点本引擎不支持，必须显式拒绝 */
+    webView: boolean
 }
 
 /**
@@ -32,65 +32,96 @@ export interface UrlOptions {
  * 把选项当 URL 用会得到一个看起来正常、实际请求错地方的 URL，那种错最难查。
  */
 export function splitUrlAndOptions(raw: string): { url: string; options: Partial<UrlOptions> } {
-  const trimmed = raw.trim()
-  const index = trimmed.indexOf(',{')
-  if (index === -1) return { url: trimmed, options: {} }
+    const trimmed = raw.trim()
+    const index = trimmed.indexOf(',{')
+    if (index === -1) return { url: trimmed, options: {} }
 
-  const url = trimmed.slice(0, index).trim()
-  const jsonText = trimmed.slice(index + 1).trim()
-  try {
-    const parsed = JSON.parse(jsonText) as Partial<UrlOptions>
-    return { url, options: parsed }
-  } catch {
-    throw new UpstreamError(
-      `书源 URL 的请求选项不是合法 JSON，无法确定该请求哪里：${jsonText.slice(0, 80)}`,
-    )
-  }
+    const url = trimmed.slice(0, index).trim()
+    const jsonText = trimmed.slice(index + 1).trim()
+    try {
+        const parsed = JSON.parse(jsonText) as Partial<UrlOptions>
+        return { url, options: parsed }
+    } catch {
+        throw new UpstreamError(
+            `书源 URL 的请求选项不是合法 JSON，无法确定该请求哪里：${jsonText.slice(0, 80)}`,
+        )
+    }
 }
 
 /** 解析 `{{}}` 模板：里面是 JS 表达式，用沙箱求值 */
 export async function resolveTemplate(template: string, ctx: RuleContext): Promise<string> {
-  const re = /\{\{([\s\S]*?)\}\}/g
-  let out = ''
-  let last = 0
-  let match: RegExpExecArray | null
+    const re = /\{\{([\s\S]*?)\}\}/g
+    let out = ''
+    let last = 0
+    let match: RegExpExecArray | null
 
-  while ((match = re.exec(template)) !== null) {
-    out += template.slice(last, match.index)
-    const expr = (match[1] ?? '').trim()
-    if (expr === '') {
-      out += ''
-    } else {
-      const value = await runInSandbox(expr, {
-        key: ctx.key ?? '',
-        page: ctx.page ?? 1,
-        book: ctx.book ?? {},
-        baseUrl: ctx.baseUrl,
-      })
-      out += sandboxResultToString(value)
+    while ((match = re.exec(template)) !== null) {
+        out += template.slice(last, match.index)
+        const expr = (match[1] ?? '').trim()
+        if (expr === '') {
+            out += ''
+        } else {
+            const value = await runInSandbox(
+                expr,
+                {
+                    key: ctx.key ?? '',
+                    page: ctx.page ?? 1,
+                    book: ctx.book ?? {},
+                    baseUrl: ctx.baseUrl,
+                },
+                { http: ctx.http },
+            )
+            out += sandboxResultToString(value)
+        }
+        last = re.lastIndex
     }
-    last = re.lastIndex
-  }
-  out += template.slice(last)
-  return out
+    out += template.slice(last)
+    return out
 }
 
 /** 把书源级别的请求头（JSON 字符串）解析出来；写坏了就当作没有，不影响主流程 */
 function parseSourceHeaders(raw: string | undefined): Record<string, string> {
-  if (!raw) return {}
-  try {
-    const parsed = JSON.parse(raw) as unknown
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      const out: Record<string, string> = {}
-      for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
-        out[k] = String(v)
-      }
-      return out
+    if (!raw) return {}
+    try {
+        const parsed = JSON.parse(raw) as unknown
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            const out: Record<string, string> = {}
+            for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+                out[k] = String(v)
+            }
+            return out
+        }
+    } catch {
+        /* 书源里的 header 写坏很常见，忽略即可 */
     }
-  } catch {
-    /* 书源里的 header 写坏很常见，忽略即可 */
-  }
-  return {}
+    return {}
+}
+
+/**
+ * 由**已解析**的地址构造请求计划
+ *
+ * 不含 `{{}}` 模板求值与 URL 选项解析 —— 供沙箱内的 `java.ajax` 复用，
+ * 那里必须避开模板，否则会绕成递归（见 sandboxHttp 的说明）。
+ */
+export function planFromResolvedUrl(
+    resolvedUrl: string,
+    source: BookSource,
+    baseUrl: string,
+): FetchPlan {
+    let absolute = resolvedUrl.trim()
+    try {
+        absolute = new URL(absolute, baseUrl || source.bookSourceUrl).href
+    } catch {
+        throw new UpstreamError(`无法解析为合法地址：${resolvedUrl.slice(0, 120)}`)
+    }
+
+    return {
+        url: absolute,
+        method: 'GET',
+        headers: { ...defaultHeaders(absolute), ...parseSourceHeaders(source.header) },
+        charset: 'auto',
+        webView: false,
+    }
 }
 
 /**
@@ -101,38 +132,53 @@ function parseSourceHeaders(raw: string | undefined): Record<string, string> {
  * @param ctx 求值上下文，提供 key / page / book
  */
 export async function buildPlan(
-  rawUrl: string,
-  source: BookSource,
-  ctx: RuleContext,
+    rawUrl: string,
+    source: BookSource,
+    ctx: RuleContext,
 ): Promise<FetchPlan> {
-  const { url: rawTarget, options } = splitUrlAndOptions(rawUrl)
-  const resolved = await resolveTemplate(rawTarget, ctx)
+    const { url: rawTarget, options } = splitUrlAndOptions(rawUrl)
+    const resolved = await resolveTemplate(rawTarget, ctx)
+    const plan = planFromResolvedUrl(resolved, source, ctx.baseUrl)
 
-  // 相对地址要拼到书源域名上
-  const base = ctx.baseUrl || source.bookSourceUrl
-  let absolute = resolved.trim()
-  try {
-    absolute = new URL(absolute, base).href
-  } catch {
-    throw new UpstreamError(`无法解析为合法地址：${resolved.slice(0, 120)}`)
-  }
+    if (options.webView) {
+        throw new UpstreamError(
+            `该规则要求 WebView 渲染（webView: true），本引擎不支持：${plan.url}`,
+        )
+    }
 
-  if (options.webView) {
-    throw new UpstreamError(`该规则要求 WebView 渲染（webView: true），本引擎不支持：${absolute}`)
-  }
+    return {
+        ...plan,
+        method: (options.method ?? 'GET').toUpperCase(),
+        headers: { ...plan.headers, ...(options.headers ?? {}) },
+        body: options.body,
+        charset: options.charset ?? 'auto',
+    }
+}
 
-  const headers: Record<string, string> = {
-    ...defaultHeaders(absolute),
-    ...parseSourceHeaders(source.header),
-    ...(options.headers ?? {}),
-  }
-
-  return {
-    url: absolute,
-    method: (options.method ?? 'GET').toUpperCase(),
-    headers,
-    body: options.body,
-    charset: options.charset ?? 'auto',
-    webView: Boolean(options.webView),
-  }
+/**
+ * 构造沙箱内 `java.ajax` / `java.get` / `java.post` 用的取网能力
+ *
+ * 刻意**不复用 buildPlan**：那个函数会解析 `{{}}` 模板，而模板求值本身要进沙箱，
+ * 沙箱里的 java.ajax 又回头取网 —— 一条 `{{java.ajax(...)}}` 就能把自己绕成递归。
+ * 这里只处理「地址 + 可选的请求选项」，不碰模板。
+ *
+ * 请求次数与总时限的上限由沙箱统一控制（见 engine/js.ts）。
+ */
+export function sandboxHttp(source: BookSource, baseUrl: string): SandboxHttp {
+    return {
+        async fetchText(url, options = {}) {
+            const { url: rawTarget, options: urlOptions } = splitUrlAndOptions(url)
+            const plan = planFromResolvedUrl(rawTarget, source, baseUrl)
+            return fetchText({
+                ...plan,
+                method: (options.method ?? urlOptions.method ?? 'GET').toUpperCase(),
+                body: options.body ?? urlOptions.body,
+                headers: {
+                    ...plan.headers,
+                    ...(urlOptions.headers ?? {}),
+                    ...(options.headers ?? {}),
+                },
+            })
+        },
+    }
 }

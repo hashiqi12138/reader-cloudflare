@@ -32,10 +32,10 @@ coverage/
 .tmp/
 
 # QuickJS 的 WASM 由 scripts/copy-quickjs-wasm.mjs 从 node_modules 复制到 src/engine/，
-# 是派生产物，不入库（二进制、体积大，且版本必须跟着 quickjs-emscripten 走）。
+# 是派生产物，不入库（二进制、体积约 1 MB，且版本必须跟着 quickjs-emscripten 走）。
 # package.json 的 predev / prebuild / predeploy / pretest 会自动重新生成。
-src/**/*.wasm
-src/**/*.wasm.map.txt
+src/engine/*.wasm
+src/engine/*.wasm.map.txt
 
 # 注意：worker-configuration.d.ts 由 `npm run types` 生成，但**要提交**。
 # 提交它才能在 CI（不跑 wrangler 的机器）上通过类型检查，也才能让

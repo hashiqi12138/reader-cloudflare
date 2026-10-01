@@ -13,20 +13,20 @@
  */
 
 export interface RegexOp {
-  pattern: string
-  replacement: string
-  /** true 表示 OnlyOne（只处理第一个匹配） */
-  onlyOne: boolean
+    pattern: string
+    replacement: string
+    /** true 表示 OnlyOne（只处理第一个匹配） */
+    onlyOne: boolean
 }
 
 /** 把 `@#` / `@@` 换成占位符，避免切分时被误当成分隔符 */
 function protectEscapes(raw: string): string {
-  return raw.replace(/@#/g, '\u0000').replace(/@@/g, '\u0001')
+    return raw.replace(/@#/g, '\u0000').replace(/@@/g, '\u0001')
 }
 
 /** 还原占位符 */
 function restoreEscapes(raw: string): string {
-  return raw.replace(/\u0000/g, '#').replace(/\u0001/g, '@')
+    return raw.replace(/\u0000/g, '#').replace(/\u0001/g, '@')
 }
 
 /**
@@ -40,43 +40,43 @@ function restoreEscapes(raw: string): string {
  * 按 `##` 切分后它会在末尾多出一个孤立的 `#`，据此识别。
  */
 export function splitRegexChain(rule: string): { selector: string; ops: RegexOp[] } {
-  const parts = protectEscapes(rule).split('##')
-  const selector = restoreEscapes(parts[0] ?? '')
+    const parts = protectEscapes(rule).split('##')
+    const selector = restoreEscapes(parts[0] ?? '')
 
-  const rest = parts.slice(1)
-  let onlyOneForLast = false
-  if (rest.length > 0 && rest[rest.length - 1] === '#') {
-    onlyOneForLast = true
-    rest.pop()
-  }
+    const rest = parts.slice(1)
+    let onlyOneForLast = false
+    if (rest.length > 0 && rest[rest.length - 1] === '#') {
+        onlyOneForLast = true
+        rest.pop()
+    }
 
-  const ops: RegexOp[] = []
-  for (let i = 0; i < rest.length; i += 2) {
-    const isLast = i + 2 >= rest.length
-    ops.push({
-      pattern: restoreEscapes(rest[i] ?? ''),
-      replacement: restoreEscapes(rest[i + 1] ?? ''),
-      onlyOne: isLast && onlyOneForLast,
-    })
-  }
+    const ops: RegexOp[] = []
+    for (let i = 0; i < rest.length; i += 2) {
+        const isLast = i + 2 >= rest.length
+        ops.push({
+            pattern: restoreEscapes(rest[i] ?? ''),
+            replacement: restoreEscapes(rest[i + 1] ?? ''),
+            onlyOne: isLast && onlyOneForLast,
+        })
+    }
 
-  return { selector, ops }
+    return { selector, ops }
 }
 
 /** 对一段文本套用正则链 */
 export function applyRegexOps(input: string, ops: RegexOp[]): string {
-  let out = input
-  for (const op of ops) {
-    let re: RegExp
-    try {
-      re = new RegExp(op.pattern, op.onlyOne ? '' : 'g')
-    } catch {
-      // 单个书源里的正则写坏了，不该让整次搜索失败：跳过它并保留原文
-      continue
+    let out = input
+    for (const op of ops) {
+        let re: RegExp
+        try {
+            re = new RegExp(op.pattern, op.onlyOne ? '' : 'g')
+        } catch {
+            // 单个书源里的正则写坏了，不该让整次搜索失败：跳过它并保留原文
+            continue
+        }
+        out = op.onlyOne ? out.replace(re, op.replacement) : out.replace(re, op.replacement)
     }
-    out = op.onlyOne ? out.replace(re, op.replacement) : out.replace(re, op.replacement)
-  }
-  return out
+    return out
 }
 
 /**
@@ -86,24 +86,24 @@ export function applyRegexOps(input: string, ops: RegexOp[]): string {
  * 结果列表里的每一项再各自套用后续的取值规则。
  */
 export function applyAllInOne(source: string, rule: string): string[] {
-  const body = rule.slice(1)
-  const { selector: pattern, ops } = splitRegexChain(body)
-  if (!pattern) return []
-  let re: RegExp
-  try {
-    // 强制全局 + 多行：AllInOne 的用法就是「一刀切全部」
-    re = new RegExp(pattern, 'gm')
-  } catch {
-    return []
-  }
-  const out: string[] = []
-  let m: RegExpExecArray | null
-  while ((m = re.exec(source)) !== null) {
-    let value = m.length > 1 ? (m[1] ?? '') : m[0]
-    value = applyRegexOps(value, ops)
-    out.push(value.trim())
-    // 零宽匹配会死循环，必须手动推进
-    if (m.index === re.lastIndex) re.lastIndex++
-  }
-  return out.filter((s) => s !== '')
+    const body = rule.slice(1)
+    const { selector: pattern, ops } = splitRegexChain(body)
+    if (!pattern) return []
+    let re: RegExp
+    try {
+        // 强制全局 + 多行：AllInOne 的用法就是「一刀切全部」
+        re = new RegExp(pattern, 'gm')
+    } catch {
+        return []
+    }
+    const out: string[] = []
+    let m: RegExpExecArray | null
+    while ((m = re.exec(source)) !== null) {
+        let value = m.length > 1 ? (m[1] ?? '') : m[0]
+        value = applyRegexOps(value, ops)
+        out.push(value.trim())
+        // 零宽匹配会死循环，必须手动推进
+        if (m.index === re.lastIndex) re.lastIndex++
+    }
+    return out.filter((s) => s !== '')
 }

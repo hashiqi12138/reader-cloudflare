@@ -1,22 +1,22 @@
 {
-  "compilerOptions": {
-    "target": "ES2022",
-    "lib": ["ES2022"],
-    "module": "ES2022",
-    "moduleResolution": "bundler",
-    // 绑定类型一律用 `npm run types` 生成的 worker-configuration.d.ts，
-    // 不手写 Env、也不装 @cloudflare/workers-types（生成类型已经取代它，
-    // 两者同时存在反而会因为声明冲突而互相覆盖）。
-    "strict": true,
-    "noUncheckedIndexedAccess": true,
-    "noImplicitOverride": true,
-    "noFallthroughCasesInSwitch": true,
-    "verbatimModuleSyntax": true,
-    "isolatedModules": true,
-    "skipLibCheck": true,
-    "resolveJsonModule": true,
-    "noEmit": true
-  },
-  "include": ["src/**/*.ts", "test/**/*.ts", "worker-configuration.d.ts", "vitest.config.ts"],
-  "exclude": ["node_modules", "dist"]
+    "compilerOptions": {
+        "target": "ES2022",
+        "lib": ["ES2022"],
+        "module": "ES2022",
+        "moduleResolution": "bundler",
+        // 绑定类型一律用 `npm run types` 生成的 worker-configuration.d.ts，
+        // 不手写 Env、也不装 @cloudflare/workers-types（生成类型已经取代它，
+        // 两者同时存在反而会因为声明冲突而互相覆盖）。
+        "strict": true,
+        "noUncheckedIndexedAccess": true,
+        "noImplicitOverride": true,
+        "noFallthroughCasesInSwitch": true,
+        "verbatimModuleSyntax": true,
+        "isolatedModules": true,
+        "skipLibCheck": true,
+        "resolveJsonModule": true,
+        "noEmit": true
+    },
+    "include": ["src/**/*.ts", "test/**/*.ts", "worker-configuration.d.ts", "vitest.config.ts"],
+    "exclude": ["node_modules", "dist"]
 }

@@ -16,136 +16,178 @@
  */
 
 const BOOKS = [
-  {
-    id: '1',
-    name: '测试小说·甲',
-    author: '作者甲',
-    intro: '这是一本用于验证链路的小说。',
-    chapters: [
-      { id: '1', name: '第一章 起风了' },
-      { id: '2', name: '第二章 雨落下来' },
-      { id: '3', name: '第三章 天晴了' },
-    ],
-  },
-  {
-    id: '2',
-    name: '测试小说·乙',
-    author: '作者乙',
-    intro: '另一本用于验证链路的小说。',
-    chapters: [{ id: '1', name: '第一章 开端' }],
-  },
+    {
+        id: '1',
+        name: '测试小说·甲',
+        author: '作者甲',
+        intro: '这是一本用于验证链路的小说。',
+        chapters: [
+            { id: '1', name: '第一章 起风了' },
+            { id: '2', name: '第二章 雨落下来' },
+            { id: '3', name: '第三章 天晴了' },
+        ],
+    },
+    {
+        id: '2',
+        name: '测试小说·乙',
+        author: '作者乙',
+        intro: '另一本用于验证链路的小说。',
+        chapters: [{ id: '1', name: '第一章 开端' }],
+    },
 ]
 
 function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
+    return text
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
 }
 
 function page(title: string, body: string): string {
-  return `<!doctype html>
+    return `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><title>${escapeHtml(title)}</title></head>
 <body>${body}</body></html>`
 }
 
 export function fixtureSearchPage(keyword: string, pageNo: number): string {
-  const hits = BOOKS.filter(
-    (b) => keyword === '' || b.name.includes(keyword) || b.author.includes(keyword),
-  )
-  const items = hits
-    .map(
-      (b) => `<div class="result-item">
+    const hits = BOOKS.filter(
+        (b) => keyword === '' || b.name.includes(keyword) || b.author.includes(keyword),
+    )
+    const items = hits
+        .map(
+            (b) => `<div class="result-item">
         <h3 class="title"><a href="/fixture/book/${b.id}">${escapeHtml(b.name)}</a></h3>
         <span class="author">${escapeHtml(b.author)}</span>
         <span class="kind">玄幻</span>
         <p class="intro">${escapeHtml(b.intro)}</p>
     </div>`,
-    )
-    .join('\n')
+        )
+        .join('\n')
 
-  return page(
-    `搜索：${keyword}`,
-    `<h1>搜索结果</h1>
+    return page(
+        `搜索：${keyword}`,
+        `<h1>搜索结果</h1>
 <div class="search-meta" data-keyword="${escapeHtml(keyword)}" data-page="${pageNo}">共 ${hits.length} 条</div>
 <div class="result-list">
 ${items}
 </div>`,
-  )
+    )
 }
 
 export function fixtureBookPage(bookId: string): string {
-  const book = BOOKS.find((b) => b.id === bookId)
-  if (!book) return page('未找到', '<p class="empty">没有这本书</p>')
-  return page(
-    book.name,
-    `<div class="book-info">
+    const book = BOOKS.find((b) => b.id === bookId)
+    if (!book) return page('未找到', '<p class="empty">没有这本书</p>')
+    return page(
+        book.name,
+        `<div class="book-info">
     <h1 class="book-name">${escapeHtml(book.name)}</h1>
     <span class="book-author">${escapeHtml(book.author)}</span>
     <div class="book-intro">${escapeHtml(book.intro)}</div>
     <a class="toc-link" href="/fixture/toc/${book.id}">查看目录</a>
 </div>`,
-  )
+    )
 }
 
 export function fixtureTocPage(bookId: string): string {
-  const book = BOOKS.find((b) => b.id === bookId)
-  if (!book) return page('未找到', '<p class="empty">没有这本书</p>')
-  const lis = book.chapters
-    .map(
-      (ch) => `<li><a href="/fixture/chapter/${book.id}/${ch.id}">${escapeHtml(ch.name)}</a></li>`,
-    )
-    .join('\n')
-  return page(
-    `${book.name} 目录`,
-    `<h1 class="book-name">${escapeHtml(book.name)}</h1>
+    const book = BOOKS.find((b) => b.id === bookId)
+    if (!book) return page('未找到', '<p class="empty">没有这本书</p>')
+    const lis = book.chapters
+        .map(
+            (ch) =>
+                `<li><a href="/fixture/chapter/${book.id}/${ch.id}">${escapeHtml(ch.name)}</a></li>`,
+        )
+        .join('\n')
+    return page(
+        `${book.name} 目录`,
+        `<h1 class="book-name">${escapeHtml(book.name)}</h1>
 <ul class="chapter-list">
 ${lis}
 </ul>`,
-  )
+    )
+}
+
+/** 章节正文的段落。HTML 版与 JSON 版共用同一份，避免两处内容漂移导致对照失败 */
+function chapterParagraphs(bookName: string, chapterName: string): string[] {
+    return [
+        `这是《${bookName}》${chapterName}的正文第一段。`,
+        '第二段用来确认多段落的提取与拼接是否正确。',
+        '第三段收尾。',
+    ]
 }
 
 export function fixtureChapterPage(bookId: string, chapterId: string): string {
-  const book = BOOKS.find((b) => b.id === bookId)
-  const chapter = book?.chapters.find((c) => c.id === chapterId)
-  if (!book || !chapter) return page('未找到', '<p class="empty">没有这一章</p>')
+    const book = BOOKS.find((b) => b.id === bookId)
+    const chapter = book?.chapters.find((c) => c.id === chapterId)
+    if (!book || !chapter) return page('未找到', '<p class="empty">没有这一章</p>')
 
-  // 刻意写成多个文本节点，用来验证 @textNodes 会把它们按段落取出来
-  return page(
-    `${book.name} ${chapter.name}`,
-    `<div class="reader">
+    // 刻意写成多个文本节点，用来验证 @textNodes 会把它们按段落取出来
+    const paragraphs = chapterParagraphs(book.name, chapter.name)
+        .map((text) => `<p>${escapeHtml(text)}</p>`)
+        .join('\n        ')
+
+    return page(
+        `${book.name} ${chapter.name}`,
+        `<div class="reader">
     <h1 class="chapter-title">${escapeHtml(chapter.name)}</h1>
     <div id="content">
-        <p>这是《${escapeHtml(book.name)}》${escapeHtml(chapter.name)}的正文第一段。</p>
-        <p>第二段用来确认多段落的提取与拼接是否正确。</p>
-        <p>第三段收尾。</p>
+        ${paragraphs}
     </div>
 </div>`,
-  )
+    )
+}
+
+/**
+ * 章节正文的 JSON 版本
+ *
+ * 用来模拟「正文不在网页里、要走独立接口再取一次」的站点 —— 真实书源里
+ * 这种两段式取数非常常见，也正是书源脚本里 `java.ajax` 的典型用武之地。
+ * 内容与 HTML 版共用 chapterParagraphs，保证对照验证时两边必须逐字一致。
+ */
+export function fixtureChapterJson(bookId: string, chapterId: string): string {
+    const book = BOOKS.find((b) => b.id === bookId)
+    const chapter = book?.chapters.find((c) => c.id === chapterId)
+    if (!book || !chapter) return JSON.stringify({ error: 'not found' })
+
+    return JSON.stringify({
+        book: book.name,
+        chapter: chapter.name,
+        paragraphs: chapterParagraphs(book.name, chapter.name),
+    })
 }
 
 /** 路由分派；返回 null 表示不是本站点的路径 */
 export function handleFixture(pathname: string, url: URL): Response | null {
-  if (!pathname.startsWith('/fixture/')) return null
+    if (!pathname.startsWith('/fixture/')) return null
 
-  const html = (body: string) =>
-    new Response(body, { headers: { 'Content-Type': 'text/html; charset=utf-8' } })
+    const html = (body: string) =>
+        new Response(body, { headers: { 'Content-Type': 'text/html; charset=utf-8' } })
 
-  if (pathname === '/fixture/search') {
-    return html(
-      fixtureSearchPage(url.searchParams.get('q') ?? '', Number(url.searchParams.get('p') ?? '1')),
-    )
-  }
+    if (pathname === '/fixture/search') {
+        return html(
+            fixtureSearchPage(
+                url.searchParams.get('q') ?? '',
+                Number(url.searchParams.get('p') ?? '1'),
+            ),
+        )
+    }
 
-  const book = /^\/fixture\/book\/(\w+)$/.exec(pathname)
-  if (book) return html(fixtureBookPage(book[1]!))
+    const book = /^\/fixture\/book\/(\w+)$/.exec(pathname)
+    if (book) return html(fixtureBookPage(book[1]!))
 
-  const toc = /^\/fixture\/toc\/(\w+)$/.exec(pathname)
-  if (toc) return html(fixtureTocPage(toc[1]!))
+    const toc = /^\/fixture\/toc\/(\w+)$/.exec(pathname)
+    if (toc) return html(fixtureTocPage(toc[1]!))
 
-  const chapter = /^\/fixture\/chapter\/(\w+)\/(\w+)$/.exec(pathname)
-  if (chapter) return html(fixtureChapterPage(chapter[1]!, chapter[2]!))
+    const chapter = /^\/fixture\/chapter\/(\w+)\/(\w+)$/.exec(pathname)
+    if (chapter) return html(fixtureChapterPage(chapter[1]!, chapter[2]!))
 
-  return new Response('not found', { status: 404 })
+    // 正文的 JSON 接口：供书源脚本用 java.ajax 二次取数
+    const api = /^\/fixture\/api\/chapter\/(\w+)\/(\w+)$/.exec(pathname)
+    if (api) {
+        return new Response(fixtureChapterJson(api[1]!, api[2]!), {
+            headers: { 'Content-Type': 'application/json; charset=utf-8' },
+        })
+    }
+
+    return new Response('not found', { status: 404 })
 }

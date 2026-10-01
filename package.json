@@ -1,42 +1,40 @@
 {
-  "name": "reader-cloudflare",
-  "version": "0.2.0",
-  "private": true,
-  "description": "书源聚合阅读器：兼容 Legado 书源格式的规则引擎，整套跑在 Cloudflare 上",
-  "engines": {
-    "node": ">=22"
-  },
-  "type": "module",
-  "scripts": {
-    "wasm": "node scripts/copy-quickjs-wasm.mjs",
-    "prepare": "node scripts/copy-quickjs-wasm.mjs",
-    "predev": "node scripts/copy-quickjs-wasm.mjs",
-    "dev": "wrangler dev",
-    "prebuild": "node scripts/copy-quickjs-wasm.mjs",
-    "build": "wrangler deploy --dry-run --outdir dist",
-    "predeploy": "node scripts/copy-quickjs-wasm.mjs",
-    "deploy": "wrangler deploy",
-    "types": "wrangler types --strict-vars=false",
-    "typecheck": "tsc --noEmit",
-    "format": "prettier --write .",
-    "format:check": "prettier --check .",
-    "pretest": "node scripts/copy-quickjs-wasm.mjs",
-    "test": "vitest run",
-    "smoke": "node scripts/smoke.mjs",
-    "verify": "node scripts/verify.mjs",
-    "verify:full": "node scripts/verify.mjs --with-build"
-  },
-  "dependencies": {
-    "cheerio": "^1.2.0",
-    "hono": "^4.13.12",
-    "quickjs-emscripten": "^0.32.0",
-    "xpath": "^0.0.34"
-  },
-  "devDependencies": {
-    "@types/node": "^26.6.3",
-    "prettier": "^3.9.9",
-    "typescript": "^7.0.2",
-    "vitest": "^5.0.3",
-    "wrangler": "^4.145.0"
-  }
+    "name": "reader-cloudflare",
+    "version": "0.3.0",
+    "private": true,
+    "description": "书源聚合阅读器：兼容 Legado 书源格式的规则引擎，整套跑在 Cloudflare 上",
+    "engines": {
+        "node": ">=22"
+    },
+    "type": "module",
+    "scripts": {
+        "wasm": "node scripts/copy-quickjs-wasm.mjs",
+        "prepare": "node scripts/copy-quickjs-wasm.mjs",
+        "predev": "node scripts/copy-quickjs-wasm.mjs",
+        "dev": "wrangler dev",
+        "prebuild": "node scripts/copy-quickjs-wasm.mjs",
+        "build": "wrangler deploy --dry-run --outdir dist",
+        "predeploy": "node scripts/copy-quickjs-wasm.mjs",
+        "deploy": "wrangler deploy",
+        "types": "wrangler types --strict-vars=false",
+        "typecheck": "tsc --noEmit",
+        "format": "prettier --write .",
+        "format:check": "prettier --check .",
+        "pretest": "node scripts/copy-quickjs-wasm.mjs",
+        "test": "vitest run",
+        "smoke": "node scripts/smoke.mjs"
+    },
+    "dependencies": {
+        "cheerio": "^1.2.0",
+        "hono": "^4.13.12",
+        "quickjs-emscripten": "^0.32.0",
+        "xpath": "^0.0.34"
+    },
+    "devDependencies": {
+        "@types/node": "^26.6.3",
+        "prettier": "^3.9.9",
+        "typescript": "^7.0.2",
+        "vitest": "^5.0.3",
+        "wrangler": "^4.145.0"
+    }
 }
