@@ -41,6 +41,7 @@ import {
 } from 'quickjs-emscripten'
 
 import type { SandboxHttp } from './types'
+import { DEFAULT_TIME_OFFSET_HOURS, formatJavaTime } from '../lib/javatime'
 
 // 相对路径 import WASM：wrangler 会把它编译成 WebAssembly.Module 直接交给运行时。
 // 这是 Workers 上唯一可用的加载方式 —— 运行时既禁止 WebAssembly.compile，
@@ -102,6 +103,30 @@ var java = {
   htmlFormat: function (s) { return String(s).replace(/<[^>]*>/g, '') },
   log: function (s) { __host.log(String(s)) },
 
+  // 把一条规则当成字符串求值。当前节点只有规则求值层知道，所以要过宿主桥。
+  // 时机上它是 asyncify 的：脚本里是同步调用，宿主侧 await。
+  getString: function (rule, content) {
+    var raw = __host.getString(JSON.stringify([
+      String(rule),
+      content === undefined || content === null ? null : String(content),
+    ]))
+    var res = JSON.parse(raw)
+    if (!res.ok) { throw new Error(res.error) }
+    return res.value
+  },
+
+  // 时间格式化是纯计算，走同步桥 —— 实现放在宿主侧，好在 Node 里直接测
+  timeFormat: function (time, format) {
+    return __host.timeFormat(time, format === undefined || format === null ? null : String(format), null)
+  },
+  timeFormatUTC: function (time, format, offset) {
+    return __host.timeFormat(
+      time,
+      format === undefined || format === null ? null : String(format),
+      offset === undefined || offset === null ? 0 : Number(offset),
+    )
+  },
+
   __req: function (opts) {
     var raw = __host.request(JSON.stringify(opts))
     var res = JSON.parse(raw)
@@ -125,6 +150,16 @@ var java = {
 }
 `
 
+/**
+ * `java.getString(规则)` 的能力
+ *
+ * 由规则求值层注入 —— 「当前节点」只有那一层知道。
+ *
+ * **实现里不能再进沙箱**：asyncify 不支持嵌套挂起（见 runInSandbox 里的说明），
+ * 所以传入的规则若含 `@js:` / `<js>` 必须直接报错，而不是进去再挂起一次。
+ */
+export type SandboxGetString = (rule: string, content?: string) => Promise<string>
+
 export interface SandboxLimits {
     /** 脚本执行时限（毫秒） */
     timeoutMs?: number
@@ -132,6 +167,8 @@ export interface SandboxLimits {
     stackLimitBytes?: number
     /** 取网能力；不传时 java.ajax 会明确报错 */
     http?: SandboxHttp
+    /** 规则求值能力；不传时 java.getString 会明确报错 */
+    getString?: SandboxGetString
 }
 
 /**
@@ -150,6 +187,7 @@ export async function runInSandbox(
     const memoryLimit = limits.memoryLimitBytes ?? DEFAULT_MEMORY_LIMIT
     const stackLimit = limits.stackLimitBytes ?? DEFAULT_STACK_LIMIT
     const http = limits.http
+    const getString = limits.getString
     const totalTimeoutMs = http?.totalTimeoutMs ?? DEFAULT_TOTAL_TIMEOUT_MS
     const maxHttpCalls = http?.maxCalls ?? DEFAULT_MAX_HTTP_CALLS
 
@@ -195,15 +233,48 @@ export async function runInSandbox(
             fn.dispose()
         }
 
+        /** 多参数版本：`timeFormat(时间, 格式, 偏移)` 要用 */
+        const defineHostFnN = (
+            name: string,
+            impl: (...args: QuickJSHandle[]) => QuickJSHandle | void,
+        ): void => {
+            const fn = vm.newFunction(name, impl)
+            vm.setProp(host, name, fn)
+            fn.dispose()
+        }
+
         defineHostFn('b64encode', (arg) => vm.newString(btoa(String(vm.dump(arg)))))
         defineHostFn('b64decode', (arg) => vm.newString(atob(String(vm.dump(arg)))))
         defineHostFn('log', (arg) => {
             logs.push(String(vm.dump(arg)))
         })
 
+        // 时间格式化：纯计算，同步桥就够，也不用受 asyncify 的嵌套限制
+        defineHostFnN('timeFormat', (timeArg, formatArg, offsetArg) => {
+            const format = formatArg === undefined ? null : vm.dump(formatArg)
+            const offset = offsetArg === undefined ? null : vm.dump(offsetArg)
+            return vm.newString(
+                formatJavaTime(
+                    Number(vm.dump(timeArg)),
+                    format === null || format === undefined ? undefined : String(format),
+                    offset === null || offset === undefined
+                        ? DEFAULT_TIME_OFFSET_HOURS
+                        : Number(offset),
+                ),
+            )
+        })
+
         // asyncify 函数：在脚本里是同步调用，宿主侧是 await。
-        // 约束：asyncify 函数内部**不能**再调用另一个 asyncify 函数，
-        // 所以这里只做 fetch，不做任何会再次进入沙箱的事。
+        // 约束：asyncify 函数内部**不能再调用另一个 asyncify 函数**，
+        // 所以这里只做 fetch 与规则求值，不做任何会再次进入沙箱的事 ——
+        // 规则求值那一侧为此挡住了含 `@js:` 的规则（见 analyze.ts 的 sandboxGetString）。
+        const getStringFn = vm.newAsyncifiedFunction('getString', async (arg) => {
+            const raw = String(vm.dump(arg))
+            return vm.newString(await handleGetString(raw, { getString }))
+        })
+        vm.setProp(host, 'getString', getStringFn)
+        getStringFn.dispose()
+
         const requestFn = vm.newAsyncifiedFunction('request', async (arg) => {
             const optionsJson = String(vm.dump(arg))
             const response = await handleHttpRequest(optionsJson, {
@@ -309,6 +380,42 @@ function releaseHostBridge(vm: QuickJSAsyncContext, runtime: QuickJSAsyncRuntime
     } catch {
         // 走到这里说明库的销毁路径又出了问题，但结果早已取到、VM 也不再复用。
         // 这里不抛是为了不让一个纯清理阶段的问题把整次求值判成失败。
+    }
+}
+
+/** 沙箱内 java.getString 的实际执行：把规则交给上层注入的求值能力 */
+async function handleGetString(
+    payloadJson: string,
+    ctx: { getString?: SandboxGetString },
+): Promise<string> {
+    let rule = ''
+    let content: string | undefined
+
+    try {
+        const parsed = JSON.parse(payloadJson) as [unknown, unknown]
+        rule = String(parsed[0] ?? '')
+        const raw = parsed[1]
+        content = raw === null || raw === undefined ? undefined : String(raw)
+    } catch {
+        return JSON.stringify({ ok: false, error: 'java.getString 的参数不是合法 JSON' })
+    }
+
+    if (rule === '') return JSON.stringify({ ok: false, error: 'java.getString 缺少规则' })
+
+    if (!ctx.getString) {
+        return JSON.stringify({
+            ok: false,
+            error: '当前上下文未提供规则求值能力（java.getString 不可用）',
+        })
+    }
+
+    try {
+        return JSON.stringify({ ok: true, value: await ctx.getString(rule, content) })
+    } catch (err) {
+        return JSON.stringify({
+            ok: false,
+            error: err instanceof Error ? err.message : String(err),
+        })
     }
 }
 

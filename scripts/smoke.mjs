@@ -1412,6 +1412,117 @@ console.log('\n=== 14. 字段规则里的 {{}} 模板 ===')
     check(!left.some((s) => s.id === id), '模板测试源已清理')
 }
 
+console.log('\n=== 15. 沙箱助手（java.getString / java.timeFormat） ===')
+{
+    /**
+     * `java.getString(规则)` 让沙箱里的脚本回过头去跑一条引擎规则 —— 真实书源里
+     * `{{java.getString('$.freeStack')=='1'?'':'💲VIP'}}` 这种写法很多。
+     *
+     * 它必须由规则求值层注入（「当前节点」只有那一层知道），而且要挡住「规则里再套 JS」：
+     * asyncify 不支持嵌套挂起。
+     *
+     * `java.timeFormat` 是纯计算，实现放在宿主侧，格式串的替换规则在单测里逐条钉过；
+     * 这里验的是它确实从沙箱里接上了。
+     */
+    const id = `user:${BASE}`
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+
+    // 固定时间戳，便于断言（同一数值同时写进规则与期望值）
+    const fixedMs = Date.parse('2026-07-19T20:04:05Z')
+
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: '沙箱助手测试源',
+                bookSourceUrl: BASE,
+                searchUrl: `${BASE}/fixture/api/search?q={{key}}&p={{page}}`,
+                ruleSearch: {
+                    bookList: '$.data.list',
+                    name: '{{$.name}}',
+                    author: '{{$.author}}',
+                    bookUrl: '/fixture/book/{{$.id}}',
+                    // 模板里的 JS 表达式回头跑一条规则
+                    kind: "{{java.getString('$.kind')}}",
+                    // 时间格式化：默认 +8
+                    lastChapter: `@js:java.timeFormat(${fixedMs}, 'yyyy-MM-dd HH:mm')`,
+                    // 显式时区：UTC
+                    wordCount: `@js:java.timeFormatUTC(${fixedMs}, 'yyyy-MM-dd HH:mm', 0)`,
+                    // 第二个参数：在给定内容上求值，而不是当前节点
+                    intro: `@js:java.getString('$.name', '{"name":"另一段内容"}')`,
+                },
+                ruleBookInfo: { name: '@css:h1.book-name@text', tocUrl: '@css:a.toc-link@href' },
+                ruleToc: {
+                    chapterList: '@css:ul.chapter-list li',
+                    chapterName: '@css:a@text',
+                    chapterUrl: '@css:a@href',
+                },
+                ruleContent: { content: '@css:div#content@textNodes' },
+            },
+        ]),
+    )
+
+    const searchRes = await call('POST', '/api/search', { keyword: '测试', sourceIds: [id] })
+    const per = searchRes.json?.sources?.[0]
+    const books = per?.books ?? []
+    check(books.length === 2, '沙箱助手源搜到 2 本书', per?.error ?? `count=${books.length}`)
+
+    if (books.length > 0) {
+        const book = books[0]
+        check(book.kind === '玄幻', 'java.getString 在模板里跑通了 JSONPath', String(book.kind))
+        check(
+            book.lastChapter === '2026-07-20 04:04',
+            'java.timeFormat 默认按 +8 渲染（UTC 下会是前一天）',
+            String(book.lastChapter),
+        )
+        check(
+            book.wordCount === '2026-07-19 20:04',
+            'java.timeFormatUTC 按显式偏移渲染',
+            String(book.wordCount),
+        )
+        check(
+            book.intro === '另一段内容',
+            'java.getString 的第二个参数：在给定内容上求值',
+            String(book.intro),
+        )
+    }
+
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+
+    // ---- 规则里再套 JS 必须明确报错（asyncify 不支持嵌套挂起） ----
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: '嵌套 JS 测试源',
+                bookSourceUrl: BASE,
+                searchUrl: `${BASE}/fixture/api/search?q={{key}}&p={{page}}`,
+                ruleSearch: {
+                    bookList: '$.data.list',
+                    name: '{{$.name}}',
+                    bookUrl: '/fixture/book/{{$.id}}',
+                    wordCount: "@js:java.getString('@js:1')",
+                },
+                ruleToc: {},
+                ruleContent: {},
+            },
+        ]),
+    )
+    const nested = await call('POST', '/api/search', { keyword: '测试', sourceIds: [id] })
+    const nestedPer = nested.json?.sources?.[0]
+    check(
+        nestedPer?.ok === false && String(nestedPer?.error ?? '').includes('嵌套挂起'),
+        'java.getString 里再套 JS 会明确报错，而不是悄悄挂起',
+        JSON.stringify(nestedPer?.error ?? nestedPer?.books?.[0]?.wordCount),
+    )
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+
+    const left = (await getJson('/api/sources')).json?.sources ?? []
+    check(!left.some((s) => s.id === id), '沙箱助手测试源已清理')
+}
+
 console.log('\n=== 结果 ===')
 if (failures.length === 0) {
     console.log(

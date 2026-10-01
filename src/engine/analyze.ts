@@ -19,6 +19,7 @@ import { parseJsoupRule } from './jsoup'
 import { extractValues, parseHtml, reparseFragment, selectNodes } from './select'
 import { jsonPathToStrings } from './jsonpath'
 import { runInSandbox, sandboxResultToString } from './js'
+import type { SandboxGetString, SandboxLimits } from './js'
 import { classifyTemplate, hasRuleSyntax, stripRuleMarker, templatePattern } from './template'
 import { isAttributeView, runXPath } from './xpath'
 
@@ -316,7 +317,7 @@ async function evalTemplate(sel: Selection, inner: string, ctx: RuleContext): Pr
             const value = await runInSandbox(
                 text,
                 { ...baseGlobals(ctx), result: sel.source, src: sel.source },
-                { http: ctx.http },
+                sandboxLimits(sel, ctx),
             )
             return sandboxResultToString(value)
         } catch {
@@ -479,7 +480,7 @@ async function evalSelectorChain(
                 result: values.length > 1 ? values : (values[0] ?? ''),
                 src: current.source,
             },
-            { http: ctx.http },
+            sandboxLimits(current, ctx),
         )
         values = [sandboxResultToString(result)]
         current = selectionFromText(values[0] ?? '', current.source)
@@ -509,7 +510,7 @@ async function evalSingleSegment(
         const result = await runInSandbox(
             jsCode,
             { ...baseGlobals(ctx), result: ctx.result ?? sel.source, src: sel.source },
-            { http: ctx.http },
+            sandboxLimits(sel, ctx),
         )
         return [sandboxResultToString(result)]
     }
@@ -539,9 +540,38 @@ async function evalSingleSegment(
             result: values.length > 1 ? values : (values[0] ?? ''),
             src: sel.source,
         },
-        { http: ctx.http },
+        sandboxLimits(sel, ctx),
     )
     return [sandboxResultToString(result)]
+}
+
+/**
+ * 沙箱里 `java.getString` 的实现：把一条规则当成字符串求值
+ *
+ * 规则求值本身可能进沙箱（`@js:`），而 asyncify **不支持嵌套挂起** ——
+ * 从沙箱里再调进来一次会把挂起机制弄乱。所以这里直接挡住含 JS 的规则、明确报错，
+ * 而不是让它在深处以看不懂的方式炸掉。
+ *
+ * 实测用法（`java.getString('$.update_time')`、`java.getString('$.freeStack')`）
+ * 都是纯 JSONPath / 选择器，不受这条限制影响。
+ */
+function sandboxGetString(sel: Selection, ctx: RuleContext): SandboxGetString {
+    return async (rule, content) => {
+        if (/@js:|<js[\s>]/i.test(rule)) {
+            throw new UnsupportedRuleError(
+                `java.getString 里不能再套 JS 规则（${rule.replace(/\s+/g, ' ').slice(0, 60)}）：asyncify 不支持嵌套挂起`,
+            )
+        }
+        // 第二个参数给了内容就在那段内容上求值，否则用当前节点
+        const target = content === undefined ? sel : rootSelection(content)
+        const values = await analyzeStrings(target, rule, ctx)
+        return values.filter((v) => v !== '').join('\n')
+    }
+}
+
+/** 传给沙箱的能力：取网 + 规则求值 */
+function sandboxLimits(sel: Selection, ctx: RuleContext): SandboxLimits {
+    return { http: ctx.http, getString: sandboxGetString(sel, ctx) }
 }
 
 function baseGlobals(ctx: RuleContext): Record<string, unknown> {
