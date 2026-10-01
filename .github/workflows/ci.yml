@@ -1,0 +1,79 @@
+name: CI
+
+on:
+    push:
+        branches: [main]
+    pull_request:
+
+# 同一分支连续推送时，取消上一次还没跑完的任务 —— 排队等一个已经过时的结果没意义
+concurrency:
+    group: ${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: true
+
+jobs:
+    check:
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+        env:
+            # wrangler 会交互式地问「要不要发送遥测」，CI 里没人回答它，必须显式关掉
+            WRANGLER_SEND_METRICS: 'false'
+        steps:
+            - uses: actions/checkout@v4
+
+            - uses: actions/setup-node@v4
+              with:
+                  node-version-file: .nvmrc
+                  cache: npm
+
+            - name: 安装依赖
+              run: npm ci
+
+            - name: 建本地 D1 表
+              run: npm run db:migrate
+
+            - name: 类型检查
+              run: npm run typecheck
+
+            - name: 格式检查
+              run: npm run format:check
+
+            - name: 单元测试
+              run: npm test
+
+            # 冒烟要打真实 HTTP，所以在一个 step 里起服务、测完再收 ——
+            # 跨 step 起后台进程在 Actions 里不可靠（step 结束时可能连带被杀掉）
+            - name: 端到端冒烟
+              run: |
+                  set -euo pipefail
+
+                  # .dev.vars 是本地开发文件、不入库，这里现造一份把测试站点打开
+                  echo 'ENABLE_FIXTURE=true' > .dev.vars
+
+                  npx wrangler dev --port 8787 > wrangler.log 2>&1 &
+                  SERVER_PID=$!
+                  trap 'kill $SERVER_PID 2>/dev/null || true' EXIT
+
+                  # 等真正就绪，而不是盲等一个固定秒数：机器忙的时候固定秒数必然不够，
+                  # 机器闲的时候又白等。探测到能应答再往下走。
+                  for attempt in $(seq 1 60); do
+                    if curl -fsS http://127.0.0.1:8787/api/health > /dev/null 2>&1; then
+                      echo "本地服务已就绪（第 ${attempt} 次探测）"
+                      break
+                    fi
+                    sleep 1
+                  done
+
+                  if ! curl -fsS http://127.0.0.1:8787/api/health > /dev/null 2>&1; then
+                    echo '::error::本地服务没起来'
+                    cat wrangler.log
+                    exit 1
+                  fi
+
+                  npm run smoke
+
+            # 冒烟失败时最需要看的就是运行时日志，否则只剩一句「断言没过」
+            - name: 失败时贴出运行时日志
+              if: failure()
+              run: |
+                  echo '--- wrangler.log ---'
+                  cat wrangler.log 2>/dev/null || echo '(没有日志文件)'
