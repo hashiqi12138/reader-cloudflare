@@ -13,8 +13,23 @@
  * 在 Node 里没有 —— 而这一层要能在 Node 里单测（它是纯函数）。
  */
 
-/** 新账号的默认迭代次数 */
-export const PBKDF2_ITERATIONS = 120_000
+/**
+ * 新账号的默认迭代次数
+ *
+ * **100000 是 Workers 运行时的硬上限，不是我们的选择。** workerd 的 WebCrypto
+ * 对 PBKDF2 的迭代次数设了上限，超过就抛
+ * `Pbkdf2 failed: iteration counts above 100000 are not supported`。
+ * OWASP 对 PBKDF2-HMAC-SHA256 的建议值远高于此，但在这个运行时上拿不到 ——
+ * 所以取上限，并且**不能**再往上调。
+ *
+ * 这里曾经写成 120000：本地 `wrangler dev` 跑得通（那台 workerd 没卡这条），
+ * 线上却直接注册失败。这类「本地绿、线上红」的坑，只能靠把上限本身写进测试来防
+ * （见 test/password.test.ts 里对 PBKDF2_MAX_ITERATIONS 的断言）。
+ */
+export const PBKDF2_ITERATIONS = 100_000
+
+/** Workers 运行时允许的最大迭代次数。写死在这里，供测试守住 */
+export const PBKDF2_MAX_ITERATIONS = 100_000
 
 /** 派生密钥长度（位） */
 const DERIVED_BITS = 256

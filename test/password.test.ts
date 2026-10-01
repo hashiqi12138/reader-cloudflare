@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { PBKDF2_ITERATIONS, hashPassword, randomToken, verifyPassword } from '../src/lib/password'
+import {
+    PBKDF2_ITERATIONS,
+    PBKDF2_MAX_ITERATIONS,
+    hashPassword,
+    randomToken,
+    verifyPassword,
+} from '../src/lib/password'
 
 /**
  * 口令哈希
@@ -61,8 +67,16 @@ describe('hashPassword / verifyPassword', () => {
         expect(await verifyPassword('whatever', { ...record, iterations: -1 })).toBe(false)
     })
 
-    it('默认迭代次数不低于 10 万（太低等于没加成本）', () => {
+    it('默认迭代次数取 Workers 上限：低了没成本，高了线上直接注册失败', () => {
+        // 下界：太低等于没加成本
         expect(PBKDF2_ITERATIONS).toBeGreaterThanOrEqual(100_000)
+        // 上界才是这条测试存在的理由：超过 workerd 的上限会让**注册整个失败**，
+        // 而本地 wrangler dev 不卡这条，所以只能在这里守住
+        expect(PBKDF2_ITERATIONS).toBeLessThanOrEqual(PBKDF2_MAX_ITERATIONS)
+    })
+
+    it('迭代次数刚好卡在上限上（拿满可用的成本）', () => {
+        expect(PBKDF2_ITERATIONS).toBe(PBKDF2_MAX_ITERATIONS)
     })
 })
 
