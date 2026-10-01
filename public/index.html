@@ -3,11 +3,48 @@
     <head>
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <meta name="color-scheme" content="light dark" />
         <title>书源阅读器</title>
+        <link rel="stylesheet" href="/style.css" />
+        <!--
+            刻意不做「先渲染骨架再水合」那一套：这是个单页小应用，
+            首屏多等几十毫秒换来说到底更简单的代码，划算。
+        -->
     </head>
     <body>
-        <h1>书源阅读器</h1>
-        <p>骨架阶段：先跑通搜索与阅读链路，前端随后补上。</p>
-        <p>接口探针：<a href="/api/probe">/api/probe</a></p>
+        <header class="topbar">
+            <span class="brand">书源阅读器</span>
+            <nav>
+                <button class="tab" data-route="shelf" type="button">书架</button>
+                <button class="tab" data-route="search" type="button">搜索</button>
+                <button class="tab" data-route="sources" type="button">书源</button>
+            </nav>
+            <a
+                class="icon-btn"
+                href="/api/probe"
+                target="_blank"
+                rel="noreferrer"
+                title="运行时自检"
+                >自检</a
+            >
+        </header>
+
+        <div
+            id="toast"
+            hidden
+            style="
+                position: fixed;
+                z-index: 40;
+                left: 12px;
+                right: 12px;
+                bottom: 12px;
+                max-width: 640px;
+                margin: 0 auto;
+            "
+        ></div>
+
+        <main id="view"></main>
+
+        <script type="module" src="/app.js"></script>
     </body>
 </html>

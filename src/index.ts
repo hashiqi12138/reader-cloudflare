@@ -7,15 +7,12 @@
 
 import { Hono } from 'hono'
 
-import {
-    SourceStoreError,
-    countUserSources,
-    deleteUserSource,
-    importSources,
-    setSourceEnabled,
-} from './data/db'
+import { countUserSources, deleteUserSource, importSources, setSourceEnabled } from './data/db'
 import { findSource, listEnabledSources, listSources } from './data/sources'
 import type { RegistryOptions } from './data/sources'
+import { addToShelf, getProgress, listShelf, removeFromShelf, saveProgress } from './data/library'
+import type { AddToShelfInput, SaveProgressInput } from './data/library'
+import { DataError, bookKey } from './data/types'
 import { UnsupportedRuleError } from './engine/analyze'
 import { SandboxError, runInSandbox } from './engine/js'
 import { parseHtml } from './engine/select'
@@ -40,8 +37,7 @@ function statusFor(err: unknown): { status: ErrorStatus; code: string } {
     if (err instanceof UnsupportedRuleError) return { status: 422, code: 'unsupported_rule' }
     if (err instanceof SandboxError) return { status: 422, code: 'sandbox_error' }
     if (err instanceof UpstreamError) return { status: 502, code: 'upstream_error' }
-    if (err instanceof SourceStoreError)
-        return { status: err.status as ErrorStatus, code: err.code }
+    if (err instanceof DataError) return { status: err.status as ErrorStatus, code: err.code }
     return { status: 500, code: 'internal_error' }
 }
 
@@ -207,6 +203,74 @@ app.delete('/api/sources', async (c) => {
 })
 
 /**
+ * 书架
+ *
+ * 与搜索一样，书架条目本身不在这里校验书源是否存在 —— 书源是可增删的，
+ * 书架记的是「这本书来自哪个源、地址是什么」。源被删掉之后书架条目还在，
+ * 打开时由前端按源是否可用给出提示，而不是让书架悄悄少几本。
+ */
+app.get('/api/shelf', async (c) => {
+    const entries = await listShelf(c.env.DB)
+    return c.json({ count: entries.length, entries })
+})
+
+app.post('/api/shelf', async (c) => {
+    let body: AddToShelfInput
+    try {
+        body = await c.req.json()
+    } catch {
+        return c.json({ error: '请求体必须是 JSON' }, 400)
+    }
+
+    try {
+        const { entry, created } = await addToShelf(c.env.DB, body)
+        return c.json({ entry, created }, created ? 201 : 200)
+    } catch (err) {
+        return fail(c, err)
+    }
+})
+
+app.delete('/api/shelf', async (c) => {
+    const key = c.req.query('key') ?? ''
+    if (key === '') return c.json({ error: '缺少 key 参数' }, 400)
+
+    try {
+        const removed = await removeFromShelf(c.env.DB, key)
+        return c.json({ removed: removed.bookKey, name: removed.name })
+    } catch (err) {
+        return fail(c, err)
+    }
+})
+
+/** 阅读位置。不在书架里的书也记 —— 否则「读了两章再搜回来」就得从头翻 */
+app.get('/api/progress', async (c) => {
+    const sourceId = c.req.query('sourceId') ?? ''
+    const bookUrl = c.req.query('bookUrl') ?? ''
+    if (sourceId === '' || bookUrl === '') {
+        return c.json({ error: '缺少 sourceId 或 bookUrl 参数' }, 400)
+    }
+
+    const progress = await getProgress(c.env.DB, bookKey(sourceId, bookUrl))
+    return c.json({ progress: progress ?? null })
+})
+
+app.put('/api/progress', async (c) => {
+    let body: SaveProgressInput
+    try {
+        body = await c.req.json()
+    } catch {
+        return c.json({ error: '请求体必须是 JSON' }, 400)
+    }
+
+    try {
+        const progress = await saveProgress(c.env.DB, body)
+        return c.json({ progress })
+    } catch (err) {
+        return fail(c, err)
+    }
+})
+
+/**
  * 聚合搜索
  *
  * 书源之间并发请求，单个源失败只影响它自己那一条结果。
@@ -315,9 +379,24 @@ app.get('/api/content', async (c) => {
 })
 
 /** 其余路径交给静态资源（含 SPA 回退） */
-app.get('*', (c) => c.env.ASSETS.fetch(c.req.raw))
+app.get('*', async (c) => {
+    const path = new URL(c.req.url).pathname
 
-app.notFound((c) => c.json({ error: '接口不存在', path: new URL(c.req.url).pathname }, 404))
+    // 未命中的接口必须回 JSON 404，**不能**被 SPA 回退喂成 index.html。
+    // 后者状态码是 200、内容是 HTML，前端拿到会 JSON.parse 失败，
+    // 报出来的是「解析出错」而不是「接口不存在」，排查方向直接被带偏。
+    if (path.startsWith('/api/')) {
+        return c.json({ error: '接口不存在', path }, 404)
+    }
+
+    return c.env.ASSETS.fetch(c.req.raw)
+})
+
+/** 非 GET 方法命中不了的路径走这里 */
+app.notFound((c) => {
+    const path = new URL(c.req.url).pathname
+    return c.json({ error: '接口不存在', path }, 404)
+})
 
 app.onError((err, c) => fail(c, err))
 

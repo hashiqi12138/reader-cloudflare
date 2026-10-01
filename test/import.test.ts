@@ -9,8 +9,8 @@
 
 import { describe, expect, it } from 'vitest'
 
-import { SourceStoreError, parseImportPayload, validateImportedSource } from '../src/data/db'
-import { userIdForUrl } from '../src/data/types'
+import { parseImportPayload, validateImportedSource } from '../src/data/db'
+import { DataError, userIdForUrl } from '../src/data/types'
 
 describe('导入内容的结构识别', () => {
     it('接受裸数组', () => {
@@ -26,11 +26,11 @@ describe('导入内容的结构识别', () => {
             parseImportPayload('{ 不是 JSON')
             throw new Error('这里本该抛错')
         } catch (err) {
-            expect(err).toBeInstanceOf(SourceStoreError)
-            expect((err as SourceStoreError).code).toBe('invalid_json')
-            expect((err as SourceStoreError).status).toBe(400)
+            expect(err).toBeInstanceOf(DataError)
+            expect((err as DataError).code).toBe('invalid_json')
+            expect((err as DataError).status).toBe(400)
             // 原始报错是定位问题的关键，不能被吞掉
-            expect((err as SourceStoreError).message).toContain('导入内容不是合法 JSON')
+            expect((err as DataError).message).toContain('导入内容不是合法 JSON')
         }
     })
 

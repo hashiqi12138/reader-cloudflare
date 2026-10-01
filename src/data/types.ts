@@ -32,3 +32,31 @@ export const BUILTIN_ID_PREFIX = 'builtin:'
 export function userIdForUrl(url: string): string {
     return USER_ID_PREFIX + url
 }
+
+/**
+ * 书架条目与阅读进度共用的主键：书源 id + 换行 + 书籍地址。
+ *
+ * 用换行分隔而不是 `|` 或 `:`：书籍地址里这两种字符都常见，
+ * 而 URL 与书源 id 里都不可能带裸换行，所以这个分隔符是安全的。
+ * 键是字符串而不是自增数字，是为了让「同一个源里的同一本书」天然幂等 ——
+ * 重复加入书架等于更新，不需要先去查一遍有没有。
+ */
+export function bookKey(sourceId: string, bookUrl: string): string {
+    return `${sourceId}\n${bookUrl}`
+}
+
+/**
+ * 数据层错误。带上 HTTP 状态与机器可读的 code，
+ * 路由层不必再猜「这算 400 还是 500」，前端也能按 code 分支处理。
+ */
+export class DataError extends Error {
+    readonly status: number
+    readonly code: string
+
+    constructor(message: string, status = 400, code = 'invalid_input') {
+        super(message)
+        this.name = 'DataError'
+        this.status = status
+        this.code = code
+    }
+}

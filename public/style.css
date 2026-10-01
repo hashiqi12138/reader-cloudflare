@@ -1,0 +1,470 @@
+/*
+ * 一个文件装完整套样式，不引任何外部资源（字体、图标、CSS 框架都不引）。
+ *
+ * 原因很实际：这个页面要能在目标站点被墙、CDN 抽风的网络里照常打开，
+ * 也方便离线开发。图标一律用字符（←、＋、×）而不是字体图标 ——
+ * 少一个 100 KB 的字体请求，也少一处「图标没加载出来变成方块」的故障。
+ */
+
+:root {
+    --bg: #f6f6f4;
+    --surface: #ffffff;
+    --surface-2: #f0f0ec;
+    --border: #e0e0d9;
+    --text: #1c1c1a;
+    --text-dim: #6b6b63;
+    --accent: #2f6f4f;
+    --accent-soft: #e6f0ea;
+    --danger: #a33b32;
+    --warn: #8a6d1f;
+    --warn-soft: #fdf6e3;
+    --radius: 10px;
+    --shadow: 0 1px 2px rgb(0 0 0 / 6%), 0 8px 24px rgb(0 0 0 / 4%);
+}
+
+[data-theme='dark'] {
+    --bg: #16181a;
+    --surface: #1f2225;
+    --surface-2: #262a2e;
+    --border: #343a3f;
+    --text: #e6e6e2;
+    --text-dim: #9a9a92;
+    --accent: #6fbe93;
+    --accent-soft: #21352a;
+    --danger: #e0837a;
+    --warn: #d9bb6a;
+    --warn-soft: #2e2a1d;
+    --shadow: 0 1px 2px rgb(0 0 0 / 30%), 0 8px 24px rgb(0 0 0 / 20%);
+}
+
+* {
+    box-sizing: border-box;
+}
+
+html,
+body {
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    background: var(--bg);
+    color: var(--text);
+    font-family:
+        system-ui,
+        -apple-system,
+        'Segoe UI',
+        'Microsoft YaHei',
+        sans-serif;
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-text-size-adjust: 100%;
+}
+
+button,
+input,
+textarea,
+select {
+    font: inherit;
+    color: inherit;
+}
+
+a {
+    color: var(--accent);
+}
+
+/* ---------- 外壳 ---------- */
+
+.topbar {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 8px 12px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+}
+
+.topbar .brand {
+    font-weight: 600;
+    margin-right: 8px;
+    white-space: nowrap;
+}
+
+.topbar nav {
+    display: flex;
+    gap: 2px;
+    flex: 1;
+    overflow-x: auto;
+}
+
+.tab {
+    padding: 6px 12px;
+    border: 0;
+    border-radius: 999px;
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.tab:hover {
+    background: var(--surface-2);
+}
+
+.tab[aria-current='page'] {
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-weight: 600;
+}
+
+.icon-btn {
+    padding: 6px 10px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--surface);
+    cursor: pointer;
+    line-height: 1.2;
+}
+
+.icon-btn:hover {
+    background: var(--surface-2);
+}
+
+main {
+    max-width: 860px;
+    margin: 0 auto;
+    padding: 16px 12px 64px;
+}
+
+/* ---------- 通用 ---------- */
+
+h1,
+h2,
+h3 {
+    line-height: 1.3;
+}
+
+h2 {
+    font-size: 1.15rem;
+    margin: 22px 0 10px;
+}
+
+h3 {
+    font-size: 1rem;
+    margin: 16px 0 8px;
+}
+
+.card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px;
+    margin-bottom: 10px;
+    box-shadow: var(--shadow);
+}
+
+.row {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.row.tight {
+    gap: 6px;
+}
+
+.spacer {
+    flex: 1;
+}
+
+.muted {
+    color: var(--text-dim);
+    font-size: 0.9rem;
+}
+
+.mono {
+    font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+    font-size: 0.85rem;
+}
+
+.btn {
+    padding: 7px 14px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    cursor: pointer;
+}
+
+.btn:hover:not(:disabled) {
+    background: var(--surface-2);
+}
+
+.btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.btn.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+}
+
+.btn.primary:hover:not(:disabled) {
+    filter: brightness(1.08);
+}
+
+[data-theme='dark'] .btn.primary {
+    color: #10201a;
+}
+
+.btn.danger {
+    color: var(--danger);
+}
+
+.btn.sm {
+    padding: 4px 10px;
+    font-size: 0.875rem;
+}
+
+input[type='text'],
+input[type='search'],
+textarea {
+    width: 100%;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+}
+
+textarea {
+    min-height: 120px;
+    font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+    font-size: 0.85rem;
+    resize: vertical;
+}
+
+label.check {
+    display: inline-flex;
+    gap: 6px;
+    align-items: center;
+    cursor: pointer;
+}
+
+/* ---------- 提示条 ---------- */
+
+.alert {
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-bottom: 10px;
+    border: 1px solid var(--border);
+    background: var(--surface-2);
+}
+
+.alert.error {
+    border-color: var(--danger);
+    color: var(--danger);
+}
+
+.alert.warn {
+    border-color: var(--warn);
+    background: var(--warn-soft);
+    color: var(--warn);
+}
+
+.alert.ok {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+    color: var(--accent);
+}
+
+/* ---------- 书架 / 搜索结果 ---------- */
+
+.book-item {
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+}
+
+.cover {
+    width: 48px;
+    height: 64px;
+    flex: 0 0 auto;
+    border-radius: 4px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    display: grid;
+    place-items: center;
+    color: var(--text-dim);
+    font-size: 0.7rem;
+    overflow: hidden;
+}
+
+.cover img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.book-item .title {
+    font-weight: 600;
+    margin-bottom: 2px;
+    cursor: pointer;
+}
+
+.book-item .title:hover {
+    color: var(--accent);
+}
+
+.badge {
+    display: inline-block;
+    padding: 1px 7px;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    background: var(--surface-2);
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+}
+
+.badge.on {
+    background: var(--accent-soft);
+    color: var(--accent);
+    border-color: transparent;
+}
+
+.badge.off {
+    background: var(--warn-soft);
+    color: var(--warn);
+}
+
+/* ---------- 目录 ---------- */
+
+.chapter-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    max-height: 60vh;
+    overflow-y: auto;
+}
+
+.chapter-list li {
+    border-bottom: 1px solid var(--border);
+}
+
+.chapter-list button {
+    width: 100%;
+    text-align: left;
+    padding: 9px 4px;
+    border: 0;
+    background: transparent;
+    cursor: pointer;
+}
+
+.chapter-list button:hover {
+    background: var(--surface-2);
+}
+
+.chapter-list li[data-current='true'] button {
+    color: var(--accent);
+    font-weight: 600;
+}
+
+/* ---------- 阅读页 ---------- */
+
+.reader-bar {
+    position: sticky;
+    top: 53px;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+}
+
+.reader-bar .chapter-title {
+    flex: 1;
+    text-align: center;
+    font-size: 0.9rem;
+    color: var(--text-dim);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#reading {
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 20px 18px 80px;
+}
+
+#reading h1 {
+    font-size: 1.3rem;
+    margin: 0 0 18px;
+}
+
+#reading p {
+    margin: 0 0 1em;
+    text-indent: 2em;
+    /* 正文用大一点的字号和更松的行距，长时间阅读不累 */
+    font-size: var(--reader-font-size, 18px);
+    line-height: 1.9;
+}
+
+.reader-nav {
+    display: flex;
+    gap: 10px;
+    margin-top: 26px;
+}
+
+.reader-nav .btn {
+    flex: 1;
+}
+
+.drawer-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgb(0 0 0 / 40%);
+    z-index: 30;
+}
+
+.drawer {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(420px, 88vw);
+    background: var(--surface);
+    border-left: 1px solid var(--border);
+    z-index: 31;
+    display: flex;
+    flex-direction: column;
+}
+
+.drawer header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+}
+
+.drawer .body {
+    overflow-y: auto;
+    padding: 6px 12px 24px;
+}
+
+@media (max-width: 560px) {
+    .topbar .brand {
+        display: none;
+    }
+
+    main {
+        padding: 12px 10px 64px;
+    }
+}

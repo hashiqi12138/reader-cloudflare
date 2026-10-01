@@ -355,10 +355,177 @@ console.log('\n=== 5. 书源管理（D1） ===')
     )
 }
 
+console.log('\n=== 6. 前端静态资源 ===')
+{
+    // 静态资源是「先查 assets、匹配不到才进 Worker」的，而接口必须反着来。
+    // 这两条规则一旦配错，表现是「页面能开、接口全 404」或者「接口正常、页面是接口的 404」，
+    // 都很容易被误判成前端写错了。所以这里直接钉住两边。
+    const page = await fetch(BASE + '/')
+    const pageText = await page.text()
+    check(page.status === 200, '/ 返回 200', `status=${page.status}`)
+    check(
+        (page.headers.get('content-type') ?? '').includes('text/html'),
+        '/ 的 content-type 是 HTML',
+        page.headers.get('content-type') ?? '',
+    )
+    check(pageText.includes('id="view"'), '页面里有挂载点 #view')
+
+    for (const asset of ['/app.js', '/style.css']) {
+        const response = await fetch(BASE + asset)
+        check(response.status === 200, `${asset} 返回 200`, `status=${response.status}`)
+        check((await response.text()).length > 500, `${asset} 不是空文件`)
+    }
+
+    // 未命中的接口必须由 Worker 回 JSON 404，而不是被 SPA 回退喂成 index.html
+    const missing = await fetch(BASE + '/api/not-a-real-endpoint')
+    const missingType = missing.headers.get('content-type') ?? ''
+    check(
+        missing.status === 404 && missingType.includes('application/json'),
+        '未命中的 /api/* 回 JSON 404（没有被 SPA 回退吃掉）',
+        `status=${missing.status} type=${missingType}`,
+    )
+}
+
+console.log('\n=== 7. 书架与阅读进度 ===')
+{
+    const sourceId = 'builtin:fixture-css'
+    const bookUrl = `${BASE}/fixture/book/1`
+    const chapterUrl = `${BASE}/fixture/chapter/1/1`
+
+    const shelfOf = async () => (await getJson('/api/shelf')).json?.entries ?? []
+
+    async function call(method, path, body) {
+        const response = await fetch(BASE + path, {
+            method,
+            headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
+            body: body === undefined ? undefined : JSON.stringify(body),
+        })
+        const text = await response.text()
+        let json = null
+        try {
+            json = JSON.parse(text)
+        } catch {
+            /* 留给调用方判定 */
+        }
+        return { status: response.status, json }
+    }
+
+    // 清掉上一次可能留下的条目，保证可重复运行
+    const existing = (await shelfOf()).find((e) => e.sourceId === sourceId && e.bookUrl === bookUrl)
+    if (existing) await call('DELETE', `/api/shelf?key=${encodeURIComponent(existing.bookKey)}`)
+
+    const baseline = (await shelfOf()).length
+
+    const added = await call('POST', '/api/shelf', {
+        sourceId,
+        bookUrl,
+        name: '测试小说·甲',
+        author: '测试作者',
+    })
+    check(
+        added.status === 201 && added.json?.created === true,
+        '加入书架（首次返回 201 created）',
+        JSON.stringify(added.json?.created),
+    )
+    check((await shelfOf()).length === baseline + 1, '书架条目数加一')
+
+    const again = await call('POST', '/api/shelf', {
+        sourceId,
+        bookUrl,
+        name: '测试小说·甲',
+        author: '测试作者',
+    })
+    check(
+        again.status === 200 && again.json?.created === false,
+        '重复加入不产生第二条（200 created=false）',
+        JSON.stringify(again.json?.created),
+    )
+    check((await shelfOf()).length === baseline + 1, '重复加入后条目数没变')
+
+    const beforeRead = (await shelfOf()).find((e) => e.sourceId === sourceId) ?? {}
+    check(
+        beforeRead.chapterName === null,
+        '没读过时进度为空',
+        JSON.stringify(beforeRead.chapterName),
+    )
+
+    const saved = await call('PUT', '/api/progress', {
+        sourceId,
+        bookUrl,
+        chapterUrl,
+        chapterName: '第一章 起风了',
+        chapterIndex: 0,
+    })
+    check(
+        saved.status === 200 && saved.json?.progress?.chapterIndex === 0,
+        '写入阅读进度',
+        JSON.stringify(saved.json?.progress),
+    )
+
+    const afterRead = (await shelfOf()).find((e) => e.sourceId === sourceId) ?? {}
+    check(
+        afterRead.chapterName === '第一章 起风了' && afterRead.chapterIndex === 0,
+        '书架列表带出阅读位置（LEFT JOIN 生效）',
+        JSON.stringify({ name: afterRead.chapterName, index: afterRead.chapterIndex }),
+    )
+
+    const readBack = await getJson(
+        `/api/progress?sourceId=${encodeURIComponent(sourceId)}&bookUrl=${encodeURIComponent(bookUrl)}`,
+    )
+    check(
+        readBack.json?.progress?.chapterUrl === chapterUrl,
+        '按书源 + 书籍地址读回进度',
+        JSON.stringify(readBack.json?.progress?.chapterUrl),
+    )
+
+    const advanced = await call('PUT', '/api/progress', {
+        sourceId,
+        bookUrl,
+        chapterUrl: `${BASE}/fixture/chapter/1/2`,
+        chapterName: '第二章',
+        chapterIndex: 1,
+    })
+    check(
+        advanced.json?.progress?.chapterIndex === 1,
+        '进度可以往前推',
+        JSON.stringify(advanced.json?.progress?.chapterIndex),
+    )
+
+    const removed = await call(
+        'DELETE',
+        `/api/shelf?key=${encodeURIComponent(afterRead.bookKey ?? '')}`,
+    )
+    check(
+        removed.status === 200 && removed.json?.name === '测试小说·甲',
+        '移出书架',
+        JSON.stringify(removed.json),
+    )
+    check((await shelfOf()).length === baseline, '移出后回到原来的条目数')
+
+    const progressGone = await getJson(
+        `/api/progress?sourceId=${encodeURIComponent(sourceId)}&bookUrl=${encodeURIComponent(bookUrl)}`,
+    )
+    check(
+        progressGone.json?.progress === null,
+        '移出书架时进度一并清掉（不留孤儿进度）',
+        JSON.stringify(progressGone.json?.progress),
+    )
+
+    const removeAgain = await call(
+        'DELETE',
+        `/api/shelf?key=${encodeURIComponent(afterRead.bookKey ?? '')}`,
+    )
+    check(
+        removeAgain.status === 404 && removeAgain.json?.code === 'shelf_entry_not_found',
+        '重复移出报 404 shelf_entry_not_found',
+        JSON.stringify(removeAgain.json?.code),
+    )
+}
+
 console.log('\n=== 结果 ===')
 if (failures.length === 0) {
     console.log(
-        `全部通过：搜索 → 详情 → 目录 → 正文，${succeeded.length} 个书源（CSS / XPath / JS）结果一致，书源管理往返正常`,
+        `全部通过：搜索 → 详情 → 目录 → 正文，${succeeded.length} 个书源（CSS / XPath / JS）结果一致，书源管理与书架往返正常`,
     )
 } else {
     console.log(`失败 ${failures.length} 项：\n - ${failures.join('\n - ')}`)

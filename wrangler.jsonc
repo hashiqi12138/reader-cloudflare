@@ -17,7 +17,7 @@
         "run_worker_first": ["/api/*", "/fixture/*"],
     },
     "vars": {
-        "ENGINE_VERSION": "0.4.0",
+        "ENGINE_VERSION": "0.5.0",
         // 内置测试站点默认关闭，只在本地与 CI 打开
         "ENABLE_FIXTURE": "false",
     },

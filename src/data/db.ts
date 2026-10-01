@@ -10,7 +10,7 @@
  */
 
 import type { BookSource } from '../engine/types'
-import { BUILTIN_ID_PREFIX, userIdForUrl, type RegisteredSource } from './types'
+import { BUILTIN_ID_PREFIX, DataError, userIdForUrl, type RegisteredSource } from './types'
 
 /** 单次导入的条数上限。D1 免费版每日写 10 万行，一次塞几十万条会直接把额度打满 */
 const MAX_SOURCES_PER_IMPORT = 1000
@@ -20,19 +20,6 @@ const MAX_PAYLOAD_BYTES = 256 * 1024
 
 const MAX_NAME_LENGTH = 200
 const MAX_URL_LENGTH = 512
-
-/** 数据层错误。带上 HTTP 状态，路由层不必再猜「这算 400 还是 500」 */
-export class SourceStoreError extends Error {
-    readonly status: number
-    readonly code: string
-
-    constructor(message: string, status = 400, code = 'invalid_source') {
-        super(message)
-        this.name = 'SourceStoreError'
-        this.status = status
-        this.code = code
-    }
-}
 
 interface SourceRow {
     id: string
@@ -50,14 +37,14 @@ function rowToSource(row: SourceRow): RegisteredSource {
         parsed = JSON.parse(row.payload) as BookSource
     } catch {
         // 不静默跳过：少了这一条会让用户以为书源丢了，而原因其实在库里
-        throw new SourceStoreError(
+        throw new DataError(
             `书源 ${row.id} 的存储内容不是合法 JSON，无法解析`,
             500,
             'corrupt_source',
         )
     }
     if (parsed === null || typeof parsed !== 'object') {
-        throw new SourceStoreError(`书源 ${row.id} 的存储内容不是对象`, 500, 'corrupt_source')
+        throw new DataError(`书源 ${row.id} 的存储内容不是对象`, 500, 'corrupt_source')
     }
     return {
         ...parsed,
@@ -195,7 +182,7 @@ export function parseImportPayload(text: string): unknown[] {
     try {
         parsed = JSON.parse(text)
     } catch (err) {
-        throw new SourceStoreError(
+        throw new DataError(
             `导入内容不是合法 JSON：${err instanceof Error ? err.message : String(err)}`,
             400,
             'invalid_json',
@@ -211,7 +198,7 @@ export function parseImportPayload(text: string): unknown[] {
           : null
 
     if (list === null) {
-        throw new SourceStoreError(
+        throw new DataError(
             '导入内容必须是书源数组，或形如 {"sources":[...]} 的对象',
             400,
             'invalid_shape',
@@ -229,10 +216,10 @@ export function parseImportPayload(text: string): unknown[] {
 export async function importSources(db: D1Database, text: string): Promise<ImportReport> {
     const list = parseImportPayload(text)
     if (list.length === 0) {
-        throw new SourceStoreError('导入内容里没有任何书源', 400, 'empty_import')
+        throw new DataError('导入内容里没有任何书源', 400, 'empty_import')
     }
     if (list.length > MAX_SOURCES_PER_IMPORT) {
-        throw new SourceStoreError(
+        throw new DataError(
             `一次最多导入 ${MAX_SOURCES_PER_IMPORT} 条，本次 ${list.length} 条`,
             413,
             'too_many_sources',
@@ -310,7 +297,7 @@ export async function setSourceEnabled(
         .bind(enabled ? 1 : 0, Date.now(), id)
         .run()
     if (result.meta.changes === 0) {
-        throw new SourceStoreError(`找不到书源：${id}`, 404, 'source_not_found')
+        throw new DataError(`找不到书源：${id}`, 404, 'source_not_found')
     }
 }
 
@@ -318,15 +305,15 @@ export async function deleteUserSource(db: D1Database, id: string): Promise<void
     assertUserSource(id)
     const result = await db.prepare('DELETE FROM sources WHERE id = ?').bind(id).run()
     if (result.meta.changes === 0) {
-        throw new SourceStoreError(`找不到书源：${id}`, 404, 'source_not_found')
+        throw new DataError(`找不到书源：${id}`, 404, 'source_not_found')
     }
 }
 
 function assertUserSource(id: string): void {
     if (id.startsWith(BUILTIN_ID_PREFIX)) {
-        throw new SourceStoreError(`${id} 是内置书源，不能修改或删除`, 400, 'builtin_readonly')
+        throw new DataError(`${id} 是内置书源，不能修改或删除`, 400, 'builtin_readonly')
     }
     if (!id.startsWith('user:')) {
-        throw new SourceStoreError(`书源 id 格式不对：${id}`, 400, 'invalid_source_id')
+        throw new DataError(`书源 id 格式不对：${id}`, 400, 'invalid_source_id')
     }
 }
