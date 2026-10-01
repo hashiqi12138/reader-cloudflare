@@ -95,7 +95,37 @@ function detectKind(rule: string): {
     if (t.startsWith('$.')) return { kind: 'json', body: t }
     // AllInOne：整块正则切分，只用于列表规则
     if (t.startsWith(':') && t.length > 1) return { kind: 'allinone', body: t }
+    // 裸 CSS 选择器 —— 真实书源里非常常见：`.searchbook`、`h3.title@text`、
+    // `div#content@textNodes`、`div.item a@href`。它们既不是 JSOUP 简写
+    // （那要求写成 `class.searchbook` / `tag.a`），也没带 `@css:` 前缀。
+    //
+    // 不单独认出来的话，它们会被 JSOUP 解析器**静默**解成完全不同的东西：
+    // 开头的 `.` 被当成「取所有子节点」、`div#content` 解析出空步骤（等于整页）。
+    // 后果是「搜到书了，但书籍链接是整页导航的拼接」，全程不报任何错 ——
+    // 真实书源里一眼就能看出来：bookUrl 变成了一长串 /list.html/Ranking.html/wanben.html…
+    if (!isJsoupShorthand(t)) return { kind: 'css', body: t }
     return { kind: 'jsoup', body: t }
+}
+
+/**
+ * 判断规则的选择器部分是不是 JSOUP 简写。**不是就按 CSS 处理。**
+ *
+ * 用「正向确认 JSOUP」而不是「找 CSS 的特征」：CSS 的写法是开放集合
+ * （`.x`、`div#id`、`h3.title`、`div.item a`、`a:has(h3)` …），
+ * 想靠几个特征把它们全认出来必然漏，而 JSOUP 简写是封闭的几种形态，
+ * 反过来认才可靠。漏判的代价是静默返回垃圾数据，误判的代价只是这条规则不生效。
+ */
+function isJsoupShorthand(rule: string): boolean {
+    const selector = (rule.split('@')[0] ?? '').trim()
+
+    // 空串、或以 @ 开头的指令/残留修饰符：维持原有路径交给 JSOUP，别当 CSS
+    if (selector === '' || selector.startsWith('@')) return true
+
+    // class.x / id.x / tag.x / children，可带 `-` 反向前缀
+    if (/^-?(?:class|id|tag|children)(?:\.|$)/.test(selector)) return true
+
+    // 裸标签名，可带位置下标：`a`、`a.0`、`a[0]`
+    return /^[A-Za-z][\w:-]*(?:\.-?\d+|\[[^\]]*\])?$/.test(selector)
 }
 
 /** 拆分 `@css:` 规则里的选择器与取值：`@css:div.item a@href` → (`div.item a`, `href`) */

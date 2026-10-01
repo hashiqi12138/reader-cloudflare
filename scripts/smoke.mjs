@@ -20,16 +20,36 @@ function check(ok, label, extra = '') {
     if (!ok) failures.push(label)
 }
 
+function parseMaybeJson(text) {
+    try {
+        return text === '' ? null : JSON.parse(text)
+    } catch {
+        return null
+    }
+}
+
 async function getJson(path) {
     const response = await fetch(BASE + path)
     const text = await response.text()
-    let json = null
-    try {
-        json = JSON.parse(text)
-    } catch {
-        /* 非 JSON 时留给调用方判定 */
-    }
-    return { status: response.status, json, text }
+    return { status: response.status, json: parseMaybeJson(text), text }
+}
+
+/**
+ * 带请求体的调用。写一次给下面各段共用 ——
+ * 之前每段各抄一份，其中一份漏了「已经是字符串就不再序列化」这一条，
+ * 结果导入接口收到一个 JSON 字符串而不是数组，报 invalid_shape，
+ * 表面上却像是「书源没导进去」。复制粘贴的 helper 就是这么坏的。
+ */
+async function call(method, path, body) {
+    const response = await fetch(BASE + path, {
+        method,
+        headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
+        // 已经是字符串就当作原始 JSON 文本发送（导入接口吃的就是书源 JSON 原文）
+        body:
+            body === undefined ? undefined : typeof body === 'string' ? body : JSON.stringify(body),
+    })
+    const text = await response.text()
+    return { status: response.status, json: parseMaybeJson(text), text }
 }
 
 console.log('=== 1. 运行时自检（cheerio + QuickJS） ===')
@@ -218,27 +238,6 @@ console.log('\n=== 5. 书源管理（D1） ===')
         },
     ])
 
-    async function call(method, path, body) {
-        const response = await fetch(BASE + path, {
-            method,
-            headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
-            body:
-                body === undefined
-                    ? undefined
-                    : typeof body === 'string'
-                      ? body
-                      : JSON.stringify(body),
-        })
-        const text = await response.text()
-        let json = null
-        try {
-            json = JSON.parse(text)
-        } catch {
-            /* 非 JSON 时留给调用方判定 */
-        }
-        return { status: response.status, json }
-    }
-
     const first = await call('POST', '/api/sources', importBody)
     check(
         first.status === 200 && first.json?.imported === 1,
@@ -394,22 +393,6 @@ console.log('\n=== 7. 书架与阅读进度 ===')
 
     const shelfOf = async () => (await getJson('/api/shelf')).json?.entries ?? []
 
-    async function call(method, path, body) {
-        const response = await fetch(BASE + path, {
-            method,
-            headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
-            body: body === undefined ? undefined : JSON.stringify(body),
-        })
-        const text = await response.text()
-        let json = null
-        try {
-            json = JSON.parse(text)
-        } catch {
-            /* 留给调用方判定 */
-        }
-        return { status: response.status, json }
-    }
-
     // 清掉上一次可能留下的条目，保证可重复运行
     const existing = (await shelfOf()).find((e) => e.sourceId === sourceId && e.bookUrl === bookUrl)
     if (existing) await call('DELETE', `/api/shelf?key=${encodeURIComponent(existing.bookKey)}`)
@@ -520,6 +503,185 @@ console.log('\n=== 7. 书架与阅读进度 ===')
         '重复移出报 404 shelf_entry_not_found',
         JSON.stringify(removeAgain.json?.code),
     )
+}
+
+console.log('\n=== 8. 相对地址以书源地址为基准 ===')
+{
+    // 这条是真实书源逼出来的：精华书阁、圣武书库这类书源的 searchUrl 写的是
+    // `/search.html?word={{key}}` 这种**相对路径**，Legado 拿 bookSourceUrl 当基准。
+    // 如果错拿「当前请求的来源」（也就是我们自己的域名）当基准，请求会打到 Worker 自己身上，
+    // 而 SPA 回退还会回 200 + 首页 HTML，规则照样能从首页里抠出链接 ——
+    // 表现是「搜索成功、有结果」，但结果是本站首页里的东西。全程不报任何错。
+
+    const NOTHING_LISTENING = 'http://127.0.0.1:59999/'
+
+    const makeSource = (name, url, searchUrl) => ({
+        bookSourceName: name,
+        bookSourceUrl: url,
+        group: '地址基准测试',
+        searchUrl,
+        ruleSearch: {
+            bookList: '@css:div.result-item',
+            name: '@css:h3.title@text',
+            author: '@css:span.author@text',
+            bookUrl: '@css:h3.title a@href',
+        },
+    })
+
+    const relativeId = `user:${BASE}`
+    const foreignId = `user:${NOTHING_LISTENING}`
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(relativeId)}`)
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(foreignId)}`)
+
+    // --- 正例：基准存在时，相对地址应当能正常工作 ---
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            makeSource('相对地址测试源', BASE, '/fixture/search?q={{key}}&p={{page}}'),
+        ]),
+    )
+    const relativeSearch = await call('POST', '/api/search', {
+        keyword: '测试',
+        sourceIds: [relativeId],
+    })
+    const relativeGroup = relativeSearch.json?.sources?.[0]
+    check(
+        relativeGroup?.ok === true && relativeGroup.count === 2,
+        '相对 searchUrl 能按书源地址解析（搜到 2 本）',
+        relativeGroup?.error ?? `count=${relativeGroup?.count}`,
+    )
+
+    // --- 反例：基准指向别处时，**必须**打到那个别处，而不是打到我们自己 ---
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([makeSource('异地基准测试源', NOTHING_LISTENING, '/search?q={{key}}')]),
+    )
+    const foreignSearch = await call('POST', '/api/search', {
+        keyword: '测试',
+        sourceIds: [foreignId],
+    })
+    const foreignGroup = foreignSearch.json?.sources?.[0]
+    check(
+        foreignGroup?.ok === false,
+        '基准在别处时搜索应当失败（而不是「成功」地返回本站首页里的链接）',
+        `ok=${foreignGroup?.ok} count=${foreignGroup?.count}`,
+    )
+    check(
+        String(foreignGroup?.error ?? '').includes('127.0.0.1:59999'),
+        '错误信息指向书源地址所在的主机',
+        String(foreignGroup?.error ?? '').slice(0, 160),
+    )
+
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(relativeId)}`)
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(foreignId)}`)
+    const left = (await getJson('/api/sources')).json?.sources ?? []
+    // 只断言这两条测试源没了 —— 库里可能有使用者自己导入的书源，
+    // 断言「一条用户书源都不剩」会误伤他们
+    check(
+        !left.some((s) => s.id === relativeId || s.id === foreignId),
+        '清理干净，两条测试源都已删除',
+    )
+}
+
+console.log('\n=== 9. 裸 CSS 选择器 ===')
+{
+    // 真实书源里 `.searchbook`、`h3.title@text`、`div#content@textNodes` 这种
+    // 不带 `@css:` 前缀的裸 CSS 写法非常常见。
+    // 一旦它们没被认成 CSS 而落到 JSOUP 解析器上，会被**静默**解成别的东西
+    // （开头的 `.` 变成「取所有子节点」、`div#content` 变成整页），
+    // 表现是「搜索成功但结果是整页导航的拼接」。所以这里从搜到正文整条走一遍。
+
+    const id = `user:${BASE}`
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: '裸 CSS 规则测试源',
+                bookSourceUrl: BASE,
+                searchUrl: `${BASE}/fixture/search?q={{key}}&p={{page}}`,
+                // 以下全部是裸 CSS 写法：没有 @css: 前缀，也不是 class./tag. 简写
+                ruleSearch: {
+                    bookList: '.result-item',
+                    name: 'h3.title@text',
+                    author: 'span.author@text',
+                    bookUrl: 'h3.title a@href',
+                },
+                ruleBookInfo: {
+                    name: 'h1.book-name@text',
+                    author: 'span.book-author@text',
+                    tocUrl: 'a.toc-link@href',
+                },
+                ruleToc: {
+                    chapterList: 'ul.chapter-list li',
+                    chapterName: 'a@text',
+                    chapterUrl: 'a@href',
+                },
+                ruleContent: { content: '#content@textNodes' },
+            },
+        ]),
+    )
+
+    const search = await call('POST', '/api/search', { keyword: '测试', sourceIds: [id] })
+    const group = search.json?.sources?.[0]
+    check(
+        group?.ok === true && group.count === 2,
+        '裸 CSS 列表规则圈定的条目数正确（2 本）',
+        group?.error ?? `count=${group?.count}`,
+    )
+
+    const book = group?.books?.[0] ?? {}
+    check(
+        typeof book.bookUrl === 'string' &&
+            book.bookUrl.startsWith(BASE) &&
+            book.bookUrl.includes('/fixture/book/'),
+        '裸 CSS 取到的书籍地址是正常的一条地址（而不是整页链接的拼接）',
+        String(book.bookUrl ?? '').slice(0, 100),
+    )
+    check(book.name === '测试小说·甲', '裸 CSS 取到的书名正确', String(book.name ?? ''))
+
+    if (book.bookUrl) {
+        const info = await getJson(
+            `/api/book?sourceId=${encodeURIComponent(id)}&url=${encodeURIComponent(book.bookUrl)}`,
+        )
+        check(
+            Boolean(info.json?.tocUrl),
+            '裸 CSS 能拿到目录地址',
+            info.json?.error ?? info.json?.tocUrl ?? '',
+        )
+
+        if (info.json?.tocUrl) {
+            const toc = await getJson(
+                `/api/toc?sourceId=${encodeURIComponent(id)}&url=${encodeURIComponent(info.json.tocUrl)}`,
+            )
+            const chapters = toc.json?.chapters ?? []
+            check(
+                chapters.length === 3,
+                '裸 CSS 能拿到章节列表（3 章）',
+                toc.json?.error ?? `count=${chapters.length}`,
+            )
+
+            if (chapters.length > 0) {
+                const content = await getJson(
+                    `/api/content?sourceId=${encodeURIComponent(id)}&url=${encodeURIComponent(chapters[0].url)}`,
+                )
+                const text = String(content.json?.content ?? '')
+                check(
+                    text.includes('正文第一段'),
+                    '裸 CSS 能取到正文',
+                    content.json?.error ?? JSON.stringify(text.slice(0, 60)),
+                )
+            }
+        }
+    }
+
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+    const left = (await getJson('/api/sources')).json?.sources ?? []
+    check(!left.some((s) => s.id === id), '裸 CSS 测试源已清理')
 }
 
 console.log('\n=== 结果 ===')

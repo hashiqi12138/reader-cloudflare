@@ -12,6 +12,7 @@
 
 import { runInSandbox, sandboxResultToString } from '../engine/js'
 import type { BookSource, FetchPlan, RuleContext, SandboxHttp } from '../engine/types'
+import { parseLooseJson } from '../lib/json'
 import { defaultHeaders, fetchText, UpstreamError } from '../lib/http'
 
 /** 书源 URL 尾部可带的请求选项 */
@@ -39,7 +40,7 @@ export function splitUrlAndOptions(raw: string): { url: string; options: Partial
     const url = trimmed.slice(0, index).trim()
     const jsonText = trimmed.slice(index + 1).trim()
     try {
-        const parsed = JSON.parse(jsonText) as Partial<UrlOptions>
+        const parsed = parseLooseJson<Partial<UrlOptions>>(jsonText)
         return { url, options: parsed }
     } catch {
         throw new UpstreamError(
@@ -79,11 +80,18 @@ export async function resolveTemplate(template: string, ctx: RuleContext): Promi
     return out
 }
 
-/** 把书源级别的请求头（JSON 字符串）解析出来；写坏了就当作没有，不影响主流程 */
+/**
+ * 把书源级别的请求头解析出来
+ *
+ * 注意这里**只认 JSON**：书源里 `header` 也可以写成 `<js>...</js>` 让脚本动态生成，
+ * 那种情况目前会被当作「没有请求头」静默丢掉（见 README 的「已知缺口」）。
+ * 丢请求头会让站点返回不同版本甚至拒绝服务，症状是「搜不到书」而不是报错 ——
+ * 这是当前实现里的一处已知短板，不是有意设计。
+ */
 function parseSourceHeaders(raw: string | undefined): Record<string, string> {
     if (!raw) return {}
     try {
-        const parsed = JSON.parse(raw) as unknown
+        const parsed = parseLooseJson<unknown>(raw)
         if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
             const out: Record<string, string> = {}
             for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
@@ -130,6 +138,15 @@ export function planFromResolvedUrl(
  * @param rawUrl 书源里的原始 URL 文本（可能带 `{{}}` 与请求选项）
  * @param source 所属书源，用来取默认请求头
  * @param ctx 求值上下文，提供 key / page / book
+ *
+ * **相对地址一律以 `bookSourceUrl` 为基准**，绝不能拿「当前请求的来源」当基准：
+ * 真实书源里 searchUrl 写成 `/search.html?word={{key}}` 这种相对路径很常见，
+ * 而书源指向的站点与我们部署的域名毫无关系。用请求来源去解析会得到一个指向**我们自己**
+ * 的地址 —— 更糟的是 SPA 回退还会回 200 + 首页 HTML，规则照样能从首页里抠出东西，
+ * 于是「搜索成功了」，但结果是本站首页里的链接。这条路径不会报任何错。
+ *
+ * 字段规则（bookUrl / tocUrl / chapterUrl 这类）里的相对地址是另一回事，
+ * 它们以**当前页地址**为基准，由 `ops.ts` 用 resolveUrl 处理。
  */
 export async function buildPlan(
     rawUrl: string,
@@ -137,8 +154,10 @@ export async function buildPlan(
     ctx: RuleContext,
 ): Promise<FetchPlan> {
     const { url: rawTarget, options } = splitUrlAndOptions(rawUrl)
-    const resolved = await resolveTemplate(rawTarget, ctx)
-    const plan = planFromResolvedUrl(resolved, source, ctx.baseUrl)
+    // 模板里的 baseUrl 同样应该是书源地址，而不是请求来源
+    const templateCtx: RuleContext = { ...ctx, baseUrl: source.bookSourceUrl }
+    const resolved = await resolveTemplate(rawTarget, templateCtx)
+    const plan = planFromResolvedUrl(resolved, source, source.bookSourceUrl)
 
     if (options.webView) {
         throw new UpstreamError(

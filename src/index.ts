@@ -296,7 +296,10 @@ app.post('/api/search', async (c) => {
         wanted.map(async (source) => {
             const started = Date.now()
             try {
-                const books = await searchBooks(source, keyword, { baseUrl: origin, key: keyword })
+                const books = await searchBooks(source, keyword, {
+                    baseUrl: source.bookSourceUrl,
+                    key: keyword,
+                })
                 return {
                     sourceId: source.id,
                     sourceName: source.bookSourceName,
@@ -337,7 +340,7 @@ app.get('/api/book', async (c) => {
     if (!target) return c.json({ error: '缺少 url 参数' }, 400)
 
     try {
-        const info = await fetchBookInfo(source, target, { baseUrl: origin })
+        const info = await fetchBookInfo(source, target, { baseUrl: source.bookSourceUrl })
         return c.json({ sourceId: source.id, ...info })
     } catch (err) {
         return fail(c, err)
@@ -354,7 +357,7 @@ app.get('/api/toc', async (c) => {
     if (!target) return c.json({ error: '缺少 url 参数' }, 400)
 
     try {
-        const chapters = await fetchChapters(source, target, { baseUrl: origin })
+        const chapters = await fetchChapters(source, target, { baseUrl: source.bookSourceUrl })
         return c.json({ sourceId: source.id, count: chapters.length, chapters })
     } catch (err) {
         return fail(c, err)
@@ -371,7 +374,7 @@ app.get('/api/content', async (c) => {
     if (!target) return c.json({ error: '缺少 url 参数' }, 400)
 
     try {
-        const content = await fetchContent(source, target, { baseUrl: origin })
+        const content = await fetchContent(source, target, { baseUrl: source.bookSourceUrl })
         return c.json({ sourceId: source.id, url: target, length: content.length, content })
     } catch (err) {
         return fail(c, err)
