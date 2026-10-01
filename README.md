@@ -332,10 +332,25 @@ npm run db:migrate:remote   # 建线上表
 npm run deploy              # 需要先 npx wrangler login
 ```
 
-D1 库已经建好（`reader-cloudflare`，APAC）。换账号部署时先 `npx wrangler d1 create <名字>`，
-再把新的 `database_id` 填进 `wrangler.jsonc`。
+**线上实例：<https://reader-api.liujieahu.workers.dev>**
+
+D1 库（`reader-cloudflare`，APAC）与线上表都建好了，Worker 已部署。
+换账号部署时先 `npx wrangler d1 create <名字>`，再把新的 `database_id` 填进 `wrangler.jsonc`。
+
+### 刚部署完是「空的」，这是对的
+
+新部署实例的书源列表是空的 —— 库里一条书源都没有，所以什么都搜不到、书架也是空的。
+这不是故障：本项目不分发书源，第一次用必须自己去「书源」页导入一份 Legado 书源 JSON。
+
+页面对这两种情况是**分开提示**的：一个书源都没有时说的是「先在书源里导入」，
+而书源正常但没搜到结果时说的是「没搜到」。搜索接口为此专门回了 `sourceCount`，
+前端才能区分这两件事 —— 把它们混成一句「没有结果」，用户会一直以为是站点出了问题。
 
 `ENABLE_FIXTURE` 线上保持 `false`（默认值），它是测试内容，不该对外提供。
+线上已验证 `/fixture/*` 确实拿不到测试站点内容。
+
+部署后建议先打一遍 `/api/probe`：它一次性回答三个最容易出问题的地方 ——
+cheerio 能不能解析、QuickJS 的 WASM 能不能在线上加载、D1 绑定有没有连上。
 
 ## 关于书源
 
