@@ -121,8 +121,8 @@ function isJsoupShorthand(rule: string): boolean {
     // 空串、或以 @ 开头的指令/残留修饰符：维持原有路径交给 JSOUP，别当 CSS
     if (selector === '' || selector.startsWith('@')) return true
 
-    // class.x / id.x / tag.x / children，可带 `-` 反向前缀
-    if (/^-?(?:class|id|tag|children)(?:\.|$)/.test(selector)) return true
+    // class.x / id.x / tag.x / text.x（按文字找元素）/ children，可带 `-` 反向前缀
+    if (/^-?(?:class|id|tag|text|children)(?:\.|$)/.test(selector)) return true
 
     // 裸标签名，可带位置下标：`a`、`a.0`、`a[0]`
     return /^[A-Za-z][\w:-]*(?:\.-?\d+|\[[^\]]*\])?$/.test(selector)

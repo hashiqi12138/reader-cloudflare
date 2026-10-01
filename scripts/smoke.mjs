@@ -691,6 +691,135 @@ console.log('\n=== 9. 裸 CSS 选择器 ===')
     check(!left.some((s) => s.id === id), '裸 CSS 测试源已清理')
 }
 
+console.log('\n=== 10. 地址字段只取一个值 ===')
+{
+    // 真实书源逼出来的问题：搜索条目里往往有多个 <a>（书名一个、最新章节一个），
+    // 而地址类字段被写成 `a@href` 会匹配到全部，然后被换行拼成一个字符串。
+    // 更隐蔽的是 URL 解析器会把换行当非法字符删掉，于是得到
+    // `/77706//77706//77706/65031092.html` 这种「看不出问题、但永远打不开」的地址。
+    // 测试站点的条目现在也带两个链接（书名 + 最新章），正好用来钉住这一点。
+
+    const id = `user:${BASE}`
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: '多链接地址测试源',
+                bookSourceUrl: BASE,
+                searchUrl: `${BASE}/fixture/search?q={{key}}&p={{page}}`,
+                ruleSearch: {
+                    bookList: '.result-item',
+                    name: 'h3.title@text',
+                    author: 'span.author@text',
+                    // 故意用会匹配到「书名链接 + 最新章节链接」的规则
+                    bookUrl: 'a@href',
+                },
+                ruleBookInfo: { tocUrl: 'a@href' },
+                ruleToc: {
+                    chapterList: 'ul.chapter-list li',
+                    chapterName: 'a@text',
+                    chapterUrl: 'a@href',
+                },
+                ruleContent: { content: '#content@textNodes' },
+            },
+        ]),
+    )
+
+    const search = await call('POST', '/api/search', { keyword: '测试', sourceIds: [id] })
+    const group = search.json?.sources?.[0]
+    check(
+        group?.ok === true && group.count === 2,
+        '多链接条目仍能搜到 2 本',
+        group?.error ?? `count=${group?.count}`,
+    )
+
+    const books = group?.books ?? []
+    const expected = `${BASE}/fixture/book/1`
+    check(
+        books[0]?.bookUrl === expected,
+        '书籍地址取的是第一个链接，且是干净的一条地址',
+        `实际=${books[0]?.bookUrl}`,
+    )
+    check(
+        books.every((b) => !/\/fixture\/book\/\d+\/fixture\//.test(String(b.bookUrl ?? ''))),
+        '没有出现多个地址首尾相接的情况',
+        JSON.stringify(books.map((b) => b.bookUrl)),
+    )
+    check(
+        new Set(books.map((b) => b.bookUrl)).size === books.length,
+        '两本书的地址互不相同（没有被拼成同一串）',
+    )
+
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+    const left = (await getJson('/api/sources')).json?.sources ?? []
+    check(!left.some((s) => s.id === id), '多链接测试源已清理')
+}
+
+console.log('\n=== 11. 分页目录（nextTocUrl） ===')
+{
+    // 真实站点的目录常分页：精华书阁一本 2226 章的书每页 20 章，要 112 页。
+    // 只取第一页的话，长书只能读到开头几十章 —— 这是「导入了书源却读不下去」的典型形态。
+    // 测试站点为此造了一份确定的两页目录：第 1 页 1 章 + 「下一页」，第 2 页 2 章。
+    //
+    // 顺带覆盖 `text.下一页@href` 这种「按文字找链接」的写法 —— 真实书源就是这么写翻页的。
+
+    const id = `user:${BASE}`
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: '分页目录测试源',
+                bookSourceUrl: BASE,
+                searchUrl: `${BASE}/fixture/search?q={{key}}&p={{page}}`,
+                ruleSearch: {
+                    bookList: '.result-item',
+                    name: 'h3.title@text',
+                    bookUrl: 'h3.title a@href',
+                },
+                ruleToc: {
+                    chapterList: '@css:ul.chapter-list li',
+                    chapterName: '@css:a@text',
+                    chapterUrl: '@css:a@href',
+                    // 按文字找「下一页」链接，与真实书源的写法一致
+                    nextTocUrl: 'text.下一页@href',
+                },
+                ruleContent: { content: '@css:div#content@textNodes' },
+            },
+        ]),
+    )
+
+    const toc = await getJson(
+        `/api/toc?sourceId=${encodeURIComponent(id)}&url=${encodeURIComponent(`${BASE}/fixture/paged-toc/1/1`)}`,
+    )
+    const chapters = toc.json?.chapters ?? []
+    check(toc.status === 200, '目录接口返回 200', `status=${toc.status}`)
+    check(
+        chapters.length === 3,
+        '两页目录被合并成 3 章（不是只取第一页的 1 章）',
+        toc.json?.error ?? `count=${chapters.length}`,
+    )
+    check(
+        chapters[0]?.name === '第一章 起风了',
+        '章节顺序以第一页的为准',
+        JSON.stringify(chapters[0]?.name),
+    )
+    check(
+        new Set(chapters.map((c) => c.url)).size === chapters.length,
+        '合并后没有重复章节',
+        JSON.stringify(chapters.map((c) => c.name)),
+    )
+
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+    const left = (await getJson('/api/sources')).json?.sources ?? []
+    check(!left.some((s) => s.id === id), '分页目录测试源已清理')
+}
+
 console.log('\n=== 结果 ===')
 if (failures.length === 0) {
     console.log(

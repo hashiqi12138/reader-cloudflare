@@ -27,6 +27,23 @@ function resolveUrl(value: string, base: string): string {
     }
 }
 
+/**
+ * 取**单值**，用于地址类字段
+ *
+ * `analyzeString` 会把所有匹配到的值用换行拼起来 —— 正文需要这个行为（多个段落要合起来），
+ * 但地址字段拼起来就不再是地址了。更糟的是 URL 解析器会把换行当非法字符**直接删掉**，
+ * 于是得到一个看不出问题的字符串：真源里踩到过，搜索结果一条里有三个 `<a>`，
+ * 书籍地址变成 `https://m.jhsssd.com/77706//77706//77706/65031092.html`，
+ * 而它既不报错、又永远打不开 —— 典型的静默错数据。
+ *
+ * 地址只可能是一个，所以这里取第一个非空值。
+ */
+async function analyzeAddress(item: Selection, rule: string, ctx: RuleContext): Promise<string> {
+    if (rule.trim() === '') return ''
+    const values = await analyzeStrings(item, rule, ctx)
+    return values.find((v) => v.trim() !== '') ?? ''
+}
+
 /** 正文清洗：规整空白、去掉空行，但不动段落本身 */
 export function normalizeContent(text: string): string {
     return text
@@ -68,7 +85,7 @@ export async function searchBooks(
         const name = await analyzeString(item, rule.name ?? 'text', searchCtx)
         if (!name) continue
 
-        const bookUrlRaw = await analyzeString(item, rule.bookUrl ?? 'tag.a@href', searchCtx)
+        const bookUrlRaw = await analyzeAddress(item, rule.bookUrl ?? 'tag.a@href', searchCtx)
         books.push({
             name,
             author: await analyzeString(item, rule.author ?? '', searchCtx),
@@ -77,7 +94,7 @@ export async function searchBooks(
                 (await analyzeString(item, rule.lastChapter ?? '', searchCtx)) || undefined,
             intro: (await analyzeString(item, rule.intro ?? '', searchCtx)) || undefined,
             coverUrl:
-                resolveUrl(await analyzeString(item, rule.coverUrl ?? '', searchCtx), base) ||
+                resolveUrl(await analyzeAddress(item, rule.coverUrl ?? '', searchCtx), base) ||
                 undefined,
             wordCount: (await analyzeString(item, rule.wordCount ?? '', searchCtx)) || undefined,
             bookUrl: resolveUrl(bookUrlRaw, base),
@@ -110,18 +127,33 @@ export async function fetchBookInfo(
         http: sandboxHttp(source, plan.url),
     }
 
-    const tocUrlRaw = await analyzeString(sel, rule.tocUrl ?? '', infoCtx)
+    const tocUrlRaw = await analyzeAddress(sel, rule.tocUrl ?? '', infoCtx)
 
     return {
         tocUrl: tocUrlRaw ? resolveUrl(tocUrlRaw, plan.url) : plan.url,
         name: await analyzeString(sel, rule.name ?? '', infoCtx),
         author: await analyzeString(sel, rule.author ?? '', infoCtx),
         intro: await analyzeString(sel, rule.intro ?? '', infoCtx),
-        coverUrl: resolveUrl(await analyzeString(sel, rule.coverUrl ?? '', infoCtx), plan.url),
+        coverUrl: resolveUrl(await analyzeAddress(sel, rule.coverUrl ?? '', infoCtx), plan.url),
     }
 }
 
-/** 目录页：返回章节列表 */
+/**
+ * 目录最多翻多少页
+ *
+ * 真实站点的目录常常分页（精华书阁一本 2226 章的书，每页 20 章 —— 要 112 页）。
+ * 不翻页的话长书只能读到开头几十章，而翻页本身是有风险的：书源里的 nextTocUrl
+ * 写错（比如永远指向当前页）就会变成一个无底洞。所以两道保险都上：
+ * 访问过的地址记下来不放行重复访问，再加这个页数上限。
+ *
+ * 定 20 而不是更大，是因为**平台有硬限制**：Workers 每次调用能发起的子请求数
+ * （免费版 50 个）与 CPU 时间都是有限的，而每翻一页就是一次请求外加一次解析。
+ * 20 页约 400 章，留足了余量；要读更长的书得先上付费版再把这个数调大，
+ * 而不是在这里赌平台会放过我们。
+ */
+const MAX_TOC_PAGES = 20
+
+/** 目录页：返回章节列表。带 nextTocUrl 时会把后续页一并取回并合起来 */
 export async function fetchChapters(
     source: BookSource,
     tocUrl: string,
@@ -130,23 +162,45 @@ export async function fetchChapters(
     const rule = source.ruleToc
     if (!rule?.chapterList) throw new UpstreamError('书源未配置目录列表规则（ruleToc.chapterList）')
 
-    const plan = await buildPlan(tocUrl, source, { ...ctx, baseUrl: tocUrl })
-    const html = await fetchText(plan)
-    const sel = rootSelection(html)
-    const tocCtx: RuleContext = {
-        ...ctx,
-        baseUrl: plan.url,
-        http: sandboxHttp(source, plan.url),
-    }
-
-    const items = await analyzeSelections(sel, rule.chapterList, tocCtx)
     const chapters: Chapter[] = []
+    // 按地址去重：多页之间、以及站点的「最新章节」区块与完整目录之间都可能重复
+    const seenChapterUrls = new Set<string>()
+    const visitedTocUrls = new Set<string>()
 
-    for (const item of items) {
-        const name = await analyzeString(item, rule.chapterName ?? 'text', tocCtx)
-        const urlRaw = await analyzeString(item, rule.chapterUrl ?? 'tag.a@href', tocCtx)
-        if (!name || !urlRaw) continue
-        chapters.push({ name, url: resolveUrl(urlRaw, plan.url) })
+    let currentUrl = tocUrl
+    for (let page = 0; page < MAX_TOC_PAGES; page += 1) {
+        if (visitedTocUrls.has(currentUrl)) break
+        visitedTocUrls.add(currentUrl)
+
+        const plan = await buildPlan(currentUrl, source, { ...ctx, baseUrl: currentUrl })
+        const html = await fetchText(plan)
+        const sel = rootSelection(html)
+        const tocCtx: RuleContext = {
+            ...ctx,
+            baseUrl: plan.url,
+            http: sandboxHttp(source, plan.url),
+        }
+
+        const items = await analyzeSelections(sel, rule.chapterList, tocCtx)
+        for (const item of items) {
+            const name = await analyzeString(item, rule.chapterName ?? 'text', tocCtx)
+            const urlRaw = await analyzeAddress(item, rule.chapterUrl ?? 'tag.a@href', tocCtx)
+            if (!name || !urlRaw) continue
+            const url = resolveUrl(urlRaw, plan.url)
+            if (seenChapterUrls.has(url)) continue
+            seenChapterUrls.add(url)
+            chapters.push({ name, url })
+        }
+
+        // 没有 nextTocUrl 规则就是单页目录，到此为止
+        if (!rule.nextTocUrl) break
+
+        const nextRaw = await analyzeAddress(sel, rule.nextTocUrl, tocCtx)
+        if (!nextRaw) break
+        const nextUrl = resolveUrl(nextRaw, plan.url)
+        // 指向自己或已经去过的页就停：写错规则的书源不该把 Worker 拖死
+        if (nextUrl === currentUrl || visitedTocUrls.has(nextUrl)) break
+        currentUrl = nextUrl
     }
 
     return chapters

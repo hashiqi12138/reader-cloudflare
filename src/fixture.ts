@@ -61,6 +61,7 @@ export function fixtureSearchPage(keyword: string, pageNo: number): string {
         <span class="author">${escapeHtml(b.author)}</span>
         <span class="kind">玄幻</span>
         <p class="intro">${escapeHtml(b.intro)}</p>
+        <p class="latest">最新：<a href="/fixture/chapter/${b.id}/${b.chapters[b.chapters.length - 1]?.id ?? '1'}">${escapeHtml(b.chapters[b.chapters.length - 1]?.name ?? '')}</a></p>
     </div>`,
         )
         .join('\n')
@@ -104,6 +105,46 @@ export function fixtureTocPage(bookId: string): string {
 <ul class="chapter-list">
 ${lis}
 </ul>`,
+    )
+}
+
+/**
+ * **分页目录**，专供验证 `nextTocUrl`
+ *
+ * 单页目录测不出翻页：真实站点（比如精华书阁 2226 章的书）目录是每页 20 章的多页结构，
+ * 只取第一页会让长书只能读开头几十章。这里造一份确定的两页目录。
+ *
+ * 第 1 页只放第 1 章并给出「下一页」；第 2 页放剩下的章节且不再有下一页。
+ * 两页之间靠 `<a>下一页</a>` 串起来，规则写法与真实书源一致（按文字找链接）。
+ */
+export function fixturePagedTocPage(bookId: string, pageNo: number): string {
+    const book = BOOKS.find((b) => b.id === bookId)
+    if (!book) return page('未找到', '<p class="empty">没有这本书</p>')
+
+    // 固定切成两页：第 1 页取第 1 章，第 2 页取其余
+    const slice = pageNo <= 1 ? book.chapters.slice(0, 1) : book.chapters.slice(1)
+    if (slice.length === 0) return page('目录', '<p class="empty">没有更多章节</p>')
+
+    const lis = slice
+        .map(
+            (ch) =>
+                `<li><a href="/fixture/chapter/${book.id}/${ch.id}">${escapeHtml(ch.name)}</a></li>`,
+        )
+        .join('\n')
+
+    // 第 1 页才有「下一页」
+    const nextLink =
+        pageNo <= 1
+            ? `<div class="pager"><a href="/fixture/paged-toc/${book.id}/2">下一页</a></div>`
+            : ''
+
+    return page(
+        `${book.name} 分页目录 第 ${pageNo} 页`,
+        `<h1 class="book-name">${escapeHtml(book.name)}</h1>
+<ul class="chapter-list">
+${lis}
+</ul>
+${nextLink}`,
     )
 }
 
@@ -177,6 +218,9 @@ export function handleFixture(pathname: string, url: URL): Response | null {
 
     const toc = /^\/fixture\/toc\/(\w+)$/.exec(pathname)
     if (toc) return html(fixtureTocPage(toc[1]!))
+
+    const pagedToc = /^\/fixture\/paged-toc\/(\w+)\/(\d+)$/.exec(pathname)
+    if (pagedToc) return html(fixturePagedTocPage(pagedToc[1]!, Number(pagedToc[2])))
 
     const chapter = /^\/fixture\/chapter\/(\w+)\/(\w+)$/.exec(pathname)
     if (chapter) return html(fixtureChapterPage(chapter[1]!, chapter[2]!))
