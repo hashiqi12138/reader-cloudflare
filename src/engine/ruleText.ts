@@ -14,6 +14,10 @@
  * 而用到它的 `analyze.ts` 会连带引入沙箱，Node 里跑不起来。
  */
 
+// `<js>` 块与 `@js:` 标记的匹配放在 directives.ts，与其余四处共用一个源：
+// 各写一遍就会出现「切连接符时当它是 JS、别处不认」这种自相矛盾
+import { indexOfJsMarker, JS_BLOCK, JS_MARKER } from './directives'
+
 /** 一段 JS 在规则里的位置（start 含、end 不含） */
 export interface JsRegion {
     start: number
@@ -21,9 +25,6 @@ export interface JsRegion {
     /** true 表示 `<js>...</js>` 块；false 表示 `@js:` 标记后面那一段 */
     block: boolean
 }
-
-/** `<js>...</js>`。没写闭合标签就一路认到最后 —— 总好过把剩下的 JS 当规则去解析 */
-const JS_BLOCK = /<js(?:\s[^>]*)?>[\s\S]*?(?:<\/js>|$)/gi
 
 /**
  * 找出 `@js:` 后面那段代码的结束位置
@@ -74,13 +75,13 @@ export function findJsRegions(rule: string): JsRegion[] {
 
     let from = 0
     for (;;) {
-        const at = rule.indexOf('@js:', from)
+        const at = indexOfJsMarker(rule, from)
         if (at < 0) break
         if (insideRegion(at)) {
-            from = at + 4
+            from = at + JS_MARKER.length
             continue
         }
-        const codeStart = at + 4
+        const codeStart = at + JS_MARKER.length
         regions.push({ start: codeStart, end: jsCodeEnd(rule, codeStart), block: false })
         from = codeStart
     }

@@ -23,6 +23,7 @@ import { runInSandbox, sandboxResultToString, sandboxResultToStrings } from './j
 import type { SandboxGetElements, SandboxGetString, SandboxLimits } from './js'
 import { classifyTemplate, hasRuleSyntax, stripRuleMarker, templatePattern } from './template'
 import { splitRuleText } from './ruleText'
+import { indexOfJsMarker, JS_MARKER, matchDirective, ruleHasJs } from './directives'
 import { isAttributeView, runXPath } from './xpath'
 
 /** 一次规则求值所面对的上下文：一个可继续筛选的节点集 */
@@ -72,7 +73,11 @@ function splitConnectors(rule: string): { parts: string[]; joiner: '&&' | '||' |
 /** 把选择器部分拆成 [选择器, JS, 选择器, JS, ...]，对应 `<js></js>` 分隔 */
 function splitJsBlocks(rule: string): Array<{ kind: 'selector' | 'js'; text: string }> {
     const parts: Array<{ kind: 'selector' | 'js'; text: string }> = []
-    const re = /<js>([\s\S]*?)<\/js>/g
+    // `i` 和 `ruleText.ts` / `urlJs.ts` 里的同类匹配保持一致 ——
+    // 那两处的 `JS_BLOCK` 早就带了 `i`，这里漏掉就会自相矛盾：切连接符时把 `<JS>` 当成
+    // JS 区域跳过去、拆分这一步却不认它，于是整块被当选择器、JS 一次都不跑（而且不报错）。
+    // （线上 392 处 `<js>` 里没有出现过 `<JS>`，但不值得为此留一个只在大小写上打架的分支）
+    const re = /<js>([\s\S]*?)<\/js>/gi
     let last = 0
     let m: RegExpExecArray | null
     while ((m = re.exec(rule)) !== null) {
@@ -92,11 +97,19 @@ function detectKind(rule: string): {
     body: string
 } {
     const t = rule.trim()
-    if (t.startsWith('@css:')) return { kind: 'css', body: t.slice(5) }
-    if (t.startsWith('@XPath:') || t.startsWith('@xpath:'))
-        return { kind: 'xpath', body: t.slice(7) }
+    // 前缀**不区分大小写**：`@CSS:` / `@JSon:` / `@Json:` 在真实书源里都有
+    // （线上 61 处规则开头），早先只认全小写，于是这些规则静默返回空 —— 详见 directives.ts
+    const directive = matchDirective(t)
+    if (directive) {
+        if (directive.name === 'css') return { kind: 'css', body: directive.body }
+        if (directive.name === 'xpath') return { kind: 'xpath', body: directive.body }
+        if (directive.name === 'json') return { kind: 'json', body: directive.body }
+        // `@js:` 刻意在这一层不分派：让它继续落到 JSOUP 上，由调用方那条 JS 分支处理
+        // （见 evaluateSelectorChain 里 isJsRule 的说明）。这里只是把结果写明白，
+        // 免得读代码的人以为 `@js:` 是被漏掉的
+        return { kind: 'jsoup', body: t }
+    }
     if (t.startsWith('//') || t.startsWith('(/')) return { kind: 'xpath', body: t }
-    if (t.startsWith('@json:')) return { kind: 'json', body: t.slice(6) }
     if (t.startsWith('$.')) return { kind: 'json', body: t }
     // AllInOne：整块正则切分，只用于列表规则
     if (t.startsWith(':') && t.length > 1) return { kind: 'allinone', body: t }
@@ -468,10 +481,10 @@ async function evalSingleSegment(
     segment: string,
     ctx: RuleContext,
 ): Promise<string[]> {
-    const jsMark = '@js:'
-    const jsAt = segment.indexOf(jsMark)
+    // `@js:` 标记**不区分大小写**（`选择器@JS:代码` 在真实书源里有）
+    const jsAt = indexOfJsMarker(segment)
     const head = jsAt === -1 ? segment : segment.slice(0, jsAt).replace(/@$/, '')
-    const jsCode = jsAt === -1 ? null : segment.slice(jsAt + jsMark.length)
+    const jsCode = jsAt === -1 ? null : segment.slice(jsAt + JS_MARKER.length)
 
     // 整条规则只有 `@js:`，没有前置选择器
     //
@@ -537,7 +550,7 @@ async function evalSingleSegment(
  */
 function sandboxGetString(sel: Selection, ctx: RuleContext): SandboxGetString {
     return async (rule, content) => {
-        if (/@js:|<js[\s>]|\{\{/.test(rule)) {
+        if (ruleHasJs(rule)) {
             throw new UnsupportedRuleError(
                 `java.getString 里不能再套 JS 规则（${rule.replace(/\s+/g, ' ').slice(0, 60)}）：沙箱执行槽位是有限的，嵌套求值会互相等待`,
             )
@@ -564,7 +577,7 @@ function sandboxGetString(sel: Selection, ctx: RuleContext): SandboxGetString {
  */
 function sandboxGetElements(sel: Selection, ctx: RuleContext): SandboxGetElements {
     return async (rule, content) => {
-        if (/@js:|<js[\s>]|\{\{/.test(rule)) {
+        if (ruleHasJs(rule)) {
             throw new UnsupportedRuleError(
                 `java.getElements 里不能再套 JS 规则（${rule.replace(/\s+/g, ' ').slice(0, 60)}）：沙箱执行槽位是有限的，嵌套求值会互相等待`,
             )
@@ -702,7 +715,7 @@ export async function analyzeSelections(
      * 接口型书源（音频、漫画）的列表规则几乎全是这个形态，症状是
      * **一条都搜不到、而且全程不报错**。
      */
-    const isJsRule = /^@js:/.test(selector) || /<js[\s>]/i.test(selector)
+    const isJsRule = matchDirective(selector)?.name === 'js' || /<js[\s>]/i.test(selector)
 
     let nodes: any[] | null = null
     let reversed = false

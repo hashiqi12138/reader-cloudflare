@@ -18,8 +18,8 @@
  * 下面的形态全部取自线上 816 条书源里 **939 处真实字段模板**，不是凭空想的例子。
  */
 
-/** `@css:` / `@json:` / `@js:` / `@XPath:` 这类显式指令 */
-const RULE_DIRECTIVE = /^@(?:css|json|js|xpath):/i
+/** `@css:` / `@json:` / `@js:` / `@xpath:` 这类显式指令（大小写不敏感，见 directives.ts） */
+import { RULE_DIRECTIVE } from './directives'
 
 /**
  * 去掉模板里多余的 `@` 前缀

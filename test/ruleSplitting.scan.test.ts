@@ -18,51 +18,15 @@
  * 某一个分片里。
  */
 
-import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { findJsRegions, splitRuleText } from '../src/engine/ruleText'
+import { JOINERS, loadSourceDump, rulesOf } from './sourceDump'
 
 const DUMP = process.env.SOURCES_DUMP ?? ''
 
-const RULE_GROUPS = ['ruleSearch', 'ruleBookInfo', 'ruleToc', 'ruleContent', 'ruleExplore']
-const URL_FIELDS = ['searchUrl', 'exploreUrl', 'header', 'jsLib', 'loginUrl']
-const JOINERS = ['&&', '||', '%%'] as const
-
-function rulesOf(source: Record<string, unknown>): string[] {
-    const out: string[] = []
-    for (const group of RULE_GROUPS) {
-        const fields = source[group]
-        if (fields && typeof fields === 'object') {
-            for (const value of Object.values(fields))
-                if (typeof value === 'string') out.push(value)
-        }
-    }
-    for (const key of URL_FIELDS) {
-        const value = source[key]
-        if (typeof value === 'string' && value !== '') out.push(value)
-    }
-    return out
-}
-
-/** 兼容两种输入：`wrangler --json` 的原样输出，或书源数组本身 */
-function loadSources(path: string): Record<string, unknown>[] {
-    const raw = readFileSync(path, 'utf8')
-    const json = JSON.parse(raw.slice(raw.indexOf('[')))
-    const rows = Array.isArray(json) ? json : []
-    if (
-        rows.length > 0 &&
-        typeof rows[0] === 'object' &&
-        rows[0] !== null &&
-        'payload' in rows[0]!
-    ) {
-        return rows.map((r) => JSON.parse(String((r as { payload: unknown }).payload)))
-    }
-    return json as Record<string, unknown>[]
-}
-
 describe.skipIf(DUMP === '')('真实书源全量扫描：连接符不切进 JS', () => {
     it('没有任何一个 JS 区域被连接符切开，也没有一条规则被过度保护', () => {
-        const sources = loadSources(DUMP)
+        const sources = loadSourceDump(DUMP)
 
         let rules = 0
         let withJs = 0

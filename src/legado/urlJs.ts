@@ -24,12 +24,17 @@
  * 而那种 URL 往往还能返回 200，只是内容全错。
  */
 
+import { indexOfJsMarker, JS_MARKER } from '../engine/directives'
+
 export interface UrlJs {
     /** 脚本的输入：`@js:` / `<js>` 之前那段原文，脚本里就是 `result` */
     prefix: string
     code: string
 }
 
+// 这两个正则本来就在，只是取 `@js:` 那段的位置原来用的是 `indexOf('@js:')` ——
+// 于是「整条 `@JS:` 开头」认得出来、「选择器@JS:」认不出来，同一个文件里两种行为。
+// 现在位置查找统一走 directives.ts（它同时也是 analyze.ts 那五处的唯一匹配源）
 const URL_JS_PREFIX = /^\s*@js:/i
 const URL_JS_BLOCK = /<js(?:\s[^>]*)?>([\s\S]*?)(?:<\/js>|$)/i
 
@@ -50,9 +55,9 @@ export function findUrlJs(raw: string): UrlJs | null {
         return { prefix: raw.slice(0, block.index), code: block[1] ?? '' }
     }
 
-    const at = raw.indexOf('@js:')
+    const at = indexOfJsMarker(raw)
     if (at > 0) {
-        return { prefix: raw.slice(0, at), code: raw.slice(at + '@js:'.length) }
+        return { prefix: raw.slice(0, at), code: raw.slice(at + JS_MARKER.length) }
     }
 
     return null
