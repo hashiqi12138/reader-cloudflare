@@ -430,7 +430,18 @@ console.log('\n=== 6. 前端静态资源 ===')
         (pageText.match(/https:\/\/github\.com\/[^"']+/) ?? ['(没找到)'])[0],
     )
 
-    for (const asset of ['/app.js', '/style.css', '/js/core.js', '/js/views.js', '/js/reader.js']) {
+    // reader.js 会 import 这几个模块，因此它们也必须真的能取到 ——
+    // 少一个的话浏览器只会报「Failed to fetch dynamically imported module」，
+    // 页面照旧打开、阅读界面却是空的，光看首页看不出问题
+    for (const asset of [
+        '/app.js',
+        '/style.css',
+        '/js/core.js',
+        '/js/views.js',
+        '/js/reader.js',
+        '/js/replace.js',
+        '/js/search.js',
+    ]) {
         const response = await fetch(BASE + asset)
         check(response.status === 200, `${asset} 返回 200`, `status=${response.status}`)
         check((await response.text()).length > 500, `${asset} 不是空文件`)
@@ -446,7 +457,7 @@ console.log('\n=== 6. 前端静态资源 ===')
     )
 }
 
-console.log('\n=== 7. 账号、书架与阅读进度 ===')
+console.log('\n=== 7. 账号、书架、阅读进度与书签 ===')
 {
     const sourceId = 'builtin:fixture-css'
     const bookUrl = `${BASE}/fixture/book/1`
@@ -706,6 +717,128 @@ console.log('\n=== 7. 账号、书架与阅读进度 ===')
     await callA('DELETE', `/api/shelf?key=${encodeURIComponent(keyOfA)}`)
     check((await shelfOf(a)).length === baseline, '身份 A 的数据已清理')
     check((await shelfOf(b)).length === 0, '身份 B 始终没有数据')
+
+    // ------------------------------------------------------------ 书签
+
+    // 书签与进度是两种数据：进度只有一条、跟着你走；书签是**攒下来的**，
+    // 一条一处、可以很多条、可以带备注、可以被单独删掉。所以这一段重点在
+    // 「每条各自独立」与「换了身份一条也看不到」。
+
+    const bmQuery = `/api/bookmarks?sourceId=${encodeURIComponent(sourceId)}&bookUrl=${encodeURIComponent(bookUrl)}`
+
+    const anonBookmarks = await fetch(`${BASE}${bmQuery}`)
+    check(anonBookmarks.status === 401, '未登录读书签返回 401', `status=${anonBookmarks.status}`)
+
+    const bmEmpty = await callA('GET', bmQuery)
+    check(
+        bmEmpty.status === 200 && bmEmpty.json?.count === 0,
+        '这本书还没有书签',
+        `count=${bmEmpty.json?.count}`,
+    )
+
+    const bmAdded = await callA('POST', '/api/bookmarks', {
+        sourceId,
+        bookUrl,
+        chapterUrl,
+        chapterName: '第一章 起风了',
+        chapterIndex: 0,
+        pageIndex: 2,
+        excerpt: '这是一段摘录',
+        note: '这里的伏笔',
+    })
+    const bmId = bmAdded.json?.bookmark?.id ?? ''
+    check(bmAdded.status === 201 && bmId !== '', '加一条书签（201）', `status=${bmAdded.status}`)
+    check(
+        bmAdded.json?.bookmark?.excerpt === '这是一段摘录' &&
+            bmAdded.json?.bookmark?.note === '这里的伏笔' &&
+            bmAdded.json?.bookmark?.pageIndex === 2,
+        '摘录、备注、位置都原样存下',
+        JSON.stringify(bmAdded.json?.bookmark),
+    )
+
+    // 同一位置再留一条：**不去重**。书签的语义是「我在这里留了个标记」，
+    // 去重会把「同一页留两处不同备注」这种用法直接堵死
+    const bmSecond = await callA('POST', '/api/bookmarks', {
+        sourceId,
+        bookUrl,
+        chapterUrl,
+        chapterName: '第一章 起风了',
+        chapterIndex: 0,
+        pageIndex: 2,
+        excerpt: '同一页的第二次标注',
+    })
+    check(bmSecond.status === 201, '同一位置可以再留一条（不去重）', `status=${bmSecond.status}`)
+
+    const bmOther = await callA('POST', '/api/bookmarks', {
+        sourceId,
+        bookUrl,
+        chapterUrl: `${BASE}/fixture/chapter/1/2`,
+        chapterName: '第二章',
+        chapterIndex: 1,
+        percent: 0.5,
+    })
+    check(bmOther.status === 201, '另一章的一条书签', `status=${bmOther.status}`)
+
+    const bmItems = (await callA('GET', bmQuery)).json?.bookmarks ?? []
+    check(bmItems.length === 3, '列表返回 3 条', `count=${bmItems.length}`)
+    check(
+        bmItems[0]?.chapterIndex === 0 && bmItems[2]?.chapterIndex === 1,
+        '按章节顺序排（不是按加入时间）',
+        JSON.stringify(bmItems.map((item) => item.chapterIndex)),
+    )
+    check(
+        Math.abs((bmItems[2]?.percent ?? 0) - 0.5) < 1e-9,
+        '滚动位置按比例存下来（跳回时才落得到原处）',
+        String(bmItems[2]?.percent),
+    )
+
+    const bmNoted = await callA('PUT', '/api/bookmarks', { id: bmId, note: '改成新的备注' })
+    check(
+        bmNoted.json?.bookmark?.note === '改成新的备注' && bmNoted.json?.bookmark?.pageIndex === 2,
+        '改备注不动位置',
+        JSON.stringify({
+            note: bmNoted.json?.bookmark?.note,
+            page: bmNoted.json?.bookmark?.pageIndex,
+        }),
+    )
+
+    const bmMissing = await callA('POST', '/api/bookmarks', { sourceId, bookUrl })
+    check(
+        bmMissing.status === 400 && bmMissing.json?.code === 'invalid_bookmark_input',
+        '缺 chapterUrl 返回 400 invalid_bookmark_input',
+        `status=${bmMissing.status} code=${bmMissing.json?.code}`,
+    )
+
+    // 隔离：书签 id 是随机串，但别人的 id 也必须删不掉、看不着
+    const bmOfB = await b.call('GET', bmQuery)
+    check(bmOfB.json?.count === 0, '身份 B 看不到 A 的书签', `count=${bmOfB.json?.count}`)
+    const bmForeign = await b.call('DELETE', `/api/bookmarks?id=${encodeURIComponent(bmId)}`)
+    check(
+        bmForeign.status === 404 && bmForeign.json?.code === 'bookmark_not_found',
+        '身份 B 删不掉 A 的书签（404 而不是删掉）',
+        `status=${bmForeign.status} code=${bmForeign.json?.code}`,
+    )
+
+    const bmRemoved = await callA('DELETE', `/api/bookmarks?id=${encodeURIComponent(bmId)}`)
+    check(
+        bmRemoved.status === 200 && bmRemoved.json?.removed === bmId,
+        '删除自己的一条书签',
+        JSON.stringify(bmRemoved.json),
+    )
+    check((await callA('GET', bmQuery)).json?.count === 2, '删除后剩 2 条')
+
+    const bmRemoveAgain = await callA('DELETE', `/api/bookmarks?id=${encodeURIComponent(bmId)}`)
+    check(
+        bmRemoveAgain.status === 404 && bmRemoveAgain.json?.code === 'bookmark_not_found',
+        '重复删除报 404 bookmark_not_found',
+        JSON.stringify(bmRemoveAgain.json?.code),
+    )
+
+    // 收尾：剩下的清掉，重复运行不在库里越积越多
+    for (const item of (await callA('GET', bmQuery)).json?.bookmarks ?? []) {
+        await callA('DELETE', `/api/bookmarks?id=${encodeURIComponent(item.id)}`)
+    }
+    check((await callA('GET', bmQuery)).json?.count === 0, '书签已清理')
 }
 
 console.log('\n=== 8. 相对地址以书源地址为基准 ===')
@@ -1606,7 +1739,9 @@ console.log('\n=== 15. 沙箱助手（java.getString / timeFormat / md5 / hex / 
     const nested = await call('POST', '/api/search', { keyword: '测试', sourceIds: [id] })
     const nestedPer = nested.json?.sources?.[0]
     check(
-        nestedPer?.ok === false && String(nestedPer?.error ?? '').includes('嵌套挂起'),
+        // 报错文案在「第十轮」改过：拦住它的理由从「asyncify 不支持嵌套挂起」
+        // 变成了「会话的串行链只有一个，嵌套会自己等自己」。断言只钉语义（拦住 + 说清原因）
+        nestedPer?.ok === false && String(nestedPer?.error ?? '').includes('不能再套 JS'),
         'java.getString 里再套 JS 会明确报错，而不是悄悄挂起',
         JSON.stringify(nestedPer?.error ?? nestedPer?.books?.[0]?.wordCount),
     )
@@ -2143,6 +2278,241 @@ console.log('\n=== 19. 发现（书源探索）与首页推荐 ===')
     )
 
     await user.call('POST', '/api/auth/logout', {})
+}
+
+console.log('\n=== 20. 节点级助手与对称加解密（java.getElements / createSymmetricCrypto） ===')
+{
+    /**
+     * 这一节验的是**整条链路**：QuickJS 里的 `java.*` → 宿主桥 → 宿主实现。
+     * 单测覆盖的是宿主那一侧（算法本身、jsoup 桥的契约）；这里覆盖的是「接上了没有」——
+     * 字节数组有没有被当成字符串、hex 是哪种大小写、iv 有没有真的传过去，
+     * 都只有走一遍沙箱才看得出来。
+     *
+     * 加解密那两条用的期望值是**公开的已知答案向量**（FIPS-197 与 DES 的经典样例），
+     * 不是本项目自己算出来的：桥的形状只要错一点就对不上。
+     */
+    const id = `user:${BASE}`
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: '节点级助手测试源',
+                bookSourceUrl: BASE,
+                searchUrl: `${BASE}/fixture/search?q={{key}}`,
+                ruleSearch: {
+                    bookList: '@css:div.result-item',
+                    name: '@css:h3.title@text',
+                    author: '@css:span.author@text',
+                    bookUrl: '@css:h3.title a@href',
+                    // 节点级求值 + Elements 的形状（size / toArray / text 各走一遍）。
+                    // 一条规则里只调一次 java.getElements：它是 asyncify 桥，调两次也能跑，
+                    // 但没必要让这条断言同时承担两件事
+                    kind: "@js:var els = java.getElements('@css:p.intro'); els.size() + '$' + els.toArray()[0].text()",
+                    // getElement 是单数那个（线上 9 处），返回 Element 而不是 Elements
+                    lastChapter: "@js:java.getElement('@css:h3.title a').text()",
+                    // Elements 上的 .html() 给的是**第一个**节点的内部 HTML
+                    wordCount: "@js:java.getElements('@css:p.intro').html()",
+                },
+                ruleBookInfo: {
+                    name: '@css:h1.book-name@text',
+                    tocUrl: '@css:a.toc-link@href',
+                    // 多节点：`.book-info` 下的 4 个孩子，顺带验 tagName()
+                    intro: "@js:var els = java.getElements('@css:.book-info *'); els.size() + '$' + els.toArray().map(function (e) { return e.tagName() }).join(',')",
+                },
+                ruleToc: {
+                    chapterList: '@css:ul.chapter-list li',
+                    chapterName: '@css:a@text',
+                    chapterUrl: '@css:a@href',
+                },
+                ruleContent: { content: '@css:div#content@textNodes' },
+            },
+        ]),
+    )
+
+    const searchRes = await call('POST', '/api/search', { keyword: '测试', sourceIds: [id] })
+    const per = searchRes.json?.sources?.[0]
+    const books = per?.books ?? []
+    check(books.length === 2, '节点级助手源搜到 2 本书', per?.error ?? `count=${books.length}`)
+
+    if (books.length > 0) {
+        const book = books[0]
+        check(
+            /^1\$.+/.test(String(book.kind)),
+            'java.getElements 拿到节点集（size 与 toArray()[0].text() 都对）',
+            String(book.kind),
+        )
+        check(
+            book.lastChapter === String(book.name),
+            'java.getElement(...).text() 取到单节点文本',
+            JSON.stringify({ element: book.lastChapter, name: book.name }),
+        )
+        check(
+            typeof book.wordCount === 'string' && book.wordCount.length > 0,
+            'java.getElements(...).html() 取到第一个节点的内部 HTML',
+            String(book.wordCount),
+        )
+    }
+
+    // ---- 书详情页上的多节点求值 ----
+    if (books.length > 0) {
+        const info = await getJson(
+            `/api/book?sourceId=${encodeURIComponent(id)}&url=${encodeURIComponent(books[0].bookUrl)}`,
+        )
+        check(
+            info.json?.intro === '4$h1,span,div,a',
+            'java.getElements 在书详情页拿到 4 个并列节点（顺序与 tagName 都对）',
+            JSON.stringify(info.json?.intro),
+        )
+    }
+
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+
+    // ------------------------------------------------------------ 对称加解密
+    //
+    // 两个向量都来自公开的标准文档：
+    //   - AES：FIPS-197 / NIST SP 800-38A 的 AES-128-CBC 第一块
+    //   - DES：经典样例 key=0x0123456789abcdef、明文 "Now is t"
+    // 注意密钥与明文都是**字节**，所以用 base64DecodeToByteArray 取原样字节 ——
+    // 直接把 "0123456789abcdef" 当字符串传会得到 16 字节，DES 会以「密钥必须是 8 字节」拒绝，
+    // 这本身就是一条要守住的边界。
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: '对称加解密测试源',
+                bookSourceUrl: BASE,
+                searchUrl: `${BASE}/fixture/search?q={{key}}`,
+                ruleSearch: {
+                    bookList: '@css:div.result-item',
+                    // AES-128-CBC（NoPadding）加密成十六进制
+                    name: "@js:var key = java.base64DecodeToByteArray('K34VFiiu0qar9xWICc9PPA=='); var iv = java.base64DecodeToByteArray('AAECAwQFBgcICQoLDA0ODw=='); var data = java.base64DecodeToByteArray('a8G+4i5An5bpPX4Rc5MXKg=='); java.createSymmetricCrypto('AES/CBC/NoPadding', key, iv).encryptHex(data)",
+                    bookUrl: '@css:h3.title a@href',
+                    // DES-ECB（NoPadding）：公开样例 → 3fa40e8a984d4815
+                    author: "@js:var key = java.base64DecodeToByteArray('ASNFZ4mrze8='); var data = java.base64DecodeToByteArray('Tm93IGlzIHQ='); java.createSymmetricCrypto('DES/ECB/NoPadding', key).encryptHex(data)",
+                    // 中文正文的加密再解密（base64ToString 那一对方法）
+                    kind: "@js:var c = java.createSymmetricCrypto('AES/CBC/PKCS5Padding', 'Pxga!h*e4@T8xfOm', 'E&z!EHGLd$fli*8R'); var enc = c.encryptBase64ToString('要解出来的正文'); enc.length > 0 && c.decryptBase64ToString(enc) === '要解出来的正文' ? 'roundtrip-ok' : 'roundtrip-bad'",
+                    // 字符串形式的 8 字节密钥（线上真实写法）
+                    lastChapter:
+                        "@js:var c = java.createSymmetricCrypto('DES/CBC/PKCS5Padding', 'KW8Dvm2N', '1ae2c94b'); var enc = c.encryptBase64ToString('正文'); c.decryptBase64ToString(enc)",
+                    // aesBase64DecodeToString 是线上出现最多的那一个（18 处）
+                    wordCount:
+                        "@js:var c = java.createSymmetricCrypto('AES/CBC/PKCS5Padding', 'Pxga!h*e4@T8xfOm', 'E&z!EHGLd$fli*8R'); var enc = c.encryptBase64ToString('另一个片段'); java.aesBase64DecodeToString(enc, 'Pxga!h*e4@T8xfOm', 'AES/CBC/PKCS5Padding', 'E&z!EHGLd$fli*8R')",
+                },
+                ruleToc: {
+                    chapterList: '@css:ul.chapter-list li',
+                    chapterName: '@css:a@text',
+                    chapterUrl: '@css:a@href',
+                },
+                ruleContent: { content: '@css:div#content@textNodes' },
+            },
+        ]),
+    )
+
+    const cryptoRes = await call('POST', '/api/search', { keyword: '测试', sourceIds: [id] })
+    const cryptoPer = cryptoRes.json?.sources?.[0]
+    const cryptoBooks = cryptoPer?.books ?? []
+    check(
+        cryptoBooks.length === 2,
+        '对称加解密源搜到 2 本书',
+        cryptoPer?.error ?? `count=${cryptoBooks.length}`,
+    )
+
+    if (cryptoBooks.length > 0) {
+        const book = cryptoBooks[0]
+        check(
+            book.name === '7649abac8119b246cee98e9b12e9197d',
+            'AES-128-CBC 在沙箱里加密出官方向量（NIST SP 800-38A）',
+            String(book.name),
+        )
+        check(
+            book.author === '3fa40e8a984d4815',
+            'DES-ECB 在沙箱里加密出经典样例（0x0123456789abcdef → 3fa40e8a984d4815）',
+            String(book.author),
+        )
+        check(
+            book.kind === 'roundtrip-ok',
+            'AES 的 encryptBase64ToString / decryptBase64ToString 往返一致（含中文）',
+            String(book.kind),
+        )
+        check(
+            book.lastChapter === '正文',
+            'DES/CBC/PKCS5Padding 用 8 字节字符串密钥往返一致',
+            String(book.lastChapter),
+        )
+        check(
+            book.wordCount === '另一个片段',
+            'java.aesBase64DecodeToString 的参数顺序与 Legado 一致',
+            String(book.wordCount),
+        )
+    }
+
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+
+    /**
+     * 错误路径：一条一条单独验
+     *
+     * 「某个字段的规则抛错」在这个引擎里的表现是**整个源**失败（`ok:false` + `error`），
+     * 而不是那一格留空 —— 所以每条必然抛错的规则都得单独开一个源，
+     * 否则它会把同一个源里其它字段的断言一起带走（这不是缺陷，是刻意的：
+     * 书源报错与「搜不到书」必须能分开看）。
+     */
+    const expectSourceError = async (name, rules, expected, label) => {
+        await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+        await call(
+            'POST',
+            '/api/sources',
+            JSON.stringify([
+                {
+                    bookSourceName: name,
+                    bookSourceUrl: BASE,
+                    searchUrl: `${BASE}/fixture/search?q={{key}}`,
+                    ruleSearch: {
+                        bookList: '@css:div.result-item',
+                        name: '@css:h3.title@text',
+                        bookUrl: '@css:h3.title a@href',
+                        ...rules,
+                    },
+                    ruleToc: {},
+                    ruleContent: {},
+                },
+            ]),
+        )
+        const res = await call('POST', '/api/search', { keyword: '测试', sourceIds: [id] })
+        const per = res.json?.sources?.[0]
+        check(
+            per?.ok === false && String(per?.error ?? '').includes(expected),
+            label,
+            JSON.stringify(per?.error),
+        )
+        await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+    }
+
+    // 16 字节的 key 给 DES：必须明确说长度不对，不能拿前 8 个字节凑合
+    await expectSourceError(
+        '密钥长度错误测试源',
+        {
+            author: "@js:java.createSymmetricCrypto('DES/CBC/PKCS5Padding', '0123456789abcdef', '1ae2c94b').encryptHex('x')",
+        },
+        'DES 密钥必须是 8 字节',
+        'DES 密钥长度不对时报清楚（而不是静默取前 8 字节）',
+    )
+
+    // 没实现的算法必须明确报错，而不是给一段乱码
+    await expectSourceError(
+        '未实现算法测试源',
+        {
+            author: "@js:java.createSymmetricCrypto('DESede/CBC/PKCS5Padding', 'aaaaaaaaaaaaaaaaaaaaaaaa', 'bbbbbbbb').encryptHex('a')",
+        },
+        '不支持 DESEDE',
+        '没实现的算法报出名字，而不是给一段乱码',
+    )
+
+    const left = (await getJson('/api/sources')).json?.sources ?? []
+    check(!left.some((s) => s.id === id), '节点级与加解密测试源已清理')
 }
 
 console.log('\n=== 结果 ===')
