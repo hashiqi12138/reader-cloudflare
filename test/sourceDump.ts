@@ -14,7 +14,22 @@
 import { readFileSync } from 'node:fs'
 
 export const RULE_GROUPS = ['ruleSearch', 'ruleBookInfo', 'ruleToc', 'ruleContent', 'ruleExplore']
-export const URL_FIELDS = ['searchUrl', 'exploreUrl', 'header', 'jsLib', 'loginUrl']
+
+/**
+ * 书源顶层里「引擎会当规则去求值」的字段
+ *
+ * 只有这两个。其余都不是规则：
+ *   - `jsLib` 是一整段 JS 脚本库
+ *   - `header` 是 JSON 请求头
+ *   - `loginUrl` 是登录流程的脚本（本引擎只是把它当**值**暴露给脚本里的 `source.loginUrl`，
+ *     从不拿去求值）
+ *
+ * 把它们当规则收进来，扫描就会冒出一整批假阳性：`jsLib` / `loginUrl` 里以 `//` 开头的
+ * 注释行会被当成 XPath 表达式。实测先是报出 11 处「解析失败」，把这些字段排掉之后
+ * 只剩 1 处真问题 —— `contains (` 里那个空格（见 `xpath.ts` 的 `normalizeXPathFunctions`），
+ * 也已经修掉。
+ */
+export const URL_FIELDS = ['searchUrl', 'exploreUrl']
 
 function parsePayload(value: unknown): Record<string, unknown> | null {
     if (typeof value !== 'string') return null
@@ -60,22 +75,42 @@ export function loadSourceDump(path: string): Record<string, unknown>[] {
     return sources
 }
 
-/** 一条书源里所有「可能是规则」的字符串 */
-export function rulesOf(source: Record<string, unknown>): string[] {
-    const out: string[] = []
+/** 一条规则字段：`path` 形如 `ruleToc.chapterList`，用来在扫描输出里定位 */
+export interface RuleField {
+    path: string
+    value: string
+}
+
+/**
+ * 一条书源里所有「引擎会当规则求值」的字段
+ *
+ * 返回路径而不只是字符串：扫描输出里必须能指出**是哪个字段**出的问题，
+ * 否则「某条源的某条规则解析失败」这句话没法照着去修。
+ */
+export function ruleFieldsOf(source: Record<string, unknown>): RuleField[] {
+    const out: RuleField[] = []
     for (const group of RULE_GROUPS) {
         const fields = source[group]
         if (fields && typeof fields === 'object') {
-            for (const value of Object.values(fields)) {
-                if (typeof value === 'string') out.push(value)
+            for (const [field, value] of Object.entries(fields)) {
+                if (typeof value !== 'string') continue
+                // 名字以 `Js` 结尾的字段**本身就是 JS**（`callBackJs` / `webJs` / `formatJs`），
+                // 里面不带 `@js:` 标记。收进来的话，JS 里以 `//` 开头的注释行会被当成 XPath 表达式
+                if (/Js$/.test(field)) continue
+                out.push({ path: `${group}.${field}`, value })
             }
         }
     }
     for (const key of URL_FIELDS) {
         const value = source[key]
-        if (typeof value === 'string' && value !== '') out.push(value)
+        if (typeof value === 'string' && value !== '') out.push({ path: key, value })
     }
     return out
+}
+
+/** 只要值（大多数扫描不关心字段名） */
+export function rulesOf(source: Record<string, unknown>): string[] {
+    return ruleFieldsOf(source).map((field) => field.value)
 }
 
 /** 规则与 URL 字段里的连接符 */

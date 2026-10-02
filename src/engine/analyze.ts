@@ -24,7 +24,7 @@ import type { SandboxGetElements, SandboxGetString, SandboxLimits } from './js'
 import { classifyTemplate, hasRuleSyntax, stripRuleMarker, templatePattern } from './template'
 import { splitRuleText } from './ruleText'
 import { indexOfJsMarker, JS_MARKER, matchDirective, ruleHasJs } from './directives'
-import { isAttributeView, runXPath } from './xpath'
+import { isAttributeView, normalizeXPathFunctions, runXPath, splitXPathExtract } from './xpath'
 
 /** 一次规则求值所面对的上下文：一个可继续筛选的节点集 */
 export interface Selection {
@@ -232,17 +232,46 @@ function toRelativeXPath(body: string): string {
 }
 
 /**
+ * 规则里的 XPath 段 → 可以直接交给 `xpath` 包执行的表达式（外加取值后缀）
+ *
+ * 三步，顺序不能换：
+ *   1. `splitXPathExtract` 拆掉末尾的取值后缀（`div[3]@html` 的 `@html`）
+ *   2. `normalizeXPathFunctions` 去掉函数名与 `(` 之间的空白（`contains (` → `contains(`）
+ *   3. `toRelativeXPath` 把 `//x` 改写成 `.//x`
+ *
+ * 两处调用（字段求值、列表规则）都走它，免得哪一处漏了某一步 ——
+ * 漏掉的后果不是报错，而是「表达式解析失败 → 整条规则空」。
+ */
+function toRunnableXPath(rule: string): { expression: string; extract: string | null } {
+    const { expression, extract } = splitXPathExtract(rule)
+    return { expression: toRelativeXPath(normalizeXPathFunctions(expression)), extract }
+}
+
+/**
  * 取一个 XPath 结果节点的值
  *
  * XPath 与 JSOUP 规则不同：**取什么由表达式自己决定**（`/text()` 给文本节点、
- * `/@href` 给属性节点、选中元素则取它的文本），所以这里没有 `@text` / `@href`
- * 那样的取值后缀。
+ * `/@href` 给属性节点、选中元素则取它的文本），所以**没有后缀时**用不到
+ * `@text` / `@href` 那套取值后缀 —— 这一点与 CSS 差别很大。
+ *
+ * 但书源里确实有「表达式 + 取值后缀」的写法（线上 3 处，如 `div[3]@html`），
+ * 那一层由 `splitXPathExtract` 先拆掉（见那里的判据），这里只处理剩下的节点。
  */
 function xpathNodeValue($: Selection['$'], node: any): string {
     if (isAttributeView(node)) return node.value.trim()
     if (node?.type === 'text') return String(node.data ?? '').trim()
     if (!node || typeof node !== 'object') return ''
     return $(node).text().trim()
+}
+
+/** 一个 XPath 命中节点在带取值后缀时该取什么 */
+function xpathValueWithExtract($: Selection['$'], node: any, extract: string): string {
+    // 后缀只对元素有意义（`@html` 取内部 HTML、`@href` 取属性、`@text` 取文本）。
+    // 表达式若返回的是属性/文本节点，就仍按它自己的值取 —— 那说明后缀是多余的
+    if (!node || typeof node !== 'object' || isAttributeView(node) || node.type === 'text') {
+        return xpathNodeValue($, node)
+    }
+    return extractValues($, [node], extract)[0] ?? ''
 }
 
 /** 在给定节点集上跑一条「纯选择器」规则，返回字符串列表 */
@@ -258,7 +287,7 @@ function evalSelector(sel: Selection, body: string, kind: string): string[] {
     }
 
     if (kind === 'xpath') {
-        const expression = toRelativeXPath(body)
+        const { expression, extract } = toRunnableXPath(body)
         const values: string[] = []
         for (const node of sel.nodes) {
             const outcome = runXPath(sel.$, expression, node)
@@ -267,7 +296,10 @@ function evalSelector(sel: Selection, body: string, kind: string): string[] {
                 continue
             }
             for (const hit of outcome.nodes) {
-                const value = xpathNodeValue(sel.$, hit)
+                const value =
+                    extract === null
+                        ? xpathNodeValue(sel.$, hit)
+                        : xpathValueWithExtract(sel.$, hit, extract)
                 if (value !== '') values.push(value)
             }
         }
@@ -726,7 +758,11 @@ export async function analyzeSelections(
         } else if (kind.kind === 'xpath') {
             // 列表规则同样要把 `//` 当相对路径用：目录规则要的是「本页里的章节项」，
             // 而不是"全文档里的第一个"
-            const expression = toRelativeXPath(kind.body)
+            //
+            // 末尾的取值后缀在这里**丢掉**：列表规则要的是节点本身，好让后续字段规则
+            // 继续在上面筛。留着它的话表达式会解析失败（`//div[@class='x']@html` 不是
+            // 合法 XPath），整条目录变成空的。
+            const expression = toRunnableXPath(kind.body).expression
             const collected: any[] = []
             for (const node of sel.nodes) {
                 const outcome = runXPath(sel.$, expression, node)
