@@ -109,6 +109,49 @@ describe('parseExploreCategories', () => {
         ])
     })
 
+    /**
+     * 线上最常见的写法：**整个 JSON 数组以字符串形式**存在 exploreUrl 里
+     *
+     * 它既不是真正的数组，也不是 `标题::地址` 文本 —— 按行拆开只会得到
+     * `[` 和 `{"title":…}`，两种规则都不匹配。不专门接住的话，
+     * 线上绝大多数书源的分类会**静默变成 0 条**（发现页整块空着）。
+     */
+    it('JSON 数组字符串：解析成分类，而不是按行当成文本', () => {
+        const raw = `[
+  {"title":"玄幻魔法","url":"/xuanhuan/{{page}}","style":{"layout_flexGrow":1}},
+  {"title":"武侠修真","url":"/xiuzhen/{{page}}","style":{"layout_flexGrow":1}}
+]`
+        expect(parseExploreCategories(raw, source)).toEqual([
+            { title: '玄幻魔法', url: '/xuanhuan/{{page}}' },
+            { title: '武侠修真', url: '/xiuzhen/{{page}}' },
+        ])
+    })
+
+    it('JSON 数组字符串：单行紧凑写法同样能解析', () => {
+        const raw = '[{"title":"热门推荐","url":"https://www.twkan.cc/"}]'
+        expect(parseExploreCategories(raw, source)).toEqual([
+            { title: '热门推荐', url: 'https://www.twkan.cc/' },
+        ])
+    })
+
+    it('JSON 对象字符串：包一层（{list:[…]}）也能解析', () => {
+        const raw = '{"list":[{"title":"a","url":"/a"}]}'
+        expect(parseExploreCategories(raw, source)).toEqual([{ title: 'a', url: '/a' }])
+    })
+
+    it('看着像 JSON 但其实是 `标题::地址` 文本时，仍然按文本解析', () => {
+        const raw = '玄幻小说::/fenlei/1/{{page}}/\n仙侠小说::/fenlei/2/{{page}}/'
+        expect(parseExploreCategories(raw, source)).toEqual([
+            { title: '玄幻小说', url: '/fenlei/1/{{page}}/' },
+            { title: '仙侠小说', url: '/fenlei/2/{{page}}/' },
+        ])
+    })
+
+    it('JSON 字符串坏掉时退回按行解析，而不是整块失败', () => {
+        const raw = '[{"title":"坏的","url":/no-quote}\n玄幻::/ok'
+        expect(parseExploreCategories(raw, source)).toContainEqual({ title: '玄幻', url: '/ok' })
+    })
+
     it('无法识别的输入回空数组，而不是抛错', () => {
         expect(parseExploreCategories(null, source)).toEqual([])
         expect(parseExploreCategories(42, source)).toEqual([])

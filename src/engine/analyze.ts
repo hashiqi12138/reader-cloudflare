@@ -16,10 +16,11 @@
 import { applyAllInOne, applyRegexOps, splitRegexChain } from './regex'
 import { UnsupportedRuleError, type RuleContext, type RuleResult } from './types'
 import { parseJsoupRule } from './jsoup'
+import { sourceGlobals, sourceLimits } from './globals'
 import { extractValues, parseHtml, reparseFragment, selectNodes } from './select'
 import { jsonPathToStrings } from './jsonpath'
 import { runInSandbox, sandboxResultToString, sandboxResultToStrings } from './js'
-import type { SandboxGetString, SandboxLimits } from './js'
+import type { SandboxGetElements, SandboxGetString, SandboxLimits } from './js'
 import { classifyTemplate, hasRuleSyntax, stripRuleMarker, templatePattern } from './template'
 import { splitRuleText } from './ruleText'
 import { isAttributeView, runXPath } from './xpath'
@@ -142,15 +143,27 @@ function splitCssExtract(body: string): { css: string; extract: string } {
     return { css: body, extract: 'text' }
 }
 
-/** 用 CSS 选择器在当前节点集的后代里找节点 */
+/**
+ * 用 CSS 选择器在当前节点集的后代里找节点
+ *
+ * 选择器**非法时报错而不是返回空**：这两者在下游看起来几乎一样，
+ * 但原因完全不同 —— 前者是规则写错了（拿去修就好），后者是页面里确实没有。
+ * 早先这里静默咽掉异常，结果是一整条源「分类正常、书目全空、全程不报错」，
+ * 排查时只能靠猜。报出来的信息里带上选择器原文，指向就明确了。
+ */
 function selectByCss(sel: Selection, css: string): any[] {
+    if (css.trim() === '') return []
     const nodes: any[] = []
+    let failed = false
     for (const n of sel.nodes) {
         try {
             nodes.push(...sel.$(n).find(css).toArray())
         } catch {
-            /* 选择器写坏就当作没匹配到，不要让一个坏源拖垮整次搜索 */
+            failed = true
         }
+    }
+    if (failed && nodes.length === 0) {
+        throw new UnsupportedRuleError(`CSS 选择器无效，无法解析：${css.slice(0, 120)}`)
     }
     return nodes
 }
@@ -273,7 +286,7 @@ async function evalTemplate(sel: Selection, inner: string, ctx: RuleContext): Pr
         try {
             const value = await runInSandbox(
                 text,
-                { ...baseGlobals(ctx), result: sel.source, src: sel.source },
+                { ...baseGlobals(ctx), ...resultGlobals(text, sel.source), src: sel.source },
                 sandboxLimits(sel, ctx),
             )
             return sandboxResultToString(value)
@@ -434,7 +447,7 @@ async function evalSelectorChain(
             part.text,
             {
                 ...baseGlobals(ctx),
-                result: values.length > 1 ? values : (values[0] ?? ''),
+                ...resultGlobals(part.text, values.length > 1 ? values : (values[0] ?? '')),
                 src: current.source,
             },
             sandboxLimits(current, ctx),
@@ -469,7 +482,11 @@ async function evalSingleSegment(
     if (head.trim() === '' && jsCode !== null) {
         const result = await runInSandbox(
             jsCode,
-            { ...baseGlobals(ctx), result: ctx.result ?? sel.source, src: sel.source },
+            {
+                ...baseGlobals(ctx),
+                ...resultGlobals(jsCode, ctx.result ?? sel.source),
+                src: sel.source,
+            },
             sandboxLimits(sel, ctx),
         )
         // 逐个返回（见 evalSelectorChain 里的同一处说明）：`@js:` 列表规则
@@ -499,7 +516,7 @@ async function evalSingleSegment(
         jsCode,
         {
             ...baseGlobals(ctx),
-            result: values.length > 1 ? values : (values[0] ?? ''),
+            ...resultGlobals(jsCode, values.length > 1 ? values : (values[0] ?? '')),
             src: sel.source,
         },
         sandboxLimits(sel, ctx),
@@ -511,18 +528,18 @@ async function evalSingleSegment(
 /**
  * 沙箱里 `java.getString` 的实现：把一条规则当成字符串求值
  *
- * 规则求值本身可能进沙箱（`@js:`），而 asyncify **不支持嵌套挂起** ——
- * 从沙箱里再调进来一次会把挂起机制弄乱。所以这里直接挡住含 JS 的规则、明确报错，
- * 而不是让它在深处以看不懂的方式炸掉。
+ * 规则求值本身可能进沙箱（`@js:`、`<js>`、以及**模板里的 JS 表达式**），
+ * 而沙箱的执行槽位是有限的：从沙箱里再要一个槽位，会在槽位用满时永远等下去
+ * （外层的求值正占着槽位不放）。所以这里直接挡住会二次进沙箱的规则、明确报错。
  *
  * 实测用法（`java.getString('$.update_time')`、`java.getString('$.freeStack')`）
  * 都是纯 JSONPath / 选择器，不受这条限制影响。
  */
 function sandboxGetString(sel: Selection, ctx: RuleContext): SandboxGetString {
     return async (rule, content) => {
-        if (/@js:|<js[\s>]/i.test(rule)) {
+        if (/@js:|<js[\s>]|\{\{/.test(rule)) {
             throw new UnsupportedRuleError(
-                `java.getString 里不能再套 JS 规则（${rule.replace(/\s+/g, ' ').slice(0, 60)}）：asyncify 不支持嵌套挂起`,
+                `java.getString 里不能再套 JS 规则（${rule.replace(/\s+/g, ' ').slice(0, 60)}）：沙箱执行槽位是有限的，嵌套求值会互相等待`,
             )
         }
         // 第二个参数给了内容就在那段内容上求值，否则用当前节点
@@ -532,9 +549,49 @@ function sandboxGetString(sel: Selection, ctx: RuleContext): SandboxGetString {
     }
 }
 
-/** 传给沙箱的能力：取网 + 规则求值 */
+/**
+ * 沙箱里 `java.getElements` 的实现：把一条规则求值成**节点集**
+ *
+ * 做法与 `sandboxGetString` 的区别只在返回值：那边把命中节点的文本拼起来，
+ * 这边把**每个节点的 outerHTML** 逐个交出去 —— 脚本那侧再用 org.jsoup 的桥
+ * 解析回 Elements，于是 `.select()` / `.get(i)` / `.attr()` 这些都能接着用。
+ *
+ * 线上 32 处 `getElements` + 9 处 `getElement`，写法横跨 CSS、JSOUP 简写
+ * （`@@class.chapter-list.-1@li@a`）与 XPath，这里统一交给 `analyzeSelections`，
+ * 不在这一层做方言判断。
+ *
+ * 与 `java.getString` 同一条限制：规则里不能再套 JS（会二次进沙箱，互相等待）。
+ */
+function sandboxGetElements(sel: Selection, ctx: RuleContext): SandboxGetElements {
+    return async (rule, content) => {
+        if (/@js:|<js[\s>]|\{\{/.test(rule)) {
+            throw new UnsupportedRuleError(
+                `java.getElements 里不能再套 JS 规则（${rule.replace(/\s+/g, ' ').slice(0, 60)}）：沙箱执行槽位是有限的，嵌套求值会互相等待`,
+            )
+        }
+        const target = content === undefined ? sel : rootSelection(content)
+        // 规则原样交给列表规则求值：`@@class.x@li@a` 这类开头的双 `@` 不用特殊处理
+        // （JSOUP 解析本来就会把空段过滤掉，它只是 Legado 的写法习惯）
+        const items = await analyzeSelections(target, rule.trim(), ctx)
+        const html: string[] = []
+        for (const item of items) {
+            for (const node of item.nodes) {
+                const outer = item.$.html(node)
+                if (outer && outer.trim() !== '') html.push(outer)
+            }
+        }
+        return html
+    }
+}
+
+/** 传给沙箱的能力：取网 + 规则求值 + 节点级规则求值 + 书源自带的 jsLib */
 function sandboxLimits(sel: Selection, ctx: RuleContext): SandboxLimits {
-    return { http: ctx.http, getString: sandboxGetString(sel, ctx) }
+    return {
+        http: ctx.http,
+        getString: sandboxGetString(sel, ctx),
+        getElements: sandboxGetElements(sel, ctx),
+        ...sourceLimits(ctx),
+    }
 }
 
 function baseGlobals(ctx: RuleContext): Record<string, unknown> {
@@ -543,8 +600,27 @@ function baseGlobals(ctx: RuleContext): Record<string, unknown> {
         book: ctx.book ?? {},
         key: ctx.key ?? '',
         page: ctx.page ?? 1,
-        cookie: {},
-        cache: {},
+        // `source` / `infoMap` 在沙箱预置里由这几个变量组装（见 engine/globals.ts）
+        ...sourceGlobals(ctx),
+    }
+}
+
+/**
+ * 脚本是不是把 `result` 当 jsoup 对象用（`result.select('h3').text()`）
+ *
+ * Legado 里 `result` 同时可能是字符串也可能是 jsoup 对象，两种写法在**同一条书源里**
+ * 都会出现。这里只按「真的调了 jsoup 方法」来判断，而不是一律包装 ——
+ * 一律包装会把 `typeof result` 从 `'string'` 变成 `'object'`，
+ * 而线上有 18 处脚本在判断这个类型。
+ */
+const RESULT_AS_JSOUP =
+    /\bresult\s*\.\s*(select|attr|first|last|get|eq|size|isEmpty|textNodes|eachText|html|outerHtml|hasClass|children|not|filter|matches|matchesOwn|tagName|ownText)\s*\(/
+
+/** 传给沙箱的 `result` 与「要不要包成 jsoup 对象」 */
+function resultGlobals(code: string, value: unknown): Record<string, unknown> {
+    return {
+        result: value,
+        __resultAsJsoup: typeof value === 'string' && RESULT_AS_JSOUP.test(code),
     }
 }
 
@@ -565,8 +641,42 @@ export async function analyzeSelections(
     if (trimmed === '') return []
 
     // AllInOne：以 `:` 开头，整块正则切分；切出来的是文本，只能重新解析成节点
+    //
+    // **必须排在连接符之前**：AllInOne 后面跟的是一整段**正则原文**，
+    // 而 `||` 在正则里是合法写法（两个空分支），`%%`、`&&` 同理。
+    // 先拆连接符的话，`:a||b` 会被切成 `:a` 与 `b` 两块，正则被从中间截断，
+    // 结果既不报错也不是原来那条规则要的东西。
     if (trimmed.startsWith(':') && !trimmed.startsWith('::')) {
         return applyAllInOne(sel.source, trimmed).map((text) => selectionFromText(text, sel.source))
+    }
+
+    /**
+     * 列表规则同样会写 `||` 备选，而且很常见：
+     *
+     *   bookList: `ol.book-ol.book-ol-normal li.book-li||ol.jsBooks li.book-li`
+     *
+     * 之前这里**完全不处理连接符**，整串（含 `||`）会被当成一个 CSS 选择器交给 cheerio，
+     * cheerio 抛错、被 `selectByCss` 的 catch 咽掉，于是返回**空列表**：
+     * 症状正是「分类拉出来了，但一本书都没有」。而这条规则本意是
+     * 「老版页面用第一个选择器，新版用第二个」。
+     *
+     * 三种连接符的语义与字段规则一致：`||` 取第一个有结果的，`&&` 合并，`%%` 轮流取；
+     * `splitConnectors` 本身会跳过 `@js:` / `<js>` 区域，所以 JS 里的 `||` 不会被切。
+     */
+    const connectors = splitConnectors(trimmed)
+    if (connectors) {
+        const groups: Selection[][] = []
+        for (const part of connectors.parts) groups.push(await analyzeSelections(sel, part, ctx))
+
+        if (connectors.joiner === '||') return groups.find((g) => g.length > 0) ?? []
+        if (connectors.joiner === '&&') return groups.flat()
+
+        const merged: Selection[] = []
+        const max = Math.max(...groups.map((g) => g.length), 0)
+        for (let i = 0; i < max; i += 1) {
+            for (const group of groups) if (group[i] !== undefined) merged.push(group[i]!)
+        }
+        return merged
     }
 
     // `+` 开头是 ListAllInOne（JS 产出列表），当前不支持，明确报错而不是静默返回空

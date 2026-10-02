@@ -43,6 +43,34 @@ export function categoryFromLine(line: string, sourceName: string): ExploreCateg
     return { title: title === '' ? sourceName : title, url }
 }
 
+/**
+ * 字符串形态的 exploreUrl 常常**整个就是 JSON**，而不只是 `标题::地址` 文本
+ *
+ * 线上绝大多数书源是这么写的：
+ *
+ *     [{"title":"玄幻魔法","url":"/xuanhuan/{{page}}","style":{…}}, …]
+ *
+ * 按行拆开只会得到 `[` 和 `{"title":…}` —— 既没有 `::`、也不像地址，
+ * 于是**每行都被丢掉，分类静默变成 0 条**。这是线上「分类大多拉不出来」的根因。
+ *
+ * 解析失败时退回原文，交给按行解析处理（见 parseExploreCategories）：
+ * 一行坏数据不该让整个书源没有分类。
+ */
+function decodeJsonString(raw: string): unknown {
+    const text = raw.trim()
+    if (!text.startsWith('[') && !text.startsWith('{')) return raw
+    try {
+        return JSON.parse(text)
+    } catch {
+        // 手写的 JSON 常有尾逗号，清一次再试；仍失败就按文本走
+        try {
+            return JSON.parse(text.replace(/,\s*([}\]])/g, '$1'))
+        } catch {
+            return raw
+        }
+    }
+}
+
 function asCategory(item: unknown, sourceName: string, parentTitle = ''): ExploreCategory[] {
     if (typeof item === 'string') {
         const one = categoryFromLine(item, sourceName)
@@ -70,16 +98,18 @@ export function parseExploreCategories(raw: unknown, source: BookSource): Explor
     const name = source.bookSourceName
     const out: ExploreCategory[] = []
 
-    if (Array.isArray(raw)) {
-        for (const item of raw) out.push(...asCategory(item, name))
-    } else if (typeof raw === 'string') {
-        for (const line of raw.split('\n')) {
+    const value = typeof raw === 'string' ? decodeJsonString(raw) : raw
+
+    if (Array.isArray(value)) {
+        for (const item of value) out.push(...asCategory(item, name))
+    } else if (typeof value === 'string') {
+        for (const line of value.split('\n')) {
             const one = categoryFromLine(line, name)
             if (one) out.push(one)
         }
-    } else if (raw && typeof raw === 'object') {
+    } else if (value && typeof value === 'object') {
         // 有些脚本返回 `{ list: [...] }` 这种包一层的结果
-        const box = raw as { list?: unknown; data?: unknown }
+        const box = value as { list?: unknown; data?: unknown }
         const inner = box.list ?? box.data
         if (Array.isArray(inner)) for (const item of inner) out.push(...asCategory(item, name))
     }

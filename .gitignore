@@ -31,6 +31,16 @@ coverage/
 *.tsbuildinfo
 .tmp/
 
+# 全量验证用的本地素材与报告 —— **绝不入库**。
+#
+# 这几个文件里装的是第三方书源定义（`live-*-dump.json`，几 MB）与探测报告。
+# 书源是使用者自己的选择，不进仓库（见 README「关于书源」）；
+# 报告则是「某一时刻线上有哪几条源能跑」的快照，会过期、也没有复现价值。
+# 本地的 scripts/probe-*.mjs 默认从这些文件读，因此在本地保留、只做忽略。
+live-*-dump.json
+explore-report*.txt
+dev-server.log
+
 # QuickJS 的 WASM 由 scripts/copy-quickjs-wasm.mjs 从 node_modules 复制到 src/engine/，
 # 是派生产物，不入库（二进制、体积约 1 MB，且版本必须跟着 quickjs-emscripten 走）。
 # package.json 的 predev / prebuild / predeploy / pretest 会自动重新生成。

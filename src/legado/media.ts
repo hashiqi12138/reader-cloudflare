@@ -181,6 +181,8 @@ export async function fetchChapterContent(
     chapterUrl: string,
     ctx: RuleContext,
 ): Promise<ChapterContent> {
+    // 让 `@js:` 里的 `source` 全局与 jsLib 生效（见 engine/globals.ts）
+    ctx.source ??= source
     switch (source.bookSourceType ?? SOURCE_TYPE.text) {
         case SOURCE_TYPE.image:
             return fetchImages(source, chapterUrl, ctx)

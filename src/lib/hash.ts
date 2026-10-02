@@ -27,23 +27,20 @@ const K = (() => {
     return table
 })()
 
-/** 小写十六进制，小端序（MD5 的输出字节序就是小端） */
-function hexLE(value: number): string {
-    let out = ''
-    for (let i = 0; i < 4; i += 1) {
-        out += ((value >>> (i * 8)) & 0xff).toString(16).padStart(2, '0')
-    }
-    return out
-}
-
 /**
- * MD5，返回 32 位小写十六进制
+ * MD5 原始字节（16 字节）
  *
- * 输入按 **UTF-8** 取字节 —— 与 Legado 的 `java.md5Encode` 一致；
- * 直接对 JS 字符串按 UTF-16 取字节的话，含中文的输入会算出完全不同的结果。
+ * 与 `md5Hex` 分开提供，是因为书源里两种用法都有：
+ *   - `java.md5Encode(s)` 要的是十六进制串 → `md5Hex`
+ *   - `Packages.java.security.MessageDigest.getInstance('MD5').digest(str.getBytes('UTF-8'))`
+ *     要的是**字节数组**，脚本自己再 `(b[i] & 0xff).toString(16)` 拼十六进制
+ *     （七猫小说·API 就是这么算签名的）
+ *
+ * 后者必须给出真正的字节：只给十六进制串的话脚本会按「字节」逐位处理它，
+ * 算出一个合法但完全错的签名，站点回 403 —— 又是一个静默错数据。
  */
-export function md5Hex(input: string): string {
-    const bytes = new TextEncoder().encode(input)
+export function md5Bytes(input: Uint8Array): Uint8Array {
+    const bytes = input
     const bitLength = bytes.length * 8
 
     // 补一个 0x80，再补 0 到 56 mod 64，最后接 8 字节的长度（小端）
@@ -101,5 +98,24 @@ export function md5Hex(input: string): string {
         d0 = (d0 + d) >>> 0
     }
 
-    return hexLE(a0) + hexLE(b0) + hexLE(c0) + hexLE(d0)
+    const out = new Uint8Array(16)
+    const outView = new DataView(out.buffer)
+    outView.setUint32(0, a0, true)
+    outView.setUint32(4, b0, true)
+    outView.setUint32(8, c0, true)
+    outView.setUint32(12, d0, true)
+    return out
+}
+
+/**
+ * MD5，返回 32 位小写十六进制
+ *
+ * 输入按 **UTF-8** 取字节 —— 与 Legado 的 `java.md5Encode` 一致；
+ * 直接对 JS 字符串按 UTF-16 取字节的话，含中文的输入会算出完全不同的结果。
+ */
+export function md5Hex(input: string): string {
+    const digest = md5Bytes(new TextEncoder().encode(input))
+    let out = ''
+    for (const byte of digest) out += byte.toString(16).padStart(2, '0')
+    return out
 }

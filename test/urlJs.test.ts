@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { findUrlJs, hasUrlJs } from '../src/legado/urlJs'
+import { applyOptionalSegments, findUrlJs, hasUrlJs } from '../src/legado/urlJs'
 
 /**
  * URL 字段里的 JS 定位。样例全部取自线上真实书源的 `searchUrl` 原文 ——
@@ -95,5 +95,47 @@ String(java.connect(so).raw().request().url());`
             '{{cookie.removeCookie(source.getKey())}}/search/?searchkey={{key}}',
         )
         expect(out?.code).toBe('result+\',{"webView":true}\'')
+    })
+})
+
+/**
+ * `<,...>` 可选段：Legado 里「第一页无页码」的简写。
+ * 线上典型形态是 `/latest/<,index_{{page}}.html>`（sjks88 等站的整组分类都这么写）。
+ */
+describe('applyOptionalSegments', () => {
+    it('第 1 页把整段丢掉 —— 这正是「第一页无页码」的含义', () => {
+        expect(applyOptionalSegments('/latest/<,index_{{page}}.html>', 1)).toBe('/latest/')
+    })
+
+    it('第 2 页起把尖括号剥掉、内容留下（{{page}} 交给模板展开）', () => {
+        expect(applyOptionalSegments('/latest/<,index_{{page}}.html>', 2)).toBe(
+            '/latest/index_{{page}}.html',
+        )
+    })
+
+    it('段出现在 URL 中间时同样只剥括号', () => {
+        expect(applyOptionalSegments('/dsyq/index<,_1>.html', 1)).toBe('/dsyq/index.html')
+        expect(applyOptionalSegments('/dsyq/index<,_1>.html', 3)).toBe('/dsyq/index_1.html')
+    })
+
+    it('一段里出现多个可选段时逐个处理', () => {
+        expect(applyOptionalSegments('/a<,_1>/b<,_2>', 1)).toBe('/a/b')
+        expect(applyOptionalSegments('/a<,_1>/b<,_2>', 2)).toBe('/a_1/b_2')
+    })
+
+    it('没有可选段时原样返回', () => {
+        expect(applyOptionalSegments('https://a.com/search?q={{key}}&p={{page}}', 1)).toBe(
+            'https://a.com/search?q={{key}}&p={{page}}',
+        )
+    })
+
+    it('不吞 <js> 块与其它尖括号 —— 只认 `<,`', () => {
+        const raw = '<js>url = source.key</js>'
+        expect(applyOptionalSegments(raw, 1)).toBe(raw)
+        expect(applyOptionalSegments('https://a.com/<div>', 1)).toBe('https://a.com/<div>')
+    })
+
+    it('page 缺省（undefined 视作 1）时也按第一页处理', () => {
+        expect(applyOptionalSegments('/latest/<,index_{{page}}.html>', 0)).toBe('/latest/')
     })
 })

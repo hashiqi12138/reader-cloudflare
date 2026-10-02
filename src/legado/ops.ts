@@ -81,6 +81,9 @@ export async function searchBooks(
     if (!source.searchUrl) throw new UpstreamError('书源未配置搜索地址（searchUrl）')
     if (!rule?.bookList) throw new UpstreamError('书源未配置书籍列表规则（ruleSearch.bookList）')
 
+    // 让 `@js:` 里的 `source` 全局与 jsLib 生效（见 engine/globals.ts）
+    ctx.source ??= source
+
     const page = ctx.page ?? 1
     const plan = await buildPlan(source.searchUrl, source, { ...ctx, key: keyword, page })
     const html = await fetchText(plan)
@@ -160,6 +163,7 @@ export async function fetchBookInfo(
         return { tocUrl: bookUrl, name: '', author: '', intro: '', coverUrl: '' }
     }
 
+    ctx.source ??= source
     const plan = await buildPlan(bookUrl, source, { ...ctx, baseUrl: bookUrl })
     const html = await fetchText(plan)
     const sel = rootSelection(html)
@@ -213,6 +217,8 @@ export async function fetchChapters(
 ): Promise<TocResult> {
     const rule = source.ruleToc
     if (!rule?.chapterList) throw new UpstreamError('书源未配置目录列表规则（ruleToc.chapterList）')
+
+    ctx.source ??= source
 
     const chapters: Chapter[] = []
     // 按地址去重：多页之间、以及站点的「最新章节」区块与完整目录之间都可能重复

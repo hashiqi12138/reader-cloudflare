@@ -14,6 +14,8 @@ import { findSource, listEnabledSources, listSources } from './data/sources'
 import type { RegistryOptions } from './data/sources'
 import { addToShelf, getProgress, listShelf, removeFromShelf, saveProgress } from './data/library'
 import type { AddToShelfInput, SaveProgressInput } from './data/library'
+import { addBookmark, listBookmarks, removeBookmark, updateBookmarkNote } from './data/bookmarks'
+import type { BookmarkInput } from './data/bookmarks'
 import {
     SESSION_TTL_MS,
     anonymousDataExists,
@@ -31,8 +33,8 @@ import { buildHomeSections, readHomeCache, writeHomeCache } from './data/home'
 import { DataError, bookKey } from './data/types'
 import { getOrCreateMediaSecret } from './data/settings'
 import { UnsupportedRuleError } from './engine/analyze'
-import { SOURCE_TYPE, type MediaLink } from './engine/types'
-import { SandboxError, runInSandbox } from './engine/js'
+import { SOURCE_TYPE, type MediaLink, type RuleContext } from './engine/types'
+import { SandboxError, createSandboxSession, runInSandbox, type SandboxSession } from './engine/js'
 import { parseHtml } from './engine/select'
 import { handleFixture } from './fixture'
 import { exploreBooks, listExploreCategories } from './legado/explore'
@@ -82,6 +84,21 @@ function fail(
 /** 本次请求的注册表选项 */
 function registryOf(env: Env): RegistryOptions {
     return { includeFixture: env.ENABLE_FIXTURE === 'true' }
+}
+
+/**
+ * 一次 API 调用要用到的规则求值上下文
+ *
+ * **每个请求创建一个沙箱会话**：一次请求里的所有书源求值共用它。
+ * 这是唯一可行的形状 —— 同一模块实例不能并发求值，而跨请求又不能互相等
+ * （Workers 禁止跨请求的 promise 链），细节见 `engine/js.ts` 的 `SandboxSession`。
+ *
+ * 用函数而不是让每个路由自己写 `{ baseUrl, sandbox }`：漏掉 `sandbox` 不会报错，
+ * 只会让那次求值临时多实例化一个 WASM 模块 —— 一种「能跑但更贵」的静默退化，
+ * 统一从这里出就能避免。
+ */
+function evalContext(source: { bookSourceUrl: string }, sandbox?: SandboxSession): RuleContext {
+    return { baseUrl: source.bookSourceUrl, sandbox: sandbox ?? createSandboxSession() }
 }
 
 /**
@@ -150,6 +167,7 @@ app.get('/api/probe', async (c) => {
                 {
                     result: cheerioText,
                 },
+                { session: createSandboxSession() },
             ),
         )
     } catch (err) {
@@ -369,6 +387,99 @@ app.put('/api/progress', async (c) => {
     }
 })
 
+/**
+ * 书签
+ *
+ * 与阅读进度是两件事：进度只有一条、跟着你走；书签是**攒下来的**，
+ * 一条一处，可以有很多条、可以带备注、可以被单独删掉。
+ * 因此接口按「一本书的全部书签」为单位读写，而不是像进度那样单条覆盖。
+ *
+ * 书签挂在账号上（与书架同源），所以每个动作都要先要身份。
+ */
+app.get('/api/bookmarks', async (c) => {
+    let owner: string
+    try {
+        owner = await ownerOf(c)
+    } catch (err) {
+        return fail(c, err)
+    }
+    const sourceId = c.req.query('sourceId') ?? ''
+    const bookUrl = c.req.query('bookUrl') ?? ''
+    if (sourceId === '' || bookUrl === '') {
+        return c.json({ error: '缺少 sourceId 或 bookUrl 参数' }, 400)
+    }
+
+    const bookmarks = await listBookmarks(c.env.DB, owner, bookKey(sourceId, bookUrl))
+    return c.json({ count: bookmarks.length, bookmarks })
+})
+
+app.post('/api/bookmarks', async (c) => {
+    let owner: string
+    try {
+        owner = await ownerOf(c)
+    } catch (err) {
+        return fail(c, err)
+    }
+
+    let body: BookmarkInput
+    try {
+        body = await c.req.json()
+    } catch {
+        return c.json({ error: '请求体必须是 JSON' }, 400)
+    }
+
+    try {
+        const bookmark = await addBookmark(c.env.DB, owner, body)
+        return c.json({ bookmark }, 201)
+    } catch (err) {
+        return fail(c, err)
+    }
+})
+
+/** 改备注。位置不动 —— 改位置等于换一处书签，那是删除再新增 */
+app.put('/api/bookmarks', async (c) => {
+    let owner: string
+    try {
+        owner = await ownerOf(c)
+    } catch (err) {
+        return fail(c, err)
+    }
+
+    let body: { id?: unknown; note?: unknown }
+    try {
+        body = await c.req.json()
+    } catch {
+        return c.json({ error: '请求体必须是 JSON' }, 400)
+    }
+    const id = typeof body.id === 'string' ? body.id : ''
+    if (id === '') return c.json({ error: '缺少 id' }, 400)
+
+    try {
+        const bookmark = await updateBookmarkNote(c.env.DB, owner, id, body.note)
+        return c.json({ bookmark })
+    } catch (err) {
+        return fail(c, err)
+    }
+})
+
+app.delete('/api/bookmarks', async (c) => {
+    let owner: string
+    try {
+        owner = await ownerOf(c)
+    } catch (err) {
+        return fail(c, err)
+    }
+    const id = c.req.query('id') ?? ''
+    if (id === '') return c.json({ error: '缺少 id 参数' }, 400)
+
+    try {
+        const removed = await removeBookmark(c.env.DB, owner, id)
+        return c.json({ removed: removed.id, chapterName: removed.chapterName })
+    } catch (err) {
+        return fail(c, err)
+    }
+})
+
 // ---------------------------------------------------------------- 账号
 
 /**
@@ -484,9 +595,7 @@ app.get('/api/explore', async (c) => {
     if (!source) return c.json({ error: `找不到书源：${sourceId}` }, 404)
 
     try {
-        const categories = await listExploreCategories(source, {
-            baseUrl: source.bookSourceUrl,
-        })
+        const categories = await listExploreCategories(source, evalContext(source))
         return c.json({
             sourceId: source.id,
             sourceName: source.bookSourceName,
@@ -510,9 +619,7 @@ app.get('/api/explore/books', async (c) => {
     if (target === '') return c.json({ error: '缺少 url 参数' }, 400)
 
     try {
-        const result = await exploreBooks(source, target, page, {
-            baseUrl: source.bookSourceUrl,
-        })
+        const result = await exploreBooks(source, target, page, evalContext(source))
         return c.json({
             sourceId: source.id,
             sourceName: source.bookSourceName,
@@ -589,12 +696,21 @@ app.post('/api/search', async (c) => {
     const all = await listEnabledSources(c.env.DB, origin, registryOf(c.env))
     const wanted = body.sourceIds?.length ? all.filter((s) => body.sourceIds!.includes(s.id)) : all
 
+    /**
+     * 全部书源共用**一个** session
+     *
+     * 书源之间是并发的（一个失败不影响别人），但沙箱求值会在 session 里串起来：
+     * 同一模块实例不能并发，而给每个源各开一个模块又会把 CPU 预算吃掉。
+     * 取网不经过沙箱，所以并发的收益仍然在。
+     */
+    const session = createSandboxSession()
+
     const results = await Promise.all(
         wanted.map(async (source) => {
             const started = Date.now()
             try {
                 const books = await searchBooks(source, keyword, {
-                    baseUrl: source.bookSourceUrl,
+                    ...evalContext(source, session),
                     key: keyword,
                 })
                 return {
@@ -637,7 +753,7 @@ app.get('/api/book', async (c) => {
     if (!target) return c.json({ error: '缺少 url 参数' }, 400)
 
     try {
-        const info = await fetchBookInfo(source, target, { baseUrl: source.bookSourceUrl })
+        const info = await fetchBookInfo(source, target, evalContext(source))
         return c.json({ sourceId: source.id, ...info })
     } catch (err) {
         return fail(c, err)
@@ -670,9 +786,7 @@ app.get('/api/toc', async (c) => {
             })
         }
 
-        const { chapters, warning } = await fetchChapters(source, target, {
-            baseUrl: source.bookSourceUrl,
-        })
+        const { chapters, warning } = await fetchChapters(source, target, evalContext(source))
         return c.json({
             sourceId: source.id,
             count: chapters.length,
@@ -818,9 +932,7 @@ app.get('/api/content', async (c) => {
     if (!target) return c.json({ error: '缺少 url 参数' }, 400)
 
     try {
-        const content = await fetchChapterContent(source, target, {
-            baseUrl: source.bookSourceUrl,
-        })
+        const content = await fetchChapterContent(source, target, evalContext(source))
         const head = { sourceId: source.id, url: target, kind: content.kind }
 
         switch (content.kind) {

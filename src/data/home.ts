@@ -16,6 +16,7 @@
  */
 
 import type { SearchBook } from '../engine/types'
+import { createSandboxSession } from '../engine/js'
 import { listExploreCategories, exploreBooks } from '../legado/explore'
 import type { BookSource } from '../engine/types'
 import { DataError } from './types'
@@ -131,18 +132,30 @@ export async function buildHomeSections<T extends BookSource>(
     const picked = ordered.slice(0, MAX_SOURCES)
     const failures: string[] = []
 
+    /**
+     * 整页推荐位共用一个沙箱会话
+     *
+     * 这一层是 `Promise.allSettled`：书源的发现页确实在并发取。
+     * 但沙箱求值不能并发（同一模块实例不允许），而给每个源各开一个模块
+     * 又会把 CPU 预算吃掉 —— 所以让它们共用**同一个 session**，
+     * 沙箱部分自动串起来，取网部分照旧并行。细节见 `engine/js.ts` 的 `SandboxSession`。
+     */
+    const session = createSandboxSession()
+
     const settled = await Promise.allSettled(
         picked.map((source) =>
             withTimeout(
                 (async (): Promise<HomeSection | null> => {
                     const categories = await listExploreCategories(source, {
                         baseUrl: source.bookSourceUrl,
+                        sandbox: session,
                     })
                     const category = pickCategory(categories)
                     if (!category) return null
 
                     const result = await exploreBooks(source, category.url, 1, {
                         baseUrl: source.bookSourceUrl,
+                        sandbox: session,
                     })
                     if (result.books.length === 0) return null
 

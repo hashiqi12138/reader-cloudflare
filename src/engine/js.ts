@@ -28,6 +28,10 @@
  *   - 限制内存与栈，并用中断回调挡住 `while(true){}`
  *   - 单独限制网络请求次数与总时限 —— 中断回调管不到宿主侧的等待，
  *     一段 `while(true){ java.ajax(...) }` 能靠发请求把 Worker 拖到超时
+ *
+ * 另外**同一个模块实例不能同时跑两次求值**（asyncify 的挂起状态挂在模块实例上），
+ * 而又不能让一个请求去等另一个请求（Workers 禁止跨请求的 promise 链）。
+ * 两条约束合起来只有「按请求隔离 + 请求内串行」这一个解，实现见下面 `SandboxSession`。
  */
 
 import {
@@ -41,8 +45,11 @@ import {
 } from 'quickjs-emscripten'
 
 import type { SandboxHttp } from './types'
+import { base64OfUtf8, bytesOfBase64, utf8OfBase64 } from '../lib/base64'
 import { DEFAULT_TIME_OFFSET_HOURS, formatJavaTime } from '../lib/javatime'
-import { md5Hex } from '../lib/hash'
+import { md5Bytes, md5Hex } from '../lib/hash'
+import { runSymmetric, type SymmetricRequest } from '../lib/symmetric'
+import { JsoupBridge } from './jsoupBridge'
 
 // 相对路径 import WASM：wrangler 会把它编译成 WebAssembly.Module 直接交给运行时。
 // 这是 Workers 上唯一可用的加载方式 —— 运行时既禁止 WebAssembly.compile，
@@ -69,16 +76,64 @@ const cloudflareVariant = newVariant(RELEASE_ASYNC, {
 })
 
 /**
- * QuickJS 的 WASM 模块只加载一次。
+ * 一次**请求**内的沙箱执行环境
  *
- * 这是模块级状态，但它是**不可变的编译产物**，不含任何请求数据，
- * 因此不违反「不要把请求态放进全局作用域」。
+ * 为什么是「每次请求一个」而不是全局共用一个
+ * -----------------------------------------
+ * 两个约束同时成立，只剩这一个可行解：
+ *
+ * 1. **一个模块实例上不能有两次求值同时进行。**
+ *    asyncify 的「正在挂起」标记挂在模块实例上（quickjs-emscripten 的
+ *    `QuickJSModuleCallbacks` 里有个 `suspended` 字段），第二次挂起直接抛
+ *    `Already suspended at: QuickJSAsyncifySuspended`；更糟的是它会把挂起状态弄坏，
+ *    之后同一模块实例上的求值全部失败，报的却是一句看不出所以然的
+ *    `SyntaxError: unexpected token: 'undefined'`。
+ *
+ * 2. **不能让一个请求去等另一个请求。**
+ *    Workers 明确禁止跨请求的 promise 链：一旦请求 A 的 promise 在 A 结束之后
+ *    才 resolve 到请求 B 的续体上，运行时会警告
+ *    「A promise was resolved or rejected from a different request context…」，
+ *    并把请求取消。所以「全局串行队列」「全局槽位池排队」这类写法**全都不能用** ——
+ *    都会让后来的请求挂在先前请求的 promise 上。
+ *
+ * 合起来就是：**请求内串行，请求间互不相干**。
+ * 于是每个请求拿一个自己的 session：内部一条串行链（保证同一模块上不会并发），
+ * 请求结束随之废弃（不会跨请求）。网络取网不在沙箱里，仍然照常并行 ——
+ * 被串起来的只是沙箱求值本身。
+ *
+ * 实测（`scripts/probe-concurrency.mjs`，同一书源 6 并发 + 6 串行）：
+ * 全局共享一个模块 = 并发 0/6、之后串行 0/6；改成按请求隔离后 = 并发 6/6、串行 6/6。
+ * 「多开几个模块做全局池」也不行 —— 池子一旦排满，后来的请求就要排队等待，
+ * 又踩回第 2 条。
  */
-let quickJsModule: Promise<QuickJSAsyncWASMModule> | null = null
+export interface SandboxSession {
+    /** 本会话的模块实例，第一次用到时才创建 */
+    module: Promise<QuickJSAsyncWASMModule>
+    /** 本会话内的串行链（只在本请求的上下文里串，不会跨请求） */
+    queue: Promise<unknown>
+}
 
-function loadQuickJS(): Promise<QuickJSAsyncWASMModule> {
-    quickJsModule ??= newQuickJSAsyncWASMModule(cloudflareVariant)
-    return quickJsModule
+export function createSandboxSession(): SandboxSession {
+    let module: Promise<QuickJSAsyncWASMModule> | null = null
+    return {
+        // 懒创建：只读「书源列表」这类请求根本不进沙箱，
+        // 不该为它们白实例化一个 WASM 模块（实例化不便宜，见上面那段说明）
+        get module() {
+            module ??= newQuickJSAsyncWASMModule(cloudflareVariant)
+            return module
+        },
+        queue: Promise.resolve(),
+    }
+}
+
+/** 在会话内串行执行；闸门不会因为某次失败而断掉 */
+function withSession<T>(session: SandboxSession, task: () => Promise<T>): Promise<T> {
+    const run = session.queue.then(task, task)
+    session.queue = run.then(
+        () => undefined,
+        () => undefined,
+    )
+    return run
 }
 
 /** 沙箱执行失败时抛这个，便于上层区分「规则写错」与「网络失败」 */
@@ -100,6 +155,20 @@ const JAVA_PRELUDE = `
 var java = {
   base64Encode: function (s) { return __host.b64encode(String(s)) },
   base64Decode: function (s) { return __host.b64decode(String(s)) },
+
+  // 解出来的是**原始字节**，不是字符串。
+  // 用途几乎只有一个：把书源里写死的 base64 密钥/偏移量变回字节数组交给 AES
+  // （base64DecodeToByteArray(KEY_BASE64)）。做成字符串再转回去的话，
+  // 二进制密钥会被 UTF-8 解码器替换成 U+FFFD，密钥就废了 —— 而症状是解密失败/乱码，
+  // 完全看不出是解码方式的问题。线上 10 处用到它。
+  base64DecodeToByteArray: function (s) {
+    var raw = __host.base64Bytes(String(s))
+    var res = JSON.parse(raw)
+    if (!res.ok) { throw new Error(res.error) }
+    return res.value
+  },
+  // 字符串按 UTF-8 取字节（有的书源用它把字符串密钥转成字节）
+  strToBytes: function (s) { return JSON.parse(__host.utf8Bytes(String(s))) },
   encodeURI: function (s) { return encodeURIComponent(String(s)) },
   htmlFormat: function (s) { return String(s).replace(/<[^>]*>/g, '') },
   log: function (s) { __host.log(String(s)) },
@@ -150,6 +219,27 @@ var java = {
     return res.value
   },
 
+  // 把一条规则求值成**节点集**（org.jsoup 的 Elements）
+  //
+  // 与 getString 同一个套路：命中哪些节点只有规则求值层知道，所以宿主侧求值、
+  // 把每个节点的 outerHTML 交回来，这边再解析成 Elements。
+  // 线上 32 处 getElements + 9 处 getElement，写法横跨 CSS、JSOUP 简写与 XPath，
+  // 都由规则求值层统一处理，这里不做方言判断。
+  getElements: function (rule, content) {
+    var raw = __host.getElements(JSON.stringify([
+      String(rule),
+      content === undefined || content === null ? null : String(content),
+    ]))
+    var res = JSON.parse(raw)
+    if (!res.ok) { throw new Error(res.error) }
+    var reply = __jsoupCall('parseFragments', null, [res.value])
+    return reply.handle === null ? new JsoupElements(0) : new JsoupElements(reply.handle)
+  },
+  getElement: function (rule, content) {
+    var all = java.getElements(rule, content)
+    return all.size() > 0 ? all.first() : null
+  },
+
   // 时间格式化是纯计算，走同步桥 —— 实现放在宿主侧，好在 Node 里直接测
   timeFormat: function (time, format) {
     return __host.timeFormat(time, format === undefined || format === null ? null : String(format), null)
@@ -182,6 +272,491 @@ var java = {
     }
     return out
   },
+  getStringList: function (rule, content) {
+    var joined = java.getString(rule, content)
+    if (joined === '') return []
+    return String(joined).split('\\n')
+  },
+  // 连接式取网。Legado 的形状是 java.connect(url).header(k,v).get().body()
+  connect: function (url) {
+    var self = { url: String(url), method: 'GET', headers: {}, bodyText: null }
+    var api = {
+      url: function (u) { self.url = String(u); return api },
+      header: function (k, v) { self.headers[String(k)] = String(v); return api },
+      headers: function (o) { for (var k in o) { self.headers[k] = String(o[k]) } return api },
+      method: function (m) { self.method = String(m).toUpperCase(); return api },
+      timeout: function () { return api },
+      get: function () { return result() },
+      post: function (body) {
+        self.method = 'POST'
+        self.bodyText = body === undefined || body === null ? '' : String(body)
+        return result()
+      },
+      body: function () {
+        return java.__req({
+          url: self.url,
+          method: self.method,
+          body: self.bodyText === null ? undefined : self.bodyText,
+          headers: self.headers,
+        })
+      },
+    }
+    function result() { return api }
+    return api
+  },
+  // 中文数字转阿拉伯数字（toNumChapter('第一百二十三章') -> 123）。纯计算，无需桥
+  toNumChapter: function (text) {
+    var s = String(text)
+    var digits = { '零': 0, '〇': 0, '一': 1, '壹': 1, '二': 2, '两': 2, '贰': 2, '三': 3, '叁': 3, '四': 4, '肆': 4, '五': 5, '伍': 5, '六': 6, '陆': 6, '七': 7, '柒': 7, '八': 8, '捌': 8, '九': 9, '玖': 9 }
+    var units = { '十': 10, '拾': 10, '百': 100, '佰': 100, '千': 1000, '仟': 1000 }
+    var found = String(s).match(/[零〇一壹二两贰三叁四肆五伍六陆七柒八捌九玖十拾百佰千仟万萬亿億]+/)
+    if (!found) return s
+    var num = 0, section = 0, current = 0, matched = false
+    var word = found[0]
+    for (var i = 0; i < word.length; i++) {
+      var ch = word.charAt(i)
+      if (digits[ch] !== undefined) { current = digits[ch]; matched = true; continue }
+      if (ch === '万' || ch === '萬') { num += (section + current) * 10000; section = 0; current = 0; matched = true; continue }
+      if (ch === '亿' || ch === '億') { num = (num + section + current) * 100000000; section = 0; current = 0; matched = true; continue }
+      var unit = units[ch]
+      if (unit === undefined) continue
+      // 十五 是 15 而不是 105：十前面没有数字时按 1 算
+      section += (current === 0 ? 1 : current) * unit
+      current = 0
+      matched = true
+    }
+    if (!matched) return s
+    var value = num + section + current
+    if (value <= 0) return s
+    return s.replace(word, String(value))
+  },
+  // 对称加解密。算法与形状都在宿主侧（src/lib/aes.ts + symmetric.ts），
+  // 这里只是把「方法名 + 参数」打包送过去 —— 同步桥，脚本里是普通函数调用。
+  //
+  // Legado 的形状：createSymmetricCrypto(transformation, key, iv) 返回一个对象，
+  // 上面有 encrypt / decrypt / encryptBase64 / decryptBase64 /
+  // encryptBase64ToString / decryptBase64ToString / encryptHex / decryptHex。
+  // 线上 14 处 createSymmetricCrypto + 18 处 aesBase64DecodeToString。
+  __crypto: function (op, transformation, key, iv, data) {
+    var raw = __host.crypto(JSON.stringify({
+      op: String(op),
+      transformation: String(transformation),
+      key: key,
+      iv: iv === undefined ? null : iv,
+      data: data,
+    }))
+    var res = JSON.parse(raw)
+    if (!res.ok) { throw new Error(res.error) }
+    return res.value
+  },
+  createSymmetricCrypto: function (transformation, key, iv) {
+    var tf = String(transformation)
+    var k = key
+    var v = iv === undefined ? null : iv
+    function call(op, data) { return java.__crypto(op, tf, k, v, data) }
+    return {
+      encrypt: function (data) { return call('encrypt', data) },
+      decrypt: function (data) { return call('decrypt', data) },
+      encryptBase64: function (data) { return call('encryptBase64', data) },
+      decryptBase64: function (data) { return call('decryptBase64', data) },
+      encryptBase64ToString: function (data) { return call('encryptBase64ToString', data) },
+      decryptBase64ToString: function (data) { return call('decryptBase64ToString', data) },
+      encryptHex: function (data) { return call('encryptHex', data) },
+      decryptHex: function (data) { return call('decryptHex', data) },
+    }
+  },
+  // aesBase64DecodeToString(data, key, transformation, iv) —— 参数顺序与 Legado 一致
+  aesBase64DecodeToString: function (data, key, transformation, iv) {
+    return java.__crypto('decryptBase64ToString', transformation, key, iv, data)
+  },
+  aesDecodeToString: function (data, key, transformation, iv) {
+    return java.__crypto('decryptHex', transformation, key, iv, data)
+  },
+  aesEncodeToString: function (data, key, transformation, iv) {
+    return java.__crypto('encryptHex', transformation, key, iv, data)
+  },
+  aesBase64EncodeToString: function (data, key, transformation, iv) {
+    return java.__crypto('encryptBase64ToString', transformation, key, iv, data)
+  },
+
+  // 简繁转换。**没有字典表就不做**：原样返回并记一条日志。
+  //
+  // 为什么不塞一张「常用字」小表：转换是**逐字映射**，表不全就会出现「半简半繁」
+  // 的正文 —— 那比整篇繁体更让人以为是站点排版坏了。而完整的对照表（OpenCC 的
+  // TSCharacters 有五千多条，含大量罕用字）不适合手抄进源码，抄错几个字的代价
+  // 是静默给出错字。所以宁可不转，也不给一个看起来像那么回事的半成品。
+  t2s: function (s) { __host.log('[t2s] 未做简繁转换，原样返回'); return String(s) },
+  s2t: function (s) { __host.log('[s2t] 未做简繁转换，原样返回'); return String(s) },
+
+  // 以下都需要 WebView / 浏览器，本引擎没有对应能力。
+  // **明确报错**，而不是给一个空实现 —— 空实现会让书源表现成
+  // 「规则跑通了但一本书都没有」，那是最难定位的一类症状。
+  webView: function () { throw new Error('本引擎不支持 java.webView（需要 WebView 渲染）') },
+  startBrowserAwait: function () { throw new Error('本引擎不支持 java.startBrowserAwait（需要浏览器）') },
+  startBrowser: function () { throw new Error('本引擎不支持 java.startBrowser（需要浏览器）') },
+  setContent: function () { throw new Error('本引擎不支持 java.setContent（需要 WebView）') },
+  getFile: function () { throw new Error('本引擎不支持 java.getFile（没有可持久化的文件系统）') },
+  queryTTF: function () { throw new Error('本引擎不支持 java.queryTTF（字体混淆）') },
+  alert: function (s) { __host.log('[alert] ' + String(s)) },
+  logType: function (s) { __host.log(String(s)) },
+}
+`
+
+/**
+ * 书源脚本里那几个「全局对象」：`source` / `cookie` / `cache` / `infoMap` /
+ * `org.jsoup` / `Packages`
+ *
+ * 放在 java 之后单独一段，是因为它依赖 java（`source.refreshExplore` 要调它），
+ * 而 java 又必须先用上 `__host`。
+ *
+ * 三个刻意的取舍：
+ *   1. **cookie 与 cache 只在本次求值里存在**。它们是内存对象，求值结束就销毁。
+ *      真正的跨规则持久化需要一张表 + 按书源隔离，这里没有做 ——
+ *      书源里绝大多数用法是「同一段脚本里先存后取」，内存版足够。
+ *   2. **`Packages` 只实现了 MD5 那几个类**。`Packages.java.xxx` 是 Java 反射桥，
+ *      引擎里没有 JVM；没实现的类一律**报出类名**，让失败原因可归类。
+ *   3. **`org.jsoup` 的写操作是空实现**。节点集在宿主侧是共享对象，
+ *      改它会串到同一份文档的其它句柄上（jsoup 在 Java 里是深拷贝语义），
+ *      宁可不改也不改错。
+ */
+const GLOBALS_PRELUDE = `
+// ---------------------------------------------------------------- 工具
+
+function __toJavaMap(text) {
+  var out = {}
+  try {
+    var parsed = JSON.parse(String(text === undefined || text === null ? '' : text) || '{}')
+    if (parsed && typeof parsed === 'object') {
+      for (var k in parsed) out[k] = String(parsed[k])
+    }
+  } catch (e) {}
+  out.get = function (k) { var v = out[String(k)]; return v === undefined ? '' : v }
+  out.put = function (k, v) { out[String(k)] = String(v) }
+  out.containsKey = function (k) { return Object.prototype.hasOwnProperty.call(out, String(k)) }
+  return out
+}
+
+// ---------------------------------------------------------------- source
+
+var source = (function () {
+  var data = globalThis.__source || {}
+  var vars = {}
+  try {
+    var raw = globalThis.__sourceVars
+    if (raw) vars = JSON.parse(String(raw)) || {}
+  } catch (e) { vars = {} }
+
+  var obj = {}
+  for (var k in data) {
+    if (k === 'key') continue
+    obj[k] = data[k]
+  }
+  obj.key = data.key === undefined || data.key === null ? '' : String(data.key)
+
+  obj.getKey = function () { return String(obj.key || '') }
+  obj.getVariable = function (name) {
+    // 不带参数时返回**整个变量表的 JSON 串** —— 七猫小说·API 就是这么读的
+    if (name === undefined || name === null) return JSON.stringify(vars)
+    var v = vars[String(name)]
+    return v === undefined || v === null ? '' : String(v)
+  }
+  obj.setVariable = function (name, value) {
+    vars[String(name)] = value === undefined || value === null ? '' : String(value)
+  }
+  obj.putVariable = obj.setVariable
+  obj.get = obj.getVariable
+  obj.put = obj.setVariable
+  obj.getVariableMap = function () { return vars }
+  obj.getHeaderMap = function () { return __toJavaMap(obj.header) }
+  obj.getLoginHeader = function () { return String(obj.__loginHeader || '') }
+  obj.getLoginHeaderMap = function () { return __toJavaMap(obj.__loginHeader) }
+  obj.putLoginHeader = function (header) {
+    obj.__loginHeader = header === undefined || header === null ? '' : String(header)
+  }
+  obj.getLoginInfoMap = function () { return {} }
+  obj.putLoginInfo = function () {}
+  obj.refreshExplore = function () { java.refreshExplore() }
+  obj.setExploreScreen = function () {}
+  return obj
+})()
+
+// ---------------------------------------------------------------- cookie / cache
+//
+// 只在本次求值内有效（见上面 GLOBALS_PRELUDE 的说明）。取不到时返回空串，
+// 与 Legado 的语义一致 —— 返回 null 会让 cookie.getCookie(u).length 这类写法报错。
+
+var cookie = (function () {
+  var jar = {}
+  return {
+    getCookie: function (url) { var v = jar[String(url)]; return v === undefined ? '' : v },
+    setCookie: function (url, value) { jar[String(url)] = String(value) },
+    replaceCookie: function (url, value) { jar[String(url)] = String(value) },
+    removeCookie: function (url) { delete jar[String(url)] },
+    getCookieMap: function () { return jar },
+  }
+})()
+
+var cache = (function () {
+  var memory = {}
+  return {
+    get: function (name) { var v = memory[String(name)]; return v === undefined ? '' : v },
+    put: function (name, value) { memory[String(name)] = String(value) },
+    getFromMemory: function (name) { var v = memory[String(name)]; return v === undefined ? '' : v },
+    putMemory: function (name, value) { memory[String(name)] = String(value) },
+    delete: function (name) { delete memory[String(name)] },
+    deleteMemory: function (name) { delete memory[String(name)] },
+    // 文件缓存要落盘，服务端没有可持久化的私有文件系统：明确返回空
+    getFile: function () { return '' },
+    putFile: function () {},
+    getFileUrl: function () { return '' },
+    putFileUrl: function () {},
+  }
+})()
+
+/** 发现页筛选器的当前选择。我们不做那套交互界面，所以是空的，脚本会落到自己写的默认值 */
+var infoMap = globalThis.__infoMap || {}
+
+// ---------------------------------------------------------------- org.jsoup
+
+function __jsoupCall(op, handleId, args) {
+  var raw = __host.jsoup(JSON.stringify({
+    op: op,
+    handle: handleId === undefined || handleId === null ? null : handleId,
+    args: args || [],
+  }))
+  var reply = JSON.parse(raw)
+  if (!reply.ok) throw new Error(reply.error)
+  return reply
+}
+
+function JsoupElements(id) { this.__id = id }
+
+var JS_METHODS = [
+  'select', 'get', 'first', 'last', 'eq', 'children', 'child', 'childNodeSize',
+  'parent', 'parents', 'nextElementSibling', 'prevElementSibling', 'nextAll', 'prevAll',
+  'siblingElements', 'not', 'filter', 'clone', 'has', 'is',
+  'size', 'isEmpty', 'text', 'ownText', 'textNodes', 'eachText',
+  'html', 'outerHtml', 'attr', 'hasAttr', 'val', 'className', 'hasClass',
+  'tagName', 'id', 'index', 'matches', 'matchesOwn',
+  'remove', 'addClass', 'removeClass', 'append', 'prepend',
+]
+for (var __i = 0; __i < JS_METHODS.length; __i++) {
+  (function (name) {
+    JsoupElements.prototype[name] = function () {
+      var reply = __jsoupCall(name, this.__id, Array.prototype.slice.call(arguments))
+      if (reply.kind === 'handle') return reply.handle === null ? null : new JsoupElements(reply.handle)
+      return reply.value
+    }
+  })(JS_METHODS[__i])
+}
+JsoupElements.prototype.toString = function () {
+  return String(__jsoupCall('toString', this.__id, []).value)
+}
+JsoupElements.prototype.toArray = function () {
+  var out = []
+  for (var i = 0; i < this.size(); i++) out.push(this.get(i))
+  return out
+}
+// 书源里偶尔用 .eachText() 的返回值当数组迭代，这里保证它一定是数组
+JsoupElements.prototype.copy = function () { return this.clone() }
+
+/**
+ * 把一段 HTML 包成「字符串 + jsoup 方法」
+ *
+ * Legado 的字段规则里 result 有两种用法，而且**同一条书源里都会出现**：
+ *
+ *   @js:JSON.parse(result).data        当成字符串（44 处）
+ *   @js:result.select('h3').text()     当成 jsoup 对象（18 处）
+ *
+ * 只用字符串的话，第二种会在 String.prototype.select is not a function 上炸掉 ——
+ * 而报错行号指向规则第一行，看不出缺的是「result 不是对象」。
+ *
+ * 所以这里用 new String(html) 作为底座：它仍是字符串（JSON.parse、String()、
+ * indexOf、replace 全都照常），只是额外挂了 jsoup 的那几个方法。
+ * 只有脚本真的写了 result.select(...) 才这么包（见 analyze.ts 的 resultGlobals），
+ * 以免 typeof result 从 'string' 变成 'object'。
+ */
+function __htmlApi(html) {
+  var cached = null
+  function doc() {
+    if (cached === null) cached = org.jsoup.Jsoup.parse(html)
+    return cached
+  }
+  var api = {}
+  var methods = [
+    'select', 'get', 'first', 'last', 'eq', 'children', 'child', 'childNodeSize',
+    'parent', 'parents', 'nextElementSibling', 'prevElementSibling', 'nextAll', 'prevAll',
+    'siblingElements', 'not', 'filter', 'has', 'is',
+    'size', 'isEmpty', 'text', 'ownText', 'textNodes', 'eachText',
+    'html', 'outerHtml', 'attr', 'hasAttr', 'val', 'className', 'hasClass',
+    'tagName', 'id', 'index', 'matches', 'matchesOwn',
+  ]
+  for (var i = 0; i < methods.length; i++) {
+    (function (name) {
+      api[name] = function () {
+        return doc()[name].apply(doc(), arguments)
+      }
+    })(methods[i])
+  }
+  api.toString = function () { return html }
+  return api
+}
+
+function __boxHtml(value) {
+  var text = String(value === undefined || value === null ? '' : value)
+  var boxed = new String(text)
+  var api = __htmlApi(text)
+  for (var k in api) boxed[k] = api[k]
+  return boxed
+}
+
+var org = {
+  jsoup: {
+    Jsoup: {
+      parse: function (html) { return new JsoupElements(__jsoupCall('parse', null, [String(html)]).handle) },
+      parseBodyFragment: function (html) {
+        return new JsoupElements(__jsoupCall('parseBodyFragment', null, [String(html)]).handle)
+      },
+      clean: function (html) { return String(__jsoupCall('clean', null, [String(html)]).value) },
+    },
+    nodes: {},
+    select: {},
+  },
+}
+
+// ---------------------------------------------------------------- Packages
+//
+// Java 反射桥。引擎里没有 JVM，所以只按需实现「书源真正会用到的那几个类」：
+// MD5 签名（七猫小说·API）、String.getBytes、System.currentTimeMillis、Base64。
+// 其余一律抛出**带类名**的错误，让「不支持」与「规则写错」分得开。
+
+var Packages = (function () {
+  function JString(value) {
+    var self = this instanceof JString ? this : {}
+    var text = value === undefined || value === null ? '' : String(value)
+    self.length = function () { return text.length }
+    self.getBytes = function () { return JSON.parse(__host.utf8Bytes(text)) }
+    self.toString = function () { return text }
+    self.substring = function (a, b) {
+      return b === undefined ? text.substring(a) : text.substring(a, b)
+    }
+    self.replace = function (a, b) { return String(text).split(String(a)).join(String(b)) }
+    return self
+  }
+
+  function JStringBuilder() {
+    var buffer = ''
+    return {
+      append: function (x) { buffer += String(x); return this },
+      toString: function () { return buffer },
+      length: function () { return buffer.length },
+      reverse: function () { buffer = buffer.split('').reverse().join(''); return this },
+    }
+  }
+
+  function bytesOf(value) {
+    if (value && typeof value === 'object' && typeof value.length === 'number') {
+      var out = []
+      for (var i = 0; i < value.length; i++) out.push(Number(value[i]) & 0xff)
+      return out
+    }
+    return JSON.parse(__host.utf8Bytes(String(value === undefined || value === null ? '' : value)))
+  }
+
+  function digest(algorithm, bytes) {
+    var raw = __host.digest(JSON.stringify([String(algorithm), bytesOf(bytes)]))
+    var reply = JSON.parse(raw)
+    if (!reply.ok) throw new Error(reply.error)
+    return reply.value
+  }
+
+  function unsupported(className) {
+    var message = '本引擎不支持 Java 类 ' + className + '（引擎内没有 JVM）'
+    return new Proxy({}, {
+      get: function () { throw new Error(message) },
+    })
+  }
+
+  return {
+    java: {
+      lang: {
+        String: JString,
+        StringBuilder: JStringBuilder,
+        System: {
+          currentTimeMillis: function () { return Date.now() },
+          getProperty: function (name) { return String(name) === 'line.separator' ? '\\n' : '' },
+          arraycopy: function () {},
+        },
+        Thread: { sleep: function () {} },
+        Integer: {
+          parseInt: function (s) { var n = parseInt(String(s), 10); return isNaN(n) ? 0 : n },
+          toHexString: function (n) { return (Number(n) >>> 0).toString(16) },
+          valueOf: function (s) { return parseInt(String(s), 10) || 0 },
+        },
+        Long: { parseLong: function (s) { return parseInt(String(s), 10) || 0 } },
+        Math: { max: Math.max, min: Math.min, abs: Math.abs, floor: Math.floor, ceil: Math.ceil, round: Math.round, random: Math.random, pow: Math.pow },
+        Character: { toString: function (c) { return String(c) } },
+      },
+      security: {
+        MessageDigest: {
+          getInstance: function (algorithm) {
+            return {
+              digest: function (bytes) { return digest(algorithm, bytes) },
+              update: function () {},
+            }
+          },
+        },
+      },
+      util: {
+        Base64: {
+          getEncoder: function () {
+            return {
+              encodeToString: function (bytes) {
+                var arr = bytesOf(bytes)
+                var text = ''
+                for (var i = 0; i < arr.length; i++) text += String.fromCharCode(arr[i])
+                return java.base64Encode(text)
+              },
+              encode: function (bytes) { return this.encodeToString(bytes) },
+            }
+          },
+          getDecoder: function () {
+            return {
+              decode: function (s) {
+                var text = java.base64Decode(String(s))
+                var out = []
+                for (var i = 0; i < text.length; i++) out.push(text.charCodeAt(i) & 0xff)
+                return out
+              },
+            }
+          },
+        },
+        Arrays: {
+          asList: function () { return Array.prototype.slice.call(arguments) },
+          sort: function (arr) { if (arr && arr.sort) arr.sort(); return arr },
+        },
+        HashMap: function () { return __toJavaMap('{}') },
+        UUID: { randomUUID: function () { return String(Math.random()).slice(2) + String(Date.now()) } },
+        Objects: { toString: function (o) { return String(o) } },
+      },
+      math: { BigDecimal: function (v) { return Number(v) } },
+      net: { URLEncoder: { encode: function (s, cs) { return encodeURIComponent(String(s)) } } },
+      io: { File: function (path) { this.path = String(path); this.exists = function () { return false } } },
+      lang_reflect: {},
+    },
+    javafx: unsupported('javafx.*'),
+    android: unsupported('android.*'),
+    javax: unsupported('javax.*'),
+    org: unsupported('Packages.org.*'),
+  }
+})()
+
+// ---------------------------------------------------------------- result 的两种语义
+//
+// 只有脚本真的把 result 当 jsoup 对象用（result.select(...)）时，
+// analyze.ts 才会把 __resultAsJsoup 置为 true。放在最后，因为要用到上面的 org.jsoup。
+if (globalThis.__resultAsJsoup && typeof globalThis.result === 'string') {
+  globalThis.result = __boxHtml(globalThis.result)
 }
 `
 
@@ -195,6 +770,14 @@ var java = {
  */
 export type SandboxGetString = (rule: string, content?: string) => Promise<string>
 
+/**
+ * `java.getElements(规则)` 的能力：把规则求值成**一串节点的 outerHTML**
+ *
+ * 由规则求值层注入（命中哪些节点只有那一层知道）。返回 outerHTML 而不是节点对象，
+ * 是因为节点跨不了沙箱边界 —— 脚本那侧用 `org.jsoup` 的桥把它解析回 Elements。
+ */
+export type SandboxGetElements = (rule: string, content?: string) => Promise<string[]>
+
 export interface SandboxLimits {
     /** 脚本执行时限（毫秒） */
     timeoutMs?: number
@@ -204,6 +787,27 @@ export interface SandboxLimits {
     http?: SandboxHttp
     /** 规则求值能力；不传时 java.getString 会明确报错 */
     getString?: SandboxGetString
+    /** 节点级规则求值能力；不传时 java.getElements 会明确报错 */
+    getElements?: SandboxGetElements
+    /**
+     * 本次求值所属的会话（按请求隔离，见 `SandboxSession` 的说明）
+     *
+     * 不传会临时开一个只服务于本次求值的会话：结果正确，但会白多实例化一个
+     * WASM 模块，所以真实调用路径都从 `RuleContext.sandbox` 传进来。
+     */
+    session?: SandboxSession
+    /**
+     * 书源自带的 JS 库（`jsLib`），会在规则代码之前先跑一遍
+     *
+     * 线上 35 条带发现页的书源有它，而且那些源里 `GetUL()`、`host()`、`QM_HEADERS`
+     * 之类的名字**全部来自这里**。不先执行它，规则里的这些名字一个都不存在，
+     * 报出来的却是一句与 jsLib 毫无关系的「'host' is not defined」。
+     *
+     * 它执行失败**不会**直接中断本次求值：很多库是「先定义函数、后面才算常量」，
+     * 即使中途失败，已定义的部分仍然有用。失败原因会挂在 `__jsLibError` 上，
+     * 规则本身也失败时一并附在错误信息里。
+     */
+    preludeJs?: string
 }
 
 /**
@@ -218,15 +822,33 @@ export async function runInSandbox(
     globals: Record<string, unknown>,
     limits: SandboxLimits = {},
 ): Promise<unknown> {
+    /**
+     * 会话由调用方按请求注入。
+     *
+     * 没注入时**临时开一个只有本次求值的会话**：这是「忘了传」时的兜底 ——
+     * 正确（不与任何人共享模块）但会多实例化一个 WASM 模块，所以真实调用路径
+     * 都应当从 `RuleContext.sandbox` 传进来。
+     */
+    const session = limits.session ?? createSandboxSession()
+    return withSession(session, () => executeInSandbox(session.module, code, globals, limits))
+}
+
+async function executeInSandbox(
+    modulePromise: Promise<QuickJSAsyncWASMModule>,
+    code: string,
+    globals: Record<string, unknown>,
+    limits: SandboxLimits,
+): Promise<unknown> {
     const timeoutMs = limits.timeoutMs ?? DEFAULT_TIMEOUT_MS
     const memoryLimit = limits.memoryLimitBytes ?? DEFAULT_MEMORY_LIMIT
     const stackLimit = limits.stackLimitBytes ?? DEFAULT_STACK_LIMIT
     const http = limits.http
     const getString = limits.getString
+    const getElements = limits.getElements
     const totalTimeoutMs = http?.totalTimeoutMs ?? DEFAULT_TOTAL_TIMEOUT_MS
     const maxHttpCalls = http?.maxCalls ?? DEFAULT_MAX_HTTP_CALLS
 
-    const QuickJS = await loadQuickJS()
+    const QuickJS = await modulePromise
 
     const runtime = QuickJS.newRuntime()
     runtime.setMemoryLimit(memoryLimit)
@@ -278,11 +900,117 @@ export async function runInSandbox(
             fn.dispose()
         }
 
-        defineHostFn('b64encode', (arg) => vm.newString(btoa(String(vm.dump(arg)))))
-        defineHostFn('b64decode', (arg) => vm.newString(atob(String(vm.dump(arg)))))
+        /**
+         * base64 编解码**按 UTF-8 字节**做
+         *
+         * 直接用 `btoa(str)` 是错的：它只接受 Latin1 范围内的字符，
+         * 碰到中文直接抛 `InvalidCharacterError`。而书源里对中文做 base64
+         * 恰恰是最常见的用法（拼签名、拼请求体）。全量探测里就有一条源
+         * （晋江文学）栽在这上面，报的还是 `btoa() can only operate on characters
+         * in the Latin1 range` 这种与书源毫无关系的错。
+         */
+        defineHostFn('b64encode', (arg) => vm.newString(base64OfUtf8(String(vm.dump(arg)))))
+        defineHostFn('b64decode', (arg) => {
+            try {
+                return vm.newString(utf8OfBase64(String(vm.dump(arg))))
+            } catch {
+                // 不是合法 base64：给空串，让后续规则报「取不到内容」，
+                // 而不是让宿主抛异常把整次求值带走
+                return vm.newString('')
+            }
+        })
+
+        /**
+         * base64 → **原始字节**（JSON 数组）
+         *
+         * 与 `b64decode` 分开是必要的：那个解成 UTF-8 字符串，二进制密钥
+         * 过一遍就会变成 U+FFFD。书源拿字节数组当 AES 的 key/iv，必须是原样的字节。
+         */
+        defineHostFn('base64Bytes', (arg) => {
+            let reply: { ok: boolean; value?: number[]; error?: string }
+            try {
+                reply = { ok: true, value: Array.from(bytesOfBase64(String(vm.dump(arg)))) }
+            } catch (err) {
+                reply = { ok: false, error: err instanceof Error ? err.message : String(err) }
+            }
+            return vm.newString(JSON.stringify(reply))
+        })
         defineHostFn('md5', (arg) => vm.newString(md5Hex(String(vm.dump(arg)))))
+
+        /**
+         * 对称加解密（同步桥）
+         *
+         * 算法与形状都在宿主侧（`lib/aes.ts` 纯计算 + `lib/symmetric.ts` 形状适配），
+         * 这里只做「JSON 进、JSON 出」。放在宿主侧的原因：WebCrypto 是异步的，
+         * 而书源里 `createSymmetricCrypto(...)` 是同步用法。
+         *
+         * 出错走 `{ok:false}` 交给脚本侧抛 —— 密钥不对、算法不支持这类问题
+         * 必须让书源看见，而不是解出一段乱码。
+         */
+        defineHostFn('crypto', (arg) => {
+            let reply: { ok: boolean; value?: number[] | string; error?: string }
+            try {
+                const request = JSON.parse(String(vm.dump(arg))) as SymmetricRequest
+                reply = { ok: true, value: runSymmetric(request) }
+            } catch (err) {
+                reply = { ok: false, error: err instanceof Error ? err.message : String(err) }
+            }
+            return vm.newString(JSON.stringify(reply))
+        })
         defineHostFn('log', (arg) => {
             logs.push(String(vm.dump(arg)))
+        })
+
+        /**
+         * UTF-8 字节。同步桥 —— `Packages.java.lang.String.getBytes()` 用它。
+         *
+         * 返回 JSON 数组而不是别的形状：脚本侧要拿它当「Java 字节数组」用
+         * （`b.length`、`b[i]`），普通 JS 数组正好满足。
+         */
+        defineHostFn('utf8Bytes', (arg) =>
+            vm.newString(
+                JSON.stringify(Array.from(new TextEncoder().encode(String(vm.dump(arg))))),
+            ),
+        )
+
+        /**
+         * 摘要的原始字节。目前只有 MD5 —— 它是唯一能在**同步**路径上算出来的
+         * （WebCrypto 的 `crypto.subtle.digest` 是异步的，而同步桥里不能等 Promise）。
+         * 其余算法明确报错，绝不返回一个长度对得上的假字节。
+         */
+        defineHostFn('digest', (arg) => {
+            let reply: { ok: boolean; value?: number[]; error?: string }
+            try {
+                const [algorithm, bytes] = JSON.parse(String(vm.dump(arg))) as [string, number[]]
+                const name = String(algorithm).toUpperCase().replace(/-/g, '')
+                if (name !== 'MD5') throw new Error(`摘要算法 ${algorithm} 未实现（只支持 MD5）`)
+                reply = { ok: true, value: Array.from(md5Bytes(Uint8Array.from(bytes ?? []))) }
+            } catch (err) {
+                reply = { ok: false, error: err instanceof Error ? err.message : String(err) }
+            }
+            return vm.newString(JSON.stringify(reply))
+        })
+
+        /**
+         * `org.jsoup` 的桥：整页 HTML 交给宿主侧的 cheerio 解析，脚本拿整数句柄操作。
+         *
+         * 同步桥就够 —— cheerio 的解析与选择器查询全是同步的，
+         * 不受 asyncify「不能嵌套挂起」的限制。
+         */
+        const jsoup = new JsoupBridge()
+        defineHostFn('jsoup', (arg) => {
+            let reply: unknown
+            try {
+                const payload = JSON.parse(String(vm.dump(arg))) as {
+                    op: string
+                    handle: number | null
+                    args: unknown[]
+                }
+                reply = jsoup.run(payload.op, payload.handle ?? null, payload.args ?? [])
+            } catch (err) {
+                reply = { ok: false, error: err instanceof Error ? err.message : String(err) }
+            }
+            return vm.newString(JSON.stringify(reply))
         })
 
         // 时间格式化：纯计算，同步桥就够，也不用受 asyncify 的嵌套限制
@@ -310,6 +1038,20 @@ export async function runInSandbox(
         })
         vm.setProp(host, 'getString', getStringFn)
         getStringFn.dispose()
+
+        /**
+         * `java.getElements(规则)` 的桥
+         *
+         * 与 getString 同一套路（命中哪些节点只有规则求值层知道），
+         * 只是交回去的不是字符串而是**每个节点的 outerHTML** —— 脚本那侧再解析成 Elements。
+         * 同样是 asyncify 函数，因此规则里不能再套 JS（见 analyze.ts 的 getElements 实现）。
+         */
+        const getElementsFn = vm.newAsyncifiedFunction('getElements', async (arg) => {
+            const raw = String(vm.dump(arg))
+            return vm.newString(await handleGetElements(raw, { getElements }))
+        })
+        vm.setProp(host, 'getElements', getElementsFn)
+        getElementsFn.dispose()
 
         const requestFn = vm.newAsyncifiedFunction('request', async (arg) => {
             const optionsJson = String(vm.dump(arg))
@@ -347,13 +1089,43 @@ export async function runInSandbox(
             handle.value.dispose()
         }
 
-        const prelude = vm.evalCode(JAVA_PRELUDE)
-        if (prelude.error) {
-            const msg = String(vm.dump(prelude.error))
-            prelude.error.dispose()
-            throw new SandboxError(`沙箱预置失败：${msg}`)
+        // 两段预置：先 java（它要用 __host），再它依赖 java 的那几个全局对象
+        for (const [label, source] of [
+            ['java 助手', JAVA_PRELUDE],
+            ['全局对象', GLOBALS_PRELUDE],
+        ] as const) {
+            const prelude = vm.evalCode(source)
+            if (prelude.error) {
+                const msg = String(vm.dump(prelude.error))
+                prelude.error.dispose()
+                throw new SandboxError(`沙箱预置失败（${label}）：${msg}`)
+            }
+            prelude.value.dispose()
         }
-        prelude.value.dispose()
+
+        /**
+         * 书源自己的 JS 库（jsLib）
+         *
+         * 必须在这里跑完再跑规则代码，因为规则里的 `GetUL()` / `host()` / `QM_HEADERS`
+         * 都是它定义的。用 evalCodeAsync 而不是 evalCode：库内部也可能调 java.ajax。
+         *
+         * 失败不中断：库常常「前面定义函数、后面算常量」，中途失败时已定义的部分照样可用。
+         * 把失败原因挂成全局，规则再失败时一并报出来，这样「缺的名字来自哪」一眼可见。
+         */
+        if (limits.preludeJs && limits.preludeJs.trim() !== '') {
+            const lib = await vm.evalCodeAsync(limits.preludeJs)
+            if (lib.error) {
+                const dumped = vm.dump(lib.error)
+                lib.error.dispose()
+                const message = `jsLib 执行失败：${describeSandboxError(dumped)}`
+                logs.push(message)
+                const setError = vm.evalCode(`globalThis.__jsLibError = ${JSON.stringify(message)}`)
+                if (setError.error) setError.error.dispose()
+                else setError.value.dispose()
+            } else {
+                lib.value.dispose()
+            }
+        }
 
         // evalCodeAsync 会在脚本调用 asyncify 函数时自动驱动挂起的任务，
         // 直到脚本跑完；不需要手工轮询 executePendingJobs
@@ -362,7 +1134,11 @@ export async function runInSandbox(
         if (outcome.error) {
             const dumped = vm.dump(outcome.error)
             outcome.error.dispose()
-            throw new SandboxError(`规则脚本执行出错：${describeSandboxError(dumped)}`)
+            const message = `规则脚本执行出错：${describeSandboxError(dumped)}`
+            // 规则失败时把 jsLib 的失败原因一并带上：书源里「'X' is not defined」
+            // 十有八九是 jsLib 没能定义它，分开报会让人往规则本身找原因
+            const libError = readGlobalString(vm, '__jsLibError')
+            throw new SandboxError(libError ? `${message}｜${libError}` : message)
         }
 
         const value = vm.dump(outcome.value)
@@ -451,6 +1227,47 @@ async function handleGetString(
     }
 }
 
+/**
+ * 沙箱内 `java.getElements` 的实际执行：把规则交给上层注入的节点级求值能力
+ *
+ * 形状与 `handleGetString` 完全一致（错误也走 `{ok:false}` 再由脚本侧抛出），
+ * 只是 value 是字符串数组。
+ */
+async function handleGetElements(
+    payloadJson: string,
+    ctx: { getElements?: SandboxGetElements },
+): Promise<string> {
+    let rule = ''
+    let content: string | undefined
+
+    try {
+        const parsed = JSON.parse(payloadJson) as [unknown, unknown]
+        rule = String(parsed[0] ?? '')
+        const raw = parsed[1]
+        content = raw === null || raw === undefined ? undefined : String(raw)
+    } catch {
+        return JSON.stringify({ ok: false, error: 'java.getElements 的参数不是合法 JSON' })
+    }
+
+    if (rule === '') return JSON.stringify({ ok: false, error: 'java.getElements 缺少规则' })
+
+    if (!ctx.getElements) {
+        return JSON.stringify({
+            ok: false,
+            error: '当前上下文未提供节点级规则求值能力（java.getElements 不可用）',
+        })
+    }
+
+    try {
+        return JSON.stringify({ ok: true, value: await ctx.getElements(rule, content) })
+    } catch (err) {
+        return JSON.stringify({
+            ok: false,
+            error: err instanceof Error ? err.message : String(err),
+        })
+    }
+}
+
 /** 沙箱内 java.ajax 的实际执行：调用上层注入的取网能力，把结果规整成 JSON 字符串 */
 async function handleHttpRequest(
     optionsJson: string,
@@ -525,6 +1342,29 @@ function describeSandboxError(dumped: unknown): string {
     const name = typeof box.name === 'string' && box.name !== '' ? `${box.name}: ` : ''
     const message = box.message === undefined ? JSON.stringify(dumped) : String(box.message)
     return `${name}${message}${frameOf(box.stack)}`
+}
+
+/**
+ * 读一个字符串类型的沙箱全局，读不到就返回空串
+ *
+ * 用在**已经出错**之后的收尾阶段，所以任何一步失败都只能咽掉 ——
+ * 这里再抛一个错会把真正的失败原因盖掉。
+ */
+function readGlobalString(vm: QuickJSAsyncContext, name: string): string {
+    try {
+        const handle = vm.evalCode(
+            `typeof globalThis.${name} === 'string' ? globalThis.${name} : ''`,
+        )
+        if (handle.error) {
+            handle.error.dispose()
+            return ''
+        }
+        const value = String(vm.dump(handle.value) ?? '')
+        handle.value.dispose()
+        return value
+    } catch {
+        return ''
+    }
 }
 
 /** 取堆栈里第一个带行号的帧，形如「（脚本第 3 行）」 */

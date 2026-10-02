@@ -15,6 +15,7 @@
  */
 
 import { analyzeSelections, rootSelection } from '../engine/analyze'
+import { sourceGlobals, sourceLimits } from '../engine/globals'
 import { runInSandbox } from '../engine/js'
 import type { BookSource, RuleContext, SearchBook } from '../engine/types'
 import { UpstreamError, fetchText } from '../lib/http'
@@ -38,6 +39,9 @@ export async function listExploreCategories(
         throw new UpstreamError('这个书源没有配置发现地址（exploreUrl）')
     }
 
+    // 发现页脚本要 source.getVariable / source.bookSourceUrl，还有 jsLib 里的函数
+    ctx.source ??= source
+
     const js = findUrlJs(raw)
     if (!js) return parseExploreCategories(raw, source)
 
@@ -49,8 +53,9 @@ export async function listExploreCategories(
             book: ctx.book ?? {},
             baseUrl: source.bookSourceUrl,
             result: js.prefix,
+            ...sourceGlobals(ctx),
         },
-        { http: sandboxHttp(source, source.bookSourceUrl) },
+        { http: sandboxHttp(source, source.bookSourceUrl), ...sourceLimits(ctx) },
     )
     return parseExploreCategories(value, source)
 }
@@ -78,6 +83,8 @@ export async function exploreBooks(
     if (categoryUrl.trim() === '') {
         throw new UpstreamError('分类地址是空的')
     }
+
+    ctx.source ??= source
 
     const safePage = Math.min(Math.max(Math.trunc(page) || 1, 1), MAX_EXPLORE_PAGE)
     const plan = await buildPlan(categoryUrl, source, {

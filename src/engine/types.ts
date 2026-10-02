@@ -10,6 +10,21 @@
 export type RuleResult = string | string[]
 
 /**
+ * 一次请求内的沙箱会话
+ *
+ * 只在这里声明一个**结构化**的类型，而不是从 `js.ts` import：
+ * `types.ts` 是引擎的公共类型层，被 `data/` 与 `legado/` 广泛引用，
+ * 让它去依赖那个把 QuickJS 的 WASM 一起拉进来的模块，会把 WASM 传染给所有引用方。
+ * 形状与 `js.ts` 的 `SandboxSession` 一致，因此结构上兼容。
+ */
+export interface SandboxSession {
+    /** 本会话的 QuickJS 模块实例 */
+    module: Promise<unknown>
+    /** 本会话内的串行链 */
+    queue: Promise<unknown>
+}
+
+/**
  * 规则用了本引擎尚未实现的能力时抛这个，好让上层把「不支持」和「没匹配到」区分开
  *
  * 放在这里而不是 `analyze.ts`：`jsonpath.ts` 也要用它（不支持的过滤器同属「不支持」），
@@ -59,6 +74,37 @@ export interface RuleContext {
      * 而不是悄悄返回空字符串 —— 后者会让书源表现成「取不到正文」。
      */
     http?: SandboxHttp
+
+    /**
+     * 当前书源。
+     *
+     * 用途是给 `@js:` 规则里的 `source` 全局提供内容 —— 线上用它的规则非常多
+     * （`source.getKey()` 413 次、`source.bookSourceUrl` 133 次、`source.getVariable()`
+     * 79 次），没有它这些规则一律 ReferenceError，书源表现成「脚本执行出错」。
+     *
+     * 也顺带提供 `jsLib`（书源自带的 JS 库，35 条源在用）—— 那些源里的
+     * `GetUL()`、`host()`、`QM_HEADERS` 之类**全是 jsLib 里定义的函数**，
+     * 不先执行 jsLib，规则里的这些名字一个都不存在。
+     */
+    source?: BookSource
+
+    /**
+     * 发现页的筛选状态（Legado 的 `infoMap`）
+     *
+     * 书源的 exploreUrl 脚本会用 `infoMap["频道"] || "分类"` 读用户在筛选器里的选择。
+     * 我们没有那套交互界面，所以传空对象 —— 表达式会落到书源自己写的默认值上，
+     * 分类照常出得来（这正是 7 条源「缺少 infoMap」的表现）。
+     */
+    infoMap?: Record<string, string>
+
+    /**
+     * 本次请求的沙箱会话
+     *
+     * 一次请求内所有沙箱求值共用它：模块实例不能并发，跨请求又不能互相等
+     * （Workers 禁止跨请求的 promise 链），所以只有「按请求隔离 + 请求内串行」这一条路。
+     * 由路由层在每个请求入口创建一次，见 `engine/js.ts` 的 `SandboxSession`。
+     */
+    sandbox?: SandboxSession
 }
 
 /** 沙箱可用的取网能力 */
@@ -152,6 +198,31 @@ export interface BookSource {
 
     /** 书源级请求头 */
     header?: string
+
+    /**
+     * 书源自带的 **JS 库**
+     *
+     * Legado 在执行这个书源的任何 `@js:` / `<js>` 规则之前，会先把这段脚本跑一遍，
+     * 于是它里面声明的函数与常量对整条书源都可见。线上 35 条带发现页的书源用了它，
+     * 而且**大部分「脚本缺少 XXX」其实缺的就是这里定义的名字**
+     * （霹雳书屋的 `host()`、爱丽丝书屋的 `GetUL()`、禁漫天堂的 `jmg()`）。
+     *
+     * 它是不可信代码，照样进沙箱执行 —— 但只在求值规则之前跑一次，不额外增加取网权限。
+     */
+    jsLib?: string
+
+    /**
+     * 登录地址 / 登录界面
+     *
+     * 本引擎**没有登录能力**：需要登录的书源只能读到游客可见的部分。
+     * 字段留着是为了让 `source.loginUrl` 有值可取，而不是 undefined ——
+     * 有些脚本会先判断它是否存在，undefined 会让整段逻辑走错分支。
+     */
+    loginUrl?: string
+    loginUi?: string
+
+    /** 发现页的可交互筛选器定义（`infoMap` 的初值来源） */
+    exploreScreen?: string
 
     /**
      * 发现页（「探索」）地址

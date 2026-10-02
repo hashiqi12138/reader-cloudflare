@@ -1,5 +1,14 @@
 /**
- * URL 字段里的 JS 片段
+ * URL 字段里的纯文本处理
+ *
+ * 两件事：
+ *   1. 找出 URL 字段里的 JS 片段（求值在 `source.ts` 里，要进沙箱）
+ *   2. 展开 `<,...>` 可选段（第一页无页码）
+ *
+ * 都拆出来是为了能直接单测：`source.ts` 会把 QuickJS 的 WASM 一起拉进来，
+ * 而 WASM 在 Node 单测里跑不起来。
+ *
+ * --- 关于 JS 片段 ---
  *
  * 顶层 URL 字段（`searchUrl`、`exploreUrl`）里可以写 JS。线上 816 条书源里
  * `searchUrl` 带 JS 的有 85 条，三种写法都要认：
@@ -13,10 +22,6 @@
  * 第三种最容易看错：`@js:` **前面的部分不是前缀**，而是喂给脚本的输入。
  * 所以脚本的输出不能拼回前缀后面 —— 它会得到一个「合法但完全不是那个地址」的 URL，
  * 而那种 URL 往往还能返回 200，只是内容全错。
- *
- * 这里只做「找出 JS 在哪」这件纯文本的事，求值在 `source.ts` 里（要进沙箱）。
- * 拆出来是为了能直接单测：`source.ts` 会把 QuickJS 的 WASM 一起拉进来，
- * 而 WASM 在 Node 单测里跑不起来。
  */
 
 export interface UrlJs {
@@ -51,4 +56,23 @@ export function findUrlJs(raw: string): UrlJs | null {
     }
 
     return null
+}
+
+/**
+ * URL 里的可选段 `<,...>`，等价于 `{{page - 1 == 0 ? "": page}}`
+ *
+ * 含义是「**第一页不要页码**」：线上典型写法是 `/latest/<,index_{{page}}.html>` ——
+ * 第 1 页取 `/latest/`，第 2 页才取 `/latest/index_2.html`。
+ *
+ * 不处理的话整段（连同尖括号）会原样进 URL，被编码成 `%3C,index_1.html%3E`，
+ * 得到一个**必然 404 的地址** —— 这正是线上「分类拉得出来、书列表却是空的」的一类原因。
+ *
+ * 只认 `<,` 开头的段：`<js>` 是脚本块、`<div>` 之类的 HTML 片段也合法，
+ * 不能见尖括号就吞。
+ */
+const OPTIONAL_SEGMENT = /<,([^<>]*)>/g
+
+export function applyOptionalSegments(template: string, page: number): string {
+    if (!template.includes('<,')) return template
+    return template.replace(OPTIONAL_SEGMENT, (_match, inner: string) => (page <= 1 ? '' : inner))
 }

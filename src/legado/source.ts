@@ -11,10 +11,11 @@
  */
 
 import { runInSandbox, sandboxResultToString } from '../engine/js'
+import { sourceGlobals, sourceLimits } from '../engine/globals'
 import type { BookSource, FetchPlan, RuleContext, SandboxHttp } from '../engine/types'
 import { parseLooseJson } from '../lib/json'
 import { defaultHeaders, fetchText, UpstreamError } from '../lib/http'
-import { findUrlJs } from './urlJs'
+import { applyOptionalSegments, findUrlJs } from './urlJs'
 
 /** 书源 URL 尾部可带的请求选项 */
 export interface UrlOptions {
@@ -32,12 +33,18 @@ export interface UrlOptions {
  * 用第一个 `,{` 作为分界：真正的 URL 里出现 `,{` 是极罕见的，
  * 而选项段一定以 `{` 开头。解析失败时**抛错而不是降级**——
  * 把选项当 URL 用会得到一个看起来正常、实际请求错地方的 URL，那种错最难查。
+ *
+ * 有一个必须排除的例外：可选段 `<,{{page}}>` 里天然含有 `,{`。
+ * 不排除的话它会被当成选项段的开头，URL 被切成 `<` + `{{page}}>`，
+ * 报出来的是「请求选项不是合法 JSON」—— 一个指向错误方向的错误信息。
+ * 所以只认**前面不是 `<`** 的那个 `,{`。
  */
 export function splitUrlAndOptions(raw: string): { url: string; options: Partial<UrlOptions> } {
     const trimmed = raw.trim()
-    const index = trimmed.indexOf(',{')
-    if (index === -1) return { url: trimmed, options: {} }
+    const match = /(?<!<),\{/.exec(trimmed)
+    if (!match) return { url: trimmed, options: {} }
 
+    const index = match.index
     const url = trimmed.slice(0, index).trim()
     const jsonText = trimmed.slice(index + 1).trim()
     try {
@@ -52,13 +59,15 @@ export function splitUrlAndOptions(raw: string): { url: string; options: Partial
 
 /** 解析 `{{}}` 模板：里面是 JS 表达式，用沙箱求值 */
 export async function resolveTemplate(template: string, ctx: RuleContext): Promise<string> {
+    // 可选段先展开：第 1 页整段丢掉，段内的 `{{page}}` 也就没必要求值了
+    const source = applyOptionalSegments(template, ctx.page ?? 1)
     const re = /\{\{([\s\S]*?)\}\}/g
     let out = ''
     let last = 0
     let match: RegExpExecArray | null
 
-    while ((match = re.exec(template)) !== null) {
-        out += template.slice(last, match.index)
+    while ((match = re.exec(source)) !== null) {
+        out += source.slice(last, match.index)
         const expr = (match[1] ?? '').trim()
         if (expr === '') {
             out += ''
@@ -70,14 +79,16 @@ export async function resolveTemplate(template: string, ctx: RuleContext): Promi
                     page: ctx.page ?? 1,
                     book: ctx.book ?? {},
                     baseUrl: ctx.baseUrl,
+                    // URL 模板里也会用 source / jsLib（`Search_()`、`host()` 这类函数）
+                    ...sourceGlobals(ctx),
                 },
-                { http: ctx.http },
+                { http: ctx.http, ...sourceLimits(ctx) },
             )
             out += sandboxResultToString(value)
         }
         last = re.lastIndex
     }
-    out += template.slice(last)
+    out += source.slice(last)
     return out
 }
 
@@ -158,6 +169,8 @@ export async function buildPlan(
     const templateCtx: RuleContext = {
         ...ctx,
         baseUrl: source.bookSourceUrl,
+        // `@js:` 里的 source 全局与 jsLib 都从这里来
+        source,
         /**
          * 取网能力必须给进去：URL 字段里的脚本经常要**自己先发一次请求**
          * 才知道真正的地址在哪（米读小说要跟一次 302 拿新域名、小书本网要先把
@@ -194,8 +207,9 @@ export async function buildPlan(
                 book: templateCtx.book ?? {},
                 baseUrl: templateCtx.baseUrl,
                 result: js.prefix,
+                ...sourceGlobals(templateCtx),
             },
-            { http: templateCtx.http },
+            { http: templateCtx.http, ...sourceLimits(templateCtx) },
         )
         const produced = sandboxResultToString(value)
         const split = splitUrlAndOptions(await resolveTemplate(produced, templateCtx))
