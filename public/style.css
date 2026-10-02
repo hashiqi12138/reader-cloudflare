@@ -17,6 +17,7 @@
         sans-serif;
     --font-read:
         'Noto Serif SC', 'Songti SC', 'Source Han Serif SC', Georgia, 'Times New Roman', serif;
+    --font-mono: ui-monospace, SFMono-Regular, Menlo, 'Cascadia Mono', Consolas, monospace;
 
     --radius-sm: 8px;
     --radius-md: 12px;
@@ -121,6 +122,49 @@
 [data-theme='dark'][data-accent='blue'] {
     --accent: #7aa9dd;
     --accent-ink: #0c1a28;
+}
+
+/* ---------------------------------------------------------------- 阅读背景（纸色）
+
+   只在阅读界面生效：`--paper` / `--paper-ink` 除了 `body[data-reader='1']`
+   与 `.reader-shell` 之外没有别处消费。
+
+   放在主题色之后是因为优先级相同、靠源码顺序决定 —— 用户显式选了背景色
+   就该盖过「跟随主题色」的那一套。没选（`auto`）时 `<html>` 上没有
+   `data-paper` 属性，这几条选择器都不命中，行为与以前完全一致。          */
+
+[data-paper='white'] {
+    --paper: #ffffff;
+    --paper-ink: #26231f;
+}
+[data-paper='sepia'] {
+    --paper: #fbf3e2;
+    --paper-ink: #3d3427;
+}
+[data-paper='green'] {
+    --paper: #e7f2e4;
+    --paper-ink: #2b3a2f;
+}
+[data-paper='blue'] {
+    --paper: #e9f1fb;
+    --paper-ink: #28313d;
+}
+[data-paper='pink'] {
+    --paper: #fbedf0;
+    --paper-ink: #3d2a30;
+}
+[data-paper='gray'] {
+    --paper: #eceae6;
+    --paper-ink: #34322e;
+}
+/* 夜间与纯黑：纯黑给 OLED 屏省电，夜间带一点暖调更不刺眼 */
+[data-paper='night'] {
+    --paper: #1c1b21;
+    --paper-ink: #cfcbc4;
+}
+[data-paper='black'] {
+    --paper: #000000;
+    --paper-ink: #b6b2ab;
 }
 
 /* ---------------------------------------------------------------- 基础 */
@@ -455,6 +499,11 @@ main#view {
 .chips::-webkit-scrollbar {
     display: none;
 }
+/* 分类多到几十上百个时，横排必然滚不动（滚动条被隐藏、滚轮不横移），改为换行铺开 */
+.chips.wrap {
+    flex-wrap: wrap;
+    overflow-x: visible;
+}
 .chip {
     border: 1px solid var(--line);
     background: var(--surface);
@@ -473,6 +522,101 @@ main#view {
     background: var(--accent);
     border-color: transparent;
     color: var(--accent-ink);
+}
+
+/* ---------------------------------------------------------------- 书源选择器 */
+
+.explore-bar {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-3);
+    margin-bottom: var(--sp-3);
+}
+
+.picker {
+    position: relative;
+    min-width: 0;
+    flex: 1;
+    max-width: 420px;
+}
+.picker-button {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    width: 100%;
+    padding: 9px 12px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+    color: var(--ink);
+    font-size: 14px;
+    text-align: left;
+}
+.picker-button:hover,
+.picker-button.open {
+    border-color: var(--line-strong);
+}
+.picker-value {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.picker-caret {
+    color: var(--ink-faint);
+    font-size: 12px;
+}
+.picker-panel {
+    position: absolute;
+    z-index: 40;
+    top: calc(100% + 6px);
+    left: 0;
+    right: 0;
+    padding: var(--sp-2);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-md);
+    background: var(--surface);
+    box-shadow: var(--shadow-3);
+}
+.picker-search {
+    width: 100%;
+    margin-bottom: var(--sp-2);
+}
+/* 固定高度 + 竖向滚动：几百条书源也能滚得动，这正是原来的 chips 做不到的 */
+.picker-list {
+    max-height: 46vh;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+.picker-item {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    padding: 8px 10px;
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--ink-soft);
+    font-size: 13px;
+    text-align: left;
+}
+.picker-item:hover {
+    background: var(--surface-2);
+    color: var(--ink);
+}
+.picker-item.active {
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-weight: 600;
+}
+.picker-item-name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .badge {
@@ -1132,6 +1276,9 @@ body[data-reader='1'] main#view {
 .reader-shell {
     position: fixed;
     inset: 0;
+    /* 高于 .topbar（30）：阅读界面是全屏的，任何时候都不该被导航栏压住 ——
+       被压住的后果不只是难看，顶栏那几个按钮会**点不动**。 */
+    z-index: 40;
     display: flex;
     flex-direction: column;
     background: var(--paper);
@@ -1242,6 +1389,22 @@ body[data-reader='1'] main#view {
 }
 .reader-body.turn-prev::before {
     opacity: 1;
+}
+
+/* 翻页动画由显示设置决定（`<html data-turn>`）：
+   覆盖＝位移 + 边缘投影；滑动＝更快的位移、不要投影；
+   无＝直接跳过去，连过渡都不要 —— 「无动画」要的就是不拖泥带水。 */
+[data-turn='slide'] .reader-body.paged .reader-flow {
+    transition-duration: 0.18s;
+}
+[data-turn='slide'] .reader-body.paged::before,
+[data-turn='slide'] .reader-body.paged::after,
+[data-turn='none'] .reader-body.paged::before,
+[data-turn='none'] .reader-body.paged::after {
+    display: none;
+}
+[data-turn='none'] .reader-body.paged .reader-flow {
+    transition: none;
 }
 
 .reader-progress {
@@ -1363,6 +1526,317 @@ body[data-reader='1'] main#view {
     font-size: 13.5px;
 }
 
+/* 需要占满整行的设置项（背景色、规则列表这类） */
+.setting-block {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-2);
+    font-size: 13.5px;
+}
+.setting-label {
+    color: var(--ink-soft);
+}
+.setting-row .segment[disabled] {
+    opacity: 0.6;
+    cursor: default;
+}
+
+/* 背景色选择：每个色块自带一个小圆点，直接显示那个背景是什么颜色 */
+.papers {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--sp-2);
+}
+.paper-chip {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    border: 1px solid var(--line);
+    border-radius: 99px;
+    background: var(--surface);
+    color: var(--ink-soft);
+    font-size: 12.5px;
+}
+.paper-chip.active {
+    border-color: var(--accent);
+    color: var(--accent);
+    background: var(--accent-soft);
+}
+.paper-dot {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    border: 1px solid var(--line-strong);
+    background: #fff;
+}
+.paper-chip[data-paper='sepia'] .paper-dot {
+    background: #fbf3e2;
+}
+.paper-chip[data-paper='white'] .paper-dot {
+    background: #ffffff;
+}
+.paper-chip[data-paper='green'] .paper-dot {
+    background: #e7f2e4;
+}
+.paper-chip[data-paper='blue'] .paper-dot {
+    background: #e9f1fb;
+}
+.paper-chip[data-paper='pink'] .paper-dot {
+    background: #fbedf0;
+}
+.paper-chip[data-paper='gray'] .paper-dot {
+    background: #eceae6;
+}
+.paper-chip[data-paper='night'] .paper-dot {
+    background: #1c1b21;
+}
+.paper-chip[data-paper='black'] .paper-dot {
+    background: #000000;
+}
+/* 「跟随主题」用一个双色小圆点表示它是个动态值 */
+.paper-chip[data-paper='auto'] .paper-dot {
+    background: linear-gradient(135deg, #fbf6ec 50%, #1d1c22 50%);
+}
+
+/* 强调色的色点：直接画那个颜色，选起来才有依据 */
+.paper-dot.accent-amber {
+    background: #b4712a;
+}
+.paper-dot.accent-green {
+    background: #3f7a5e;
+}
+.paper-dot.accent-blue {
+    background: #3b6ea5;
+}
+.paper-dot.accent-rose {
+    background: #a4496b;
+}
+
+/* ---------------------------------------------------------------- 替换净化 */
+
+.rule-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-2);
+}
+.rule-row {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--sp-2);
+    padding: var(--sp-2) 0;
+    border-bottom: 1px solid var(--line);
+}
+.rule-text {
+    flex: 1;
+    min-width: 0;
+}
+.rule-name {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--ink);
+}
+.rule-pattern,
+.rule-replacement {
+    display: block;
+    margin-top: 2px;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--ink-faint);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.rule-replacement {
+    color: var(--accent);
+}
+.rule-preview {
+    padding: var(--sp-2) var(--sp-3);
+    border-radius: var(--radius-sm);
+    background: var(--surface-2);
+}
+.rule-preview p + p {
+    margin-top: 4px;
+}
+.rule-add-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--ink-soft);
+    padding-top: var(--sp-2);
+    border-top: 1px solid var(--line);
+}
+.rule-form {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-2);
+}
+.rule-form input {
+    width: 100%;
+}
+.rule-preset {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    width: 100%;
+    padding: var(--sp-2) var(--sp-3);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+    text-align: left;
+}
+.rule-preset:hover {
+    border-color: var(--accent);
+}
+
+/* ---------------------------------------------------------------- 章内搜索 */
+
+/* 命中高亮：用半透明底色而不是纯色块，正文本身的墨色不变，
+   换背景色（纸色）之后依然能看清，不必为九种纸色各调一遍 */
+.reader-flow mark.search-hit {
+    background: color-mix(in srgb, var(--accent) 34%, transparent);
+    color: inherit;
+    border-radius: 3px;
+    /* 左右各留 1px 让底色不贴着字，同时用 -1px 的外边距把这点宽度抵消掉：
+       内联盒子的前进宽度 = 外边距 + 内边距 + 内容，两边一加一减正好不变，
+       于是**高亮的出现不会让正文重新分页** —— 否则一边输关键词页码一边跳。 */
+    padding: 0 1px;
+    margin: 0 -1px;
+}
+/* 当前这一处：底色更重，并且在翻页模式下要有足够的视觉重量，
+   否则「跳过去了但看不出跳到哪」 */
+.reader-flow mark.search-hit.active {
+    background: var(--accent);
+    /* 用 --accent-ink 而不是写死白色：深色主题下强调色本身是浅色，
+       配白字会糊成一片，而这个变量就是「压在强调色上的那个颜色」 */
+    color: var(--accent-ink);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+.search-input {
+    flex: 1;
+    min-width: 0;
+}
+.search-status {
+    text-align: right;
+    white-space: nowrap;
+}
+.search-results {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    max-height: 52vh;
+    overflow: auto;
+}
+.search-result {
+    display: flex;
+    align-items: baseline;
+    gap: var(--sp-2);
+    width: 100%;
+    padding: var(--sp-2) var(--sp-3);
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    background: var(--surface-2);
+    text-align: left;
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--ink);
+}
+.search-result:hover {
+    border-color: var(--accent);
+}
+.search-result.active {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 14%, var(--surface-2));
+}
+.search-result-text {
+    flex: 1;
+    min-width: 0;
+}
+.search-result-count {
+    flex: none;
+    font-size: 11px;
+    color: var(--ink-faint);
+    font-variant-numeric: tabular-nums;
+}
+
+/* ---------------------------------------------------------------- 书签 */
+
+.bm-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-2);
+}
+.bm-row {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-1);
+    padding: var(--sp-1) var(--sp-2) var(--sp-1) 0;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+}
+.bm-row.editing {
+    padding: var(--sp-2);
+}
+.bm-main {
+    /* 整块可点＝跳过去，因此把按钮的默认外观抹掉，只留排版 */
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: var(--sp-2);
+    border: 0;
+    background: transparent;
+    text-align: left;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+}
+.bm-row.editing .bm-main {
+    cursor: default;
+    flex: 1;
+}
+.bm-row.editing .bm-main input {
+    width: 100%;
+}
+.bm-head {
+    display: flex;
+    align-items: baseline;
+    gap: var(--sp-2);
+}
+.bm-chapter {
+    flex: 1;
+    min-width: 0;
+    font-size: 13px;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.bm-time {
+    flex: none;
+    font-size: 11px;
+    color: var(--ink-faint);
+}
+.bm-excerpt {
+    font-size: 12.5px;
+    line-height: 1.5;
+    color: var(--ink-soft);
+    /* 摘录最长 80 字，最多铺三行，再多就把列表挤没了 */
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+.bm-note {
+    font-size: 12.5px;
+    line-height: 1.5;
+    color: var(--accent);
+    border-left: 2px solid var(--accent);
+    padding-left: var(--sp-2);
+}
+
 /* ---------------------------------------------------------------- 窄屏 */
 
 @media (max-width: 720px) {
@@ -1444,6 +1918,21 @@ body[data-reader='1'] main#view {
     }
     .claim-banner {
         flex-wrap: wrap;
+    }
+
+    /* 阅读顶栏现在有六个图标（返回 / 收藏 / 搜索 / 书签 / 目录 / 设置）。
+       窄屏下按原尺寸算，书名会被挤到只剩两三个字，所以把图标与间距一起收一收 ——
+       图标小一点还能点，书名短到看不出是哪一章就没法读了。 */
+    .reader-top {
+        gap: 2px;
+    }
+    .reader-top .icon-btn {
+        width: 30px;
+        height: 30px;
+        font-size: 15px;
+    }
+    .reader-title {
+        max-width: 36vw;
     }
 }
 

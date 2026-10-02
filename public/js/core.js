@@ -153,7 +153,52 @@ const prefKeys = {
     fontSize: (v) => String(Math.min(30, Math.max(14, Number(v) || 19))),
     lineHeight: (v) => String(Math.min(2.2, Math.max(1.4, Number(v) || 1.85))),
     readerMode: (v) => (v === 'scroll' ? 'scroll' : 'page'),
-    themeColor: (v) => (/^[a-z]+$/.test(String(v)) ? String(v) : 'amber'),
+    /**
+     * 强调色
+     *
+     * 必须**按白名单校验**。早先是 `/^[a-z]+$/.test(String(v))`，看着挺严，
+     * 但 `String(undefined)` 就是 `'undefined'` —— 它也全小写字母，于是「没设过」
+     * 被当成合法值，`<html>` 上落下 `data-accent="undefined"`。
+     * 浅色下因为 `:root` 自带一套琥珀色还能糊过去，深色下就找不到
+     * `[data-theme=dark][data-accent=…]` 那条规则了，强调色一直是没调过的浅色版。
+     */
+    themeColor: (v) => (ACCENTS.includes(String(v)) ? String(v) : 'amber'),
+    /**
+     * 阅读背景色（纸色）
+     *
+     * `auto` 表示「跟着主题色的纸色走」—— 老用户的行为不变。
+     * 其余取值在 CSS 里各有一组 `[data-paper=…]`，只影响阅读界面，不动外层界面。
+     */
+    readerPaper: (v) => (PAPERS.includes(String(v)) ? String(v) : 'auto'),
+    /** 翻页动画：覆盖 / 滑动 / 无 */
+    turnMode: (v) => (['cover', 'slide', 'none'].includes(String(v)) ? String(v) : 'cover'),
+    /** 目录里每章标题最多显示多少字（长的目录名会把列表撑烂） */
+    chapterTitleLimit: (v) => String(Math.min(60, Math.max(10, Number(v) || 24))),
+}
+
+/** 可选的阅读背景。与 style.css 里的 `[data-paper=…]` 一一对应 */
+export const PAPERS = ['auto', 'white', 'sepia', 'green', 'blue', 'pink', 'gray', 'night', 'black']
+
+export const PAPER_LABELS = {
+    auto: '跟随主题',
+    white: '纯白',
+    sepia: '米黄',
+    green: '护眼绿',
+    blue: '淡蓝',
+    pink: '樱粉',
+    gray: '浅灰',
+    night: '夜间',
+    black: '纯黑',
+}
+
+/** 强调色。与 style.css 里的 `[data-accent=…]` 一一对应 */
+export const ACCENTS = ['amber', 'green', 'blue', 'rose']
+
+export const ACCENT_LABELS = {
+    amber: '琥珀',
+    green: '松绿',
+    blue: '靛蓝',
+    rose: '玫红',
 }
 
 export const prefs = {
@@ -174,6 +219,14 @@ export function applyPrefs() {
     root.dataset.accent = prefs.get('themeColor') || 'amber'
     root.style.setProperty('--reader-font-size', `${prefs.get('fontSize')}px`)
     root.style.setProperty('--reader-line-height', prefs.get('lineHeight'))
+
+    // 阅读背景：`auto` 时把属性摘掉，交回给主题色的纸色（老行为不变）
+    const paper = prefs.get('readerPaper') || 'auto'
+    if (paper === 'auto') delete root.dataset.paper
+    else root.dataset.paper = paper
+
+    // 翻页动画交给 CSS：`data-turn=none` 时翻页只有位移、没有过渡
+    root.dataset.turn = prefs.get('turnMode') || 'cover'
 }
 
 // ---------------------------------------------------------------- 接口

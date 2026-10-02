@@ -26,8 +26,16 @@ import {
     toast,
 } from './core.js'
 
-export const readUrl = (sourceId, bookUrl, name, author, index) =>
-    `#/read?${paramsOf({ sourceId, bookUrl, name, author, index })}`
+/**
+ * 阅读界面的地址
+ *
+ * 参数名必须是 `url`：`reader.js` 用 `route.get('url')` 取书籍地址，
+ * 而 `viewBook` / 书架 / 阅读界面内部翻页也全都用 `url`。
+ * 这里早先写的是 `bookUrl`，结果**点「开始阅读」永远停在「缺少书源或书籍地址」**——
+ * 参数名对不上不会有任何报错，只是那一个页面打不开。
+ */
+export const readUrl = (sourceId, url, name, author, index) =>
+    `#/read?${paramsOf({ sourceId, url, name, author, index })}`
 
 export const bookUrl = (sourceId, book) =>
     `#/book?${paramsOf({ sourceId, url: book.bookUrl, name: book.name, author: book.author })}`
@@ -541,6 +549,124 @@ export async function viewShelf(host) {
 
 const EXPLORE_PICK_KEY = 'explore.pick'
 
+/**
+ * 书源选择器
+ *
+ * 带发现页的书源动辄几百条，横排 chips 在桌面端几乎没法用：
+ * 滚动条被 `scrollbar-width: none` 藏掉了，鼠标滚轮也不会把竖向滚动翻译成横向，
+ * 于是「书源列表滚不动」。这里换成一个可搜索的下拉 —— 点开是固定高度的列表，
+ * 竖向滚动 + 关键字过滤，几百条也能几秒内找到。
+ */
+function sourcePicker(sources, activeSource, onPick) {
+    const label = el('span', { class: 'picker-value', text: activeSource.name })
+    const button = el(
+        'button',
+        {
+            class: 'picker-button',
+            type: 'button',
+            title: '切换书源',
+            onclick: (event) => {
+                event.stopPropagation()
+                toggle()
+            },
+        },
+        [label, el('span', { class: 'picker-caret', text: '▾' })],
+    )
+
+    const search = el('input', {
+        type: 'search',
+        class: 'picker-search',
+        placeholder: `在 ${sources.length} 个书源里搜索…`,
+        oninput: () => renderList(search.value),
+        onkeydown: (event) => {
+            if (event.key === 'Escape') close()
+        },
+    })
+
+    const list = el('div', { class: 'picker-list', role: 'listbox' })
+    const panel = el('div', { class: 'picker-panel', hidden: true }, [search, list])
+    const wrap = el('div', { class: 'picker' }, [button, panel])
+
+    function renderList(keyword = '') {
+        const needle = keyword.trim().toLowerCase()
+        const matched = needle
+            ? sources.filter(
+                  (s) =>
+                      s.name.toLowerCase().includes(needle) ||
+                      (s.group ?? '').toLowerCase().includes(needle),
+              )
+            : sources
+        if (matched.length === 0) {
+            list.replaceChildren(el('p', { class: 'muted tiny center', text: '没有匹配的书源' }))
+            return
+        }
+        list.replaceChildren(
+            ...matched.map((source) =>
+                el(
+                    'button',
+                    {
+                        class: `picker-item ${source.id === activeSource.id ? 'active' : ''}`,
+                        type: 'button',
+                        onclick: () => {
+                            close()
+                            onPick(source)
+                        },
+                    },
+                    [
+                        el('span', { class: 'picker-item-name', text: source.name }),
+                        source.group
+                            ? el('span', { class: 'badge ghost', text: source.group })
+                            : null,
+                    ],
+                ),
+            ),
+        )
+    }
+
+    function open() {
+        panel.hidden = false
+        button.classList.add('open')
+        renderList(search.value)
+        requestAnimationFrame(() => search.focus())
+    }
+    function close() {
+        panel.hidden = true
+        button.classList.remove('open')
+    }
+    function toggle() {
+        if (panel.hidden) open()
+        else close()
+    }
+
+    // 点面板之外收起。视图被替换后自己摘掉监听，避免路由来回切时累积。
+    const onDocClick = (event) => {
+        if (!wrap.isConnected) {
+            document.removeEventListener('click', onDocClick)
+            return
+        }
+        if (!wrap.contains(event.target)) close()
+    }
+    document.addEventListener('click', onDocClick)
+
+    return wrap
+}
+
+/** 把发现页的失败按原因归类，给一句能落地的下一步，而不是只回显原始错误 */
+function exploreHint(err) {
+    const message = String(err?.message ?? '')
+    if (/没有配置发现地址/.test(message))
+        return '这个书源没有 exploreUrl，换一个带「可发现」标记的书源。'
+    if (/没有配置发现页的书目规则/.test(message))
+        return '书源缺少 ruleExplore.bookList，没法解析书目。'
+    if (/is not defined|not a function/.test(message))
+        return '书源的脚本用到了本引擎还没实现的全局变量或方法。'
+    if (/超时|timeout/i.test(message)) return '书源站点响应太慢，稍后再试。'
+    if (/上游返回 HTTP|请求失败|取网失败/.test(message))
+        return '书源站点拒绝了请求或已改版，换个分类试试。'
+    if (/不是合法 JSON/.test(message)) return '书源地址的写法本引擎还没支持，换一个分类试试。'
+    return ''
+}
+
 export async function viewExplore(host) {
     const route = new URLSearchParams(location.hash.split('?')[1] ?? '')
     host.replaceChildren(
@@ -586,35 +712,31 @@ export async function viewExplore(host) {
     // 记住上次看的是哪个书源：从推荐位点进来时也不会丢上下文
     const stored = localStorage.getItem(EXPLORE_PICK_KEY)
     const wanted = route.get('sourceId')
-    const active =
-        sources.find((s) => s.id === wanted)?.id ??
-        sources.find((s) => s.id === stored)?.id ??
-        sources[0].id
+    const activeSource =
+        sources.find((s) => s.id === wanted) ?? sources.find((s) => s.id === stored) ?? sources[0]
+    const active = activeSource.id
 
-    const sourceBar = el('div', { class: 'chips' })
-    for (const source of sources) {
-        sourceBar.append(
-            el('button', {
-                class: `chip ${source.id === active ? 'active' : ''}`,
-                text: source.name,
-                onclick: () => {
-                    localStorage.setItem(EXPLORE_PICK_KEY, source.id)
-                    go(`#/explore?${paramsOf({ sourceId: source.id })}`)
-                },
-            }),
-        )
-    }
+    const picker = sourcePicker(sources, activeSource, (source) => {
+        localStorage.setItem(EXPLORE_PICK_KEY, source.id)
+        go(`#/explore?${paramsOf({ sourceId: source.id })}`)
+    })
 
-    const categoryBar = el('div', { class: 'chips' })
+    const categoryBar = el('div', { class: 'chips wrap' })
     const listHost = el('div')
     host.replaceChildren(
         el('div', { class: 'page-head' }, [
             el('div', {}, [
                 el('h1', { class: 'page-title', text: '发现' }),
-                el('p', { class: 'muted', text: '按书源自带的栏目逛一逛' }),
+                el('p', {
+                    class: 'muted',
+                    text: `${sources.length} 个书源带发现页 · 按书源自带的栏目逛一逛`,
+                }),
             ]),
         ]),
-        sourceBar,
+        el('div', { class: 'explore-bar' }, [
+            el('span', { class: 'muted tiny', text: '书源' }),
+            picker,
+        ]),
         categoryBar,
         listHost,
     )
@@ -625,14 +747,24 @@ export async function viewExplore(host) {
     try {
         explore = await api(`/api/explore?${paramsOf({ sourceId: active })}`)
     } catch (err) {
+        const hint = exploreHint(err)
         categoryBar.replaceChildren()
         listHost.replaceChildren(
-            alertBox('error', '这个书源的发现页打不开', err.message),
+            alertBox(
+                'error',
+                '这个书源的发现页打不开',
+                hint ? `${err.message}（${hint}）` : err.message,
+            ),
             el('div', { class: 'row' }, [
                 el('button', {
                     class: 'btn ghost',
                     text: '重试',
                     onclick: () => viewExplore(host),
+                }),
+                el('button', {
+                    class: 'btn ghost',
+                    text: '换个书源',
+                    onclick: () => go('#/explore'),
                 }),
             ]),
         )
@@ -641,24 +773,29 @@ export async function viewExplore(host) {
 
     const categories = explore.categories ?? []
     if (categories.length === 0) {
-        listHost.replaceChildren(alertBox('warn', '这个书源的发现页里没有任何分类'))
+        listHost.replaceChildren(
+            alertBox(
+                'warn',
+                '这个书源的发现页里没有任何分类',
+                '书源声明了 exploreUrl，但解析出来是空的 —— 通常是规则改版了。',
+            ),
+        )
         return
     }
 
     const wantedCategory = route.get('url')
     let current = categories.find((c) => c.url === wantedCategory) ?? categories[0]
 
+    // 分类多起来（有的源上百个）之后，横向 chips 同样滚不动，所以允许换行铺开
     for (const category of categories) {
         categoryBar.append(
             el('button', {
                 class: `chip ${category.url === current.url ? 'active' : ''}`,
                 text: category.title,
-                onclick: () => {
+                onclick: (event) => {
                     current = category
                     for (const node of categoryBar.children) node.classList.remove('active')
-                    ;[...categoryBar.children][categories.indexOf(category)]?.classList.add(
-                        'active',
-                    )
+                    event.currentTarget.classList.add('active')
                     void loadCategory(1)
                 },
             }),
@@ -707,8 +844,8 @@ export async function viewExplore(host) {
                 listHost.replaceChildren(
                     alertBox(
                         'warn',
-                        '这个栏目下没有取到书',
-                        '可能是书源规则没匹配到，或站点改版了。',
+                        `「${current.title}」这个栏目下没有取到书`,
+                        '可能是书源的列表规则没匹配到，或站点改版了。换个栏目试试。',
                     ),
                 )
                 footer.replaceChildren()
@@ -728,8 +865,15 @@ export async function viewExplore(host) {
 
             if (!footer.parentNode) listHost.append(footer)
         } catch (err) {
+            const hint = exploreHint(err)
             footer.replaceChildren()
-            listHost.append(alertBox('error', '这个栏目打不开', err.message))
+            listHost.append(
+                alertBox(
+                    'error',
+                    `「${current.title}」打不开`,
+                    hint ? `${err.message}（${hint}）` : err.message,
+                ),
+            )
         } finally {
             loading = false
         }

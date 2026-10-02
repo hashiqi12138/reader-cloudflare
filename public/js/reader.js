@@ -9,9 +9,31 @@
  *
  * 内容形式决定能不能翻页：文本可以分页，图片/音频/下载列表不能 ——
  * 后三种一律用滚动，并在界面上说明原因，而不是给一个翻不动的假翻页器。
+ *
+ * 显示设置对齐开源阅读（Legado）的「阅读设置」：背景色、字号、行距、翻页动画、
+ * 主题，外加「替换净化」。净化规则在这一层（浏览器端）执行 ——
+ * 它是读者的私人格式偏好，改一条就该立刻看到效果，不必来回存库。
  */
 
-import { alertBox, api, append, el, go, paramsOf, prefs, skeletonBlock, toast } from './core.js'
+import {
+    ACCENTS,
+    ACCENT_LABELS,
+    alertBox,
+    api,
+    append,
+    el,
+    go,
+    PAPERS,
+    PAPER_LABELS,
+    paramsOf,
+    prefs,
+    relativeTime,
+    skeletonBlock,
+    toast,
+} from './core.js'
+import { applyRules, loadRules, PRESET_RULES, saveRules, makeRule } from './replace.js'
+import { excerptAround, normalizeQuery, splitByQuery } from './search.js'
+import { addBook, inShelf, loadShelf } from './views.js'
 
 /** 一章的目录缓存：翻页时不该重新拉目录 */
 let bookCache = null
@@ -19,7 +41,9 @@ let bookCache = null
 export async function viewRead(host) {
     const route = new URLSearchParams(location.hash.split('?')[1] ?? '')
     const sourceId = route.get('sourceId') ?? ''
-    const bookUrl = route.get('url') ?? ''
+    // 也认 `bookUrl`：早先的「开始阅读」链接用的是这个名字，而阅读地址是可以
+    // 分享/收藏的 —— 老链接不该因为改了个参数名就打不开
+    const bookUrl = route.get('url') ?? route.get('bookUrl') ?? ''
     const nameHint = route.get('name') ?? ''
     const authorHint = route.get('author') ?? ''
     const wantedIndex = Number(route.get('index') ?? '0')
@@ -43,6 +67,8 @@ export async function viewRead(host) {
                 bookUrl,
                 name: info.name || nameHint || '未命名',
                 author: info.author || authorHint,
+                // 收藏时要带上封面：没有它书架里会是一个灰块
+                coverUrl: info.coverUrl ?? '',
                 chapters: toc.chapters ?? [],
                 warning: toc.warning ?? null,
             }
@@ -82,29 +108,95 @@ export async function viewRead(host) {
     const pageLabel = el('span', { class: 'reader-page-label', text: '' })
     const body = el('div', { class: 'reader-body' })
 
+    /**
+     * 收藏按钮
+     *
+     * 放在阅读界面里是必要的：「读完这一章觉得不错，想收起来」是最高频的收藏时机，
+     * 而回详情页再加书架等于打断阅读。状态取自书架缓存，加入后立刻切换。
+     */
+    let shelfEntries = []
+    try {
+        shelfEntries = await loadShelf()
+    } catch {
+        /* 书架读不到不影响阅读，只是收藏按钮会走「加入」那条路 */
+    }
+    const collectBtn = el('button', {
+        class: 'icon-btn',
+        text: '☆',
+        title: '加入书架',
+        onclick: async () => {
+            collectBtn.disabled = true
+            try {
+                await addBook(sourceId, {
+                    bookUrl,
+                    name: book.name,
+                    author: book.author,
+                    coverUrl: book.coverUrl,
+                })
+                collectBtn.textContent = '★'
+                collectBtn.title = '已在书架'
+            } catch (err) {
+                toast(`加入失败：${err.message}`, 'error')
+                collectBtn.disabled = false
+            }
+        },
+    })
+    if (inShelf(shelfEntries, sourceId, bookUrl)) {
+        collectBtn.textContent = '★'
+        collectBtn.title = '已在书架'
+        collectBtn.disabled = true
+    }
+
+    /**
+     * 书签按钮与章内搜索按钮
+     *
+     * 搜索只对文本正文有意义（图片/音频/下载章没有「一段字」可搜），
+     * 而「这一章是不是文本」要等正文取回来才知道 —— 顶栏却必须在那之前画出来，
+     * 否则取网期间连返回按钮都没有。所以这里先备好按钮，等 `isText` 定了再插进顶栏。
+     *
+     * 早先是「顶栏里直接判断 `isText`」，那是个**先读后声明**的死区错误：
+     * 整个阅读界面会报 `Cannot access 'isText' before initialization` 并只剩一个空壳。
+     */
+    const bookmarkBtn = el('button', {
+        class: 'icon-btn',
+        text: '🔖',
+        title: '书签',
+        onclick: () => openBookmarks(),
+    })
+    const searchBtn = el('button', {
+        class: 'icon-btn',
+        text: '🔍',
+        title: '本章内搜索',
+        onclick: () => openSearch(),
+    })
+
+    const topBar = el('header', { class: 'reader-top' }, [
+        el('button', {
+            class: 'icon-btn',
+            text: '‹',
+            title: '返回',
+            onclick: () => history.back(),
+        }),
+        titleNode,
+        el('div', { class: 'spacer' }),
+        collectBtn,
+        bookmarkBtn,
+        el('button', {
+            class: 'icon-btn',
+            text: '☰',
+            title: '目录',
+            onclick: () => openToc(),
+        }),
+        el('button', {
+            class: 'icon-btn',
+            text: 'Aa',
+            title: '显示设置',
+            onclick: () => openSettings(),
+        }),
+    ])
+
     const shell = el('div', { class: 'reader-shell' }, [
-        el('header', { class: 'reader-top' }, [
-            el('button', {
-                class: 'icon-btn',
-                text: '‹',
-                title: '返回',
-                onclick: () => history.back(),
-            }),
-            titleNode,
-            el('div', { class: 'spacer' }),
-            el('button', {
-                class: 'icon-btn',
-                text: '☰',
-                title: '目录',
-                onclick: () => openToc(),
-            }),
-            el('button', {
-                class: 'icon-btn',
-                text: 'Aa',
-                title: '显示设置',
-                onclick: () => openSettings(),
-            }),
-        ]),
+        topBar,
         body,
         el('footer', { class: 'reader-bottom' }, [
             el('button', {
@@ -159,8 +251,12 @@ export async function viewRead(host) {
     const isText = content.kind === 'text'
     let mode = prefs.get('readerMode') === 'scroll' || !isText ? 'scroll' : 'page'
 
+    // 到这里才知道这一章能不能搜，顶栏上的搜索按钮现在才插进去（见上面的说明）
+    if (isText) topBar.insertBefore(searchBtn, bookmarkBtn)
+
     // ---- 恢复阅读位置 ----
-    let restoredPage = 0
+    // 服务器上的进度只记「读到第几页」，而书签/目录跳转会直接在地址里带位置，
+    // 后者更精确也更「刚好是用户要的」，所以下面优先用它。
     let savedPage = null
     try {
         const data = await api(`/api/progress?${paramsOf({ sourceId, bookUrl })}`)
@@ -169,15 +265,36 @@ export async function viewRead(host) {
     } catch {
         /* 取不到进度不影响阅读，按第一页开始 */
     }
+    const routePage = route.get('page')
+    const routePos = Number(route.get('pos') ?? '')
 
     // ---- 渲染正文 ----
     const flow = el('div', { class: 'reader-flow' })
     let pageCount = 1
     let page = 0
 
-    if (isText) {
-        const text = String(content.content ?? '').trim()
-        if (text === '') {
+    /**
+     * 正文净化
+     *
+     * 在**渲染之前**做，而不是渲染之后改 DOM：分页是按文本长度算的，
+     * 先净化再排版才能得到正确的页码；反过来会出现「明明删掉了广告，
+     * 页码却还按原文算」的错位。
+     *
+     * 净化结果缓存在 `chapterText` 里，而不是每次重画都重算 ——
+     * 章内搜索每敲一个字就要重画一次正文，重算净化在长章节上是白费的开销。
+     */
+    let chapterText = isText
+        ? applyRules(String(content.content ?? '').trim(), loadRules()).trim()
+        : ''
+    /** 章内搜索：关键词 + 命中节点（按出现顺序）+ 当前是第几处 */
+    const search = { query: '', active: -1 }
+    let hitNodes = []
+
+    /** 把正文铺进阅读区，顺带标出章内搜索的命中 */
+    function paintFlow() {
+        hitNodes = []
+        flow.replaceChildren()
+        if (chapterText === '') {
             flow.append(
                 alertBox(
                     'warn',
@@ -185,11 +302,38 @@ export async function viewRead(host) {
                     '通常是书源的 content 规则没匹配到内容，或站点改版了。',
                 ),
             )
+            return
         }
-        for (const line of text.split('\n')) {
+
+        for (const line of chapterText.split('\n')) {
             const trimmed = line.trim()
-            if (trimmed !== '') flow.append(el('p', { text: trimmed }))
+            if (trimmed === '') continue
+
+            const parts = search.query === '' ? null : splitByQuery(trimmed, search.query)
+            // 没有命中的段落走快路径：一个文本节点，不额外造元素
+            if (parts === null || !parts.some((part) => part.hit)) {
+                flow.append(el('p', { text: trimmed }))
+                continue
+            }
+
+            const paragraph = el('p')
+            for (const part of parts) {
+                if (!part.hit) {
+                    paragraph.append(part.text)
+                    continue
+                }
+                const mark = el('mark', { class: 'search-hit', text: part.text })
+                // 序号写进 dataset：从事件里拿到被点的那一处，就能定位它在 hitNodes 里的下标
+                mark.dataset.hit = String(hitNodes.length)
+                hitNodes.push(mark)
+                paragraph.append(mark)
+            }
+            flow.append(paragraph)
         }
+    }
+
+    if (isText) {
+        paintFlow()
     } else {
         flow.append(renderMedia(content))
         flow.classList.add('media-flow')
@@ -335,7 +479,8 @@ export async function viewRead(host) {
             event.preventDefault()
             turn(-1)
         } else if (event.key === 'Escape') {
-            closeSheets()
+            // 面板开着就关面板，没开就什么也不做（不要顺手退出阅读）
+            activeSheetClose?.()
         }
     }
     window.addEventListener('keydown', onKey)
@@ -380,19 +525,35 @@ export async function viewRead(host) {
 
     const sheetHost = el('div', { class: 'sheet-host', hidden: true })
 
+    /**
+     * 当前这个面板的「关闭」动作
+     *
+     * 遮罩与 × 都走它，`Escape` 也走它 —— 否则按 Esc 关掉面板时会绕过收尾逻辑，
+     * 搜索面板那个 200ms 的输入去抖定时器还会在关掉之后触发一次重排。
+     */
+    let activeSheetClose = null
+
     function closeSheets() {
+        activeSheetClose = null
         sheetHost.hidden = true
         sheetHost.replaceChildren()
     }
 
-    function openSheet(title, content) {
+    function openSheet(title, content, onClose) {
+        // onClose 用来收尾：搜索面板与书签面板都持有「面板里的节点」的引用，
+        // 面板关掉之后不该再往里面写东西（写进游离节点不会报错，但会留下悬着的引用）
+        const close = () => {
+            onClose?.()
+            closeSheets()
+        }
+        activeSheetClose = close
         sheetHost.replaceChildren(
-            el('div', { class: 'sheet-backdrop', onclick: closeSheets }),
+            el('div', { class: 'sheet-backdrop', onclick: close }),
             el('section', { class: 'sheet' }, [
                 el('header', {}, [
                     el('strong', { text: title }),
                     el('div', { class: 'spacer' }),
-                    el('button', { class: 'icon-btn', text: '×', onclick: closeSheets }),
+                    el('button', { class: 'icon-btn', text: '×', onclick: close }),
                 ]),
                 el('div', { class: 'sheet-body' }, [content]),
             ]),
@@ -401,6 +562,10 @@ export async function viewRead(host) {
     }
 
     function openToc() {
+        // 目录名动辄几十个字，超长的会把列表挤成两三行；按偏好截一段，
+        // 完整标题留在 title 上，鼠标悬停仍能看到
+        const limit = Number(prefs.get('chapterTitleLimit')) || 24
+        const clip = (value) => (value.length > limit ? `${value.slice(0, limit)}…` : value)
         const list = el(
             'ul',
             { class: 'chapter-list' },
@@ -408,7 +573,8 @@ export async function viewRead(host) {
                 el('li', { dataset: { current: String(i === index) } }, [
                     el('button', {
                         class: 'chapter-link',
-                        text: `${i + 1}. ${item.name}`,
+                        title: item.name,
+                        text: `${i + 1}. ${clip(item.name)}`,
                         onclick: () => {
                             closeSheets()
                             openChapter(i, 'first')
@@ -421,6 +587,446 @@ export async function viewRead(host) {
         requestAnimationFrame(() => {
             list.querySelector('li[data-current="true"]')?.scrollIntoView({ block: 'center' })
         })
+    }
+
+    // ---- 章内搜索 ----
+
+    /** 搜索面板里的状态行与结果列表。面板没开时是 null，此时只需要维护命中节点 */
+    let searchStatusNode = null
+    let searchResultHost = null
+
+    /**
+     * 量出一个节点落在第几列（翻页模式下就是第几页）
+     *
+     * 用**折叠 Range** 而不是 `getBoundingClientRect()`：一个段落如果跨列断开，
+     * 元素矩形是几段碎片的并集，左边缘会落在上一列 —— 量出来是错的。
+     * 折叠 Range 量的是「这个字符站在哪一列」，正是要问的问题。
+     */
+    function columnOf(node) {
+        const width = body.clientWidth
+        if (width <= 0) return page
+        const anchor = node.nodeType === 3 || node.firstChild === null ? node : node.firstChild
+        let left
+        try {
+            const range = document.createRange()
+            range.setStart(anchor, 0)
+            range.collapse(true)
+            left = range.getBoundingClientRect().left
+        } catch {
+            left = node.getBoundingClientRect().left
+        }
+        const offset = left - body.getBoundingClientRect().left + page * width
+        return Math.floor((offset + 1) / width)
+    }
+
+    /** 面板里的状态与高亮跟着当前命中走 */
+    function syncSearchUi() {
+        if (searchStatusNode) {
+            searchStatusNode.textContent =
+                search.query === ''
+                    ? ''
+                    : hitNodes.length === 0
+                      ? `本章没有「${search.query}」`
+                      : search.active >= 0
+                        ? `第 ${search.active + 1} / ${hitNodes.length} 处`
+                        : `共 ${hitNodes.length} 处`
+        }
+        if (searchResultHost) {
+            for (const row of searchResultHost.children) {
+                row.classList.toggle('active', Number(row.dataset.hit) === search.active)
+            }
+        }
+    }
+
+    /** 跳到第 k 处命中（k 会按命中总数取模，因此 -1 就是最后一处） */
+    function goToHit(k) {
+        const total = hitNodes.length
+        if (total === 0) return
+        search.active = ((k % total) + total) % total
+        hitNodes.forEach((node, i) => node.classList.toggle('active', i === search.active))
+        const node = hitNodes[search.active]
+
+        if (mode === 'page') {
+            // 翻页模式不能靠 scrollIntoView 定位：正文是横向多列，纵向滚动根本不动
+            const previous = page
+            page = Math.max(0, Math.min(pageCount - 1, columnOf(node)))
+            applyPage(previous !== page, page < previous ? 'prev' : 'next')
+        } else {
+            node.scrollIntoView({ block: 'center', behavior: 'smooth' })
+        }
+        syncSearchUi()
+    }
+
+    /** 相对当前命中前后移动。还没有当前命中时，「下一处」从第一处开始 */
+    function stepHit(delta) {
+        if (hitNodes.length === 0) return
+        if (search.active < 0) goToHit(delta >= 0 ? 0 : hitNodes.length - 1)
+        else goToHit(search.active + delta)
+    }
+
+    /**
+     * 章内搜索面板
+     *
+     * 只搜当前这一章，与「搜书」是两回事：搜书是拿关键词去各书源找书，
+     * 这个回答的是「刚才那句在哪儿」。因此它不碰网络、不重新取正文 ——
+     * 搜的是**已经净化、已经排版好的这一章**，所见即所搜。
+     */
+    function openSearch() {
+        if (!isText) return
+
+        const input = el('input', {
+            type: 'search',
+            class: 'search-input',
+            placeholder: '在本章里找…',
+            value: search.query,
+        })
+        searchStatusNode = el('p', { class: 'muted tiny search-status' })
+        searchResultHost = el('div', { class: 'search-results' })
+
+        function renderResults() {
+            searchResultHost.replaceChildren()
+            if (search.query === '') {
+                searchResultHost.append(
+                    el('p', { class: 'muted tiny', text: '输入关键词，正文里所有出现都会高亮。' }),
+                )
+                return
+            }
+            if (hitNodes.length === 0) return
+
+            const rows = []
+            for (const paragraph of flow.children) {
+                const first = paragraph.querySelector('mark.search-hit')
+                if (!first) continue
+                const hits = paragraph.querySelectorAll('mark.search-hit').length
+                rows.push(
+                    el(
+                        'button',
+                        {
+                            class: 'search-result',
+                            dataset: { hit: first.dataset.hit },
+                            onclick: () => goToHit(Number(first.dataset.hit)),
+                        },
+                        [
+                            el('span', {
+                                class: 'search-result-text',
+                                text: excerptAround(paragraph.textContent ?? '', search.query),
+                            }),
+                            hits > 1
+                                ? el('span', { class: 'search-result-count', text: `×${hits}` })
+                                : null,
+                        ],
+                    ),
+                )
+                // 几十万字的长章节可能有上千处命中，全铺出来只会让面板自己卡住
+                if (rows.length >= 200) break
+            }
+            searchResultHost.append(...rows)
+        }
+
+        /** 重新高亮并重排 */
+        function refresh({ jumpToFirst }) {
+            search.query = normalizeQuery(input.value)
+            search.active = -1
+            paintFlow()
+            measure()
+            page = Math.min(page, Math.max(0, pageCount - 1))
+            applyPage(false)
+            renderResults()
+            if (jumpToFirst && hitNodes.length > 0) goToHit(0)
+            else syncSearchUi()
+        }
+
+        // 输入去抖：每敲一个字都重排一次长章节会明显发涩，200ms 足够让人感觉不到延迟
+        let inputTimer = null
+        input.addEventListener('input', () => {
+            clearTimeout(inputTimer)
+            inputTimer = setTimeout(() => refresh({ jumpToFirst: true }), 200)
+        })
+        input.addEventListener('keydown', (event) => {
+            if (event.key !== 'Enter') return
+            event.preventDefault()
+            stepHit(event.shiftKey ? -1 : 1)
+        })
+
+        openSheet(
+            '本章内搜索',
+            el('div', { class: 'settings' }, [
+                el('div', { class: 'row' }, [
+                    input,
+                    el('button', {
+                        class: 'btn ghost sm',
+                        text: '清除',
+                        onclick: () => {
+                            clearTimeout(inputTimer)
+                            input.value = ''
+                            refresh({ jumpToFirst: false })
+                            input.focus()
+                        },
+                    }),
+                ]),
+                el('div', { class: 'row' }, [
+                    el('button', {
+                        class: 'btn ghost sm',
+                        text: '上一处',
+                        onclick: () => stepHit(-1),
+                    }),
+                    el('button', {
+                        class: 'btn ghost sm',
+                        text: '下一处',
+                        onclick: () => stepHit(1),
+                    }),
+                    el('div', { class: 'spacer' }),
+                    searchStatusNode,
+                ]),
+                searchResultHost,
+            ]),
+            () => {
+                clearTimeout(inputTimer)
+                searchStatusNode = null
+                searchResultHost = null
+            },
+        )
+
+        renderResults()
+        syncSearchUi()
+        input.focus()
+    }
+
+    // ---- 书签 ----
+
+    let bookmarks = []
+    let bookmarksLoaded = false
+
+    async function loadBookmarks(force = false) {
+        if (bookmarksLoaded && !force) return bookmarks
+        const data = await api(`/api/bookmarks?${paramsOf({ sourceId, bookUrl })}`)
+        bookmarks = data.bookmarks ?? []
+        bookmarksLoaded = true
+        return bookmarks
+    }
+
+    /** 滚动位置占整章的比例。滚动模式没有页的概念，书签只能按比例记 */
+    function scrollRatio() {
+        const max = body.scrollHeight - body.clientHeight
+        return max > 0 ? Math.min(1, Math.max(0, body.scrollTop / max)) : 0
+    }
+
+    /** 当前位置的正文片段，加书签时写进列表 —— 只写「第 37 章」看不出记住了什么 */
+    function currentExcerpt() {
+        const paragraphs = [...flow.children]
+        if (paragraphs.length === 0) return ''
+        const clip = (node) => (node.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 80)
+
+        if (mode === 'page') {
+            const found = paragraphs.find((node) => columnOf(node) === page)
+            return clip(found ?? paragraphs[0])
+        }
+        // 滚动模式没有列号可用，按滚动比例在段落里估个位置
+        const ratio = scrollRatio()
+        const at = Math.min(paragraphs.length - 1, Math.floor(ratio * paragraphs.length))
+        return clip(paragraphs[at])
+    }
+
+    /**
+     * 跳到这本书的某一处
+     *
+     * 书签记的是「第几章 + 位置」，所以两样都要带进路由：翻页模式带页码，
+     * 滚动模式没有页，带百分比。页面重新加载后由开头的「恢复阅读位置」接手。
+     */
+    function jumpTo(chapterIndex, { pageIndex = 0, percent = 0 } = {}) {
+        if (chapterIndex < 0 || chapterIndex >= book.chapters.length) return
+        go(
+            `#/read?${paramsOf({
+                sourceId,
+                url: bookUrl,
+                name: book.name,
+                author: book.author,
+                index: chapterIndex,
+                page: pageIndex,
+                pos: percent > 0 ? percent.toFixed(4) : '',
+            })}`,
+        )
+    }
+
+    async function openBookmarks() {
+        const addBtn = el('button', { class: 'btn primary sm' })
+        const summary = el('p', { class: 'muted tiny' })
+        const listHost = el('div', { class: 'bm-list' })
+        let editingId = null
+
+        function renderHead() {
+            const here = bookmarks.find((item) => isSameSpot(item))
+            addBtn.textContent = here ? '这一处已经有书签了' : '在当前位置加书签'
+            addBtn.disabled = Boolean(here)
+            summary.textContent =
+                bookmarks.length === 0 ? '这本书还没有书签。' : `共 ${bookmarks.length} 处书签。`
+        }
+
+        /** 位置相同就是同一处，重复加只会让列表里出现两条一模一样的 */
+        function isSameSpot(item) {
+            if (item.chapterUrl !== chapter.url) return false
+            if (mode === 'page') return item.pageIndex === page
+            return Math.abs(item.percent - scrollRatio()) < 0.02
+        }
+
+        async function reload() {
+            try {
+                await loadBookmarks(true)
+            } catch (err) {
+                toast(`书签读不到：${err.message}`, 'error')
+                bookmarks = []
+            }
+            renderHead()
+            renderList()
+        }
+
+        function renderList() {
+            if (bookmarks.length === 0) {
+                listHost.replaceChildren()
+                return
+            }
+            listHost.replaceChildren(
+                ...bookmarks.map((item) => (editingId === item.id ? noteRow(item) : viewRow(item))),
+            )
+        }
+
+        function viewRow(item) {
+            return el('div', { class: 'bm-row' }, [
+                el(
+                    'button',
+                    {
+                        class: 'bm-main',
+                        title: '跳到这一处',
+                        onclick: () => {
+                            closeSheets()
+                            jumpTo(item.chapterIndex, {
+                                pageIndex: item.pageIndex,
+                                percent: item.percent,
+                            })
+                        },
+                    },
+                    [
+                        el('div', { class: 'bm-head' }, [
+                            el('span', {
+                                class: 'bm-chapter',
+                                text: item.chapterName || `第 ${item.chapterIndex + 1} 章`,
+                            }),
+                            el('span', { class: 'bm-time', text: relativeTime(item.createdAt) }),
+                        ]),
+                        item.excerpt
+                            ? el('div', { class: 'bm-excerpt', text: item.excerpt })
+                            : null,
+                        item.note ? el('div', { class: 'bm-note', text: item.note }) : null,
+                    ],
+                ),
+                el('button', {
+                    class: 'icon-btn',
+                    text: '✎',
+                    title: '改备注',
+                    onclick: () => {
+                        editingId = item.id
+                        renderList()
+                    },
+                }),
+                el('button', {
+                    class: 'icon-btn',
+                    text: '×',
+                    title: '删除',
+                    onclick: () => remove(item),
+                }),
+            ])
+        }
+
+        function noteRow(item) {
+            const input = el('input', {
+                type: 'text',
+                value: item.note,
+                placeholder: '写点备注（可留空）',
+            })
+            const save = async () => {
+                try {
+                    await api('/api/bookmarks', {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ id: item.id, note: input.value }),
+                    })
+                    editingId = null
+                    await reload()
+                } catch (err) {
+                    toast(`备注没存上：${err.message}`, 'error')
+                }
+            }
+            input.addEventListener('keydown', (event) => {
+                if (event.key === 'Enter') void save()
+                if (event.key === 'Escape') {
+                    editingId = null
+                    renderList()
+                }
+            })
+            return el('div', { class: 'bm-row editing' }, [
+                el('div', { class: 'bm-main' }, [input]),
+                el('button', { class: 'btn primary sm', text: '保存', onclick: () => void save() }),
+                el('button', {
+                    class: 'btn ghost sm',
+                    text: '取消',
+                    onclick: () => {
+                        editingId = null
+                        renderList()
+                    },
+                }),
+            ])
+        }
+
+        async function remove(item) {
+            try {
+                await api(`/api/bookmarks?${paramsOf({ id: item.id })}`, { method: 'DELETE' })
+                toast('书签已删除')
+                await reload()
+            } catch (err) {
+                toast(`删不掉：${err.message}`, 'error')
+            }
+        }
+
+        addBtn.addEventListener('click', async () => {
+            addBtn.disabled = true
+            try {
+                await api('/api/bookmarks', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        sourceId,
+                        bookUrl,
+                        chapterUrl: chapter.url,
+                        chapterName: chapter.name,
+                        chapterIndex: index,
+                        pageIndex: mode === 'page' ? page : 0,
+                        percent: mode === 'page' ? 0 : scrollRatio(),
+                        excerpt: currentExcerpt(),
+                    }),
+                })
+                toast('已加书签')
+                await reload()
+            } catch (err) {
+                toast(`加书签失败：${err.message}`, 'error')
+                addBtn.disabled = false
+            }
+        })
+
+        openSheet(
+            '书签',
+            el('div', { class: 'settings' }, [
+                summary,
+                el('div', { class: 'row' }, [addBtn]),
+                listHost,
+            ]),
+            () => {
+                editingId = null
+            },
+        )
+
+        renderHead()
+        listHost.replaceChildren(el('p', { class: 'muted tiny', text: '正在读取…' }))
+        await reload()
     }
 
     function openSettings() {
@@ -505,25 +1111,343 @@ export async function viewRead(host) {
 
         rows.push(
             el('div', { class: 'setting-row' }, [
-                el('span', { text: '纸色' }),
+                el('span', { text: '翻页动画' }),
+                el('div', { class: 'segmented' }, [
+                    segmented('覆盖', prefs.get('turnMode') === 'cover', () => {
+                        prefs.set('turnMode', 'cover')
+                        openSettings()
+                    }),
+                    segmented('滑动', prefs.get('turnMode') === 'slide', () => {
+                        prefs.set('turnMode', 'slide')
+                        openSettings()
+                    }),
+                    segmented('无', prefs.get('turnMode') === 'none', () => {
+                        prefs.set('turnMode', 'none')
+                        openSettings()
+                    }),
+                ]),
+            ]),
+        )
+
+        // 背景色：九种纸色，只作用于阅读界面（`--paper` 只在阅读界面被消费）
+        rows.push(
+            el('div', { class: 'setting-block' }, [
+                el('span', { class: 'setting-label', text: '背景色' }),
                 el(
                     'div',
-                    { class: 'swatches' },
-                    ['amber', 'green', 'blue', 'rose'].map((color) =>
-                        el('button', {
-                            class: `swatch ${color} ${prefs.get('themeColor') === color ? 'active' : ''}`,
-                            title: color,
-                            onclick: () => {
-                                prefs.set('themeColor', color)
-                                openSettings()
+                    { class: 'papers' },
+                    PAPERS.map((paper) => {
+                        const active = (prefs.get('readerPaper') || 'auto') === paper
+                        return el(
+                            'button',
+                            {
+                                class: `paper-chip ${active ? 'active' : ''}`,
+                                title: PAPER_LABELS[paper] ?? paper,
+                                dataset: { paper },
+                                onclick: () => {
+                                    prefs.set('readerPaper', paper)
+                                    openSettings()
+                                },
                             },
-                        }),
+                            [
+                                el('span', { class: 'paper-dot' }),
+                                el('span', { text: PAPER_LABELS[paper] ?? paper }),
+                            ],
+                        )
+                    }),
+                ),
+            ]),
+        )
+
+        // 强调色：影响按钮、进度条这些点缀，与上面的背景色是两件事
+        rows.push(
+            el('div', { class: 'setting-block' }, [
+                el('span', { class: 'setting-label', text: '强调色' }),
+                el(
+                    'div',
+                    { class: 'papers' },
+                    ACCENTS.map((accent) =>
+                        el(
+                            'button',
+                            {
+                                class: `paper-chip ${prefs.get('themeColor') === accent ? 'active' : ''}`,
+                                onclick: () => {
+                                    prefs.set('themeColor', accent)
+                                    openSettings()
+                                },
+                            },
+                            [
+                                el('span', { class: `paper-dot accent-${accent}` }),
+                                el('span', { text: ACCENT_LABELS[accent] ?? accent }),
+                            ],
+                        ),
                     ),
                 ),
             ]),
         )
 
+        const ruleCount = loadRules().filter((rule) => rule.enabled).length
+
+        rows.push(
+            el('div', { class: 'setting-row' }, [
+                el('span', { text: '替换净化' }),
+                el('div', { class: 'segmented' }, [
+                    segmented(
+                        ruleCount > 0 ? `已启用 ${ruleCount} 条` : '未设置',
+                        ruleCount > 0,
+                        () => openReplaceRules(),
+                    ),
+                ]),
+            ]),
+        )
+
         openSheet('显示设置', el('div', { class: 'settings' }, rows))
+    }
+
+    /**
+     * 替换净化规则的编辑界面
+     *
+     * 对齐开源阅读的「替换净化」：列表 + 逐条启停 + 手写正则 + 预设一键添加 + 试跑。
+     * 改动立刻写回 localStorage 并**重排当前章节** —— 用户改完马上能看到效果，
+     * 而不是要退出阅读再进来。
+     */
+    function openReplaceRules() {
+        const rules = loadRules()
+        const listHost = el('div', { class: 'rule-list' })
+        const form = el('div', { class: 'rule-form' })
+        const previewHost = el('div', { class: 'rule-preview' })
+        let editing = -1
+
+        function commit(message) {
+            saveRules(rules)
+            render()
+            void relayoutAfterPurify()
+            if (message) toast(message)
+        }
+
+        function render() {
+            if (rules.length === 0) {
+                listHost.replaceChildren(
+                    el('p', {
+                        class: 'muted tiny center',
+                        text: '还没有规则。可以从预设里加一条，或自己写。',
+                    }),
+                )
+            } else {
+                listHost.replaceChildren(
+                    ...rules.map((rule, i) =>
+                        el('div', { class: 'rule-row' }, [
+                            el('label', { class: 'switch', title: '启用/停用' }, [
+                                el('input', {
+                                    type: 'checkbox',
+                                    checked: rule.enabled,
+                                    onchange: (event) => {
+                                        rules[i] = makeRule({
+                                            ...rule,
+                                            enabled: event.target.checked,
+                                        })
+                                        commit()
+                                    },
+                                }),
+                                el('span', { class: 'switch-track' }),
+                            ]),
+                            el('div', { class: 'rule-text' }, [
+                                el('div', { class: 'rule-name', text: rule.name || '（未命名）' }),
+                                el('code', { class: 'rule-pattern', text: rule.pattern }),
+                                rule.replacement
+                                    ? el('code', {
+                                          class: 'rule-replacement',
+                                          text: `→ ${rule.replacement}`,
+                                      })
+                                    : null,
+                            ]),
+                            el('button', {
+                                class: 'icon-btn',
+                                text: '✎',
+                                title: '编辑',
+                                onclick: () => {
+                                    editing = i
+                                    renderForm()
+                                },
+                            }),
+                            el('button', {
+                                class: 'icon-btn',
+                                text: '×',
+                                title: '删除',
+                                onclick: () => {
+                                    rules.splice(i, 1)
+                                    editing = -1
+                                    commit(`已删除规则`)
+                                },
+                            }),
+                        ]),
+                    ),
+                )
+            }
+            renderPreview()
+        }
+
+        function renderPreview() {
+            // 拿**原始正文**算，不是当前已经净化过的正文 —— 否则预览会显示
+            // 「52 字 → 52 字」，看起来像规则没生效，实际是它已经被应用过了
+            const text = String(content.content ?? '').trim()
+            if (text.trim() === '') {
+                previewHost.replaceChildren()
+                return
+            }
+            const cleaned = applyRules(
+                text,
+                rules.filter((rule) => rule.enabled),
+            )
+            const before = text.length
+            const after = cleaned.length
+            previewHost.replaceChildren(
+                el('p', {
+                    class: 'muted tiny',
+                    text: `本章原文 ${before} 字 → 净化后 ${after} 字（少 ${Math.max(0, before - after)} 字）`,
+                }),
+                el('p', {
+                    class: 'muted tiny',
+                    text: cleaned.slice(0, 90) + (cleaned.length > 90 ? '…' : ''),
+                }),
+            )
+        }
+
+        function renderForm() {
+            const draft = editing >= 0 ? rules[editing] : makeRule()
+            const nameInput = el('input', {
+                type: 'text',
+                placeholder: '规则名（随便写）',
+                value: draft.name,
+            })
+            const patternInput = el('input', {
+                type: 'text',
+                placeholder: '正则或纯文本，例如 本章未完',
+                value: draft.pattern,
+            })
+            const replacementInput = el('input', {
+                type: 'text',
+                placeholder: '替换成什么（留空即删除）',
+                value: draft.replacement,
+            })
+
+            form.replaceChildren(
+                el('div', { class: 'row' }, [nameInput]),
+                el('div', { class: 'row' }, [patternInput]),
+                el('div', { class: 'row' }, [replacementInput]),
+                el('div', { class: 'row' }, [
+                    el('button', {
+                        class: 'btn primary sm',
+                        text: editing >= 0 ? '保存修改' : '添加规则',
+                        onclick: () => {
+                            const rule = makeRule({
+                                name: nameInput.value,
+                                pattern: patternInput.value,
+                                replacement: replacementInput.value,
+                                enabled: true,
+                            })
+                            if (rule.pattern === '') {
+                                toast('规则内容不能为空', 'error')
+                                return
+                            }
+                            if (editing >= 0) rules[editing] = rule
+                            else rules.push(rule)
+                            editing = -1
+                            commit()
+                        },
+                    }),
+                    editing >= 0
+                        ? el('button', {
+                              class: 'btn ghost sm',
+                              text: '取消编辑',
+                              onclick: () => {
+                                  editing = -1
+                                  renderForm()
+                              },
+                          })
+                        : null,
+                    el('div', { class: 'spacer' }),
+                    el('button', {
+                        class: 'btn ghost sm',
+                        text: '从预设添加',
+                        onclick: () => openPresets(),
+                    }),
+                ]),
+            )
+        }
+
+        function openPresets() {
+            openSheet(
+                '预设规则',
+                el('div', { class: 'settings' }, [
+                    el('p', {
+                        class: 'muted tiny',
+                        text: '点一条加进来，之后可以再改。都是常见站点广告与排版噪声。',
+                    }),
+                    ...PRESET_RULES.map((preset) =>
+                        el(
+                            'button',
+                            {
+                                class: 'rule-preset',
+                                onclick: () => {
+                                    rules.push(makeRule(preset))
+                                    editing = -1
+                                    commit(`已添加：${preset.name}`)
+                                },
+                            },
+                            [
+                                el('span', { class: 'rule-name', text: preset.name }),
+                                el('code', { class: 'rule-pattern', text: preset.pattern }),
+                            ],
+                        ),
+                    ),
+                    el('button', {
+                        class: 'btn ghost sm',
+                        text: '返回',
+                        onclick: () => openReplaceRules(),
+                    }),
+                ]),
+            )
+        }
+
+        render()
+        renderForm()
+
+        openSheet(
+            '替换净化',
+            el('div', { class: 'settings' }, [
+                el('p', {
+                    class: 'muted tiny',
+                    text: '规则按顺序作用于正文，只影响你这一端的显示，不改书源、不改服务器内容。',
+                }),
+                previewHost,
+                listHost,
+                el('div', {
+                    class: 'rule-add-title',
+                    text: editing >= 0 ? '编辑规则' : '新增规则',
+                }),
+                form,
+                el('button', {
+                    class: 'btn ghost sm',
+                    text: '返回显示设置',
+                    onclick: () => openSettings(),
+                }),
+            ]),
+        )
+    }
+
+    /** 净化规则改完之后重排当前章节，让效果立刻可见 */
+    function relayoutAfterPurify() {
+        // 净化结果变了，章内搜索的命中也要跟着重算 —— 旧的高亮节点已经随 DOM 一起没了
+        chapterText = applyRules(String(content.content ?? '').trim(), loadRules()).trim()
+        if (search.query !== '') search.active = -1
+        paintFlow()
+        requestAnimationFrame(() => {
+            measure()
+            page = Math.min(page, Math.max(0, pageCount - 1))
+            applyPage(false)
+            syncSearchUi()
+        })
     }
 
     function setLineHeight(delta) {
@@ -549,15 +1473,22 @@ export async function viewRead(host) {
     requestAnimationFrame(() => {
         measure()
         if (mode === 'page') {
-            const last = route.get('page') === 'last'
-            page = last ? pageCount - 1 : Math.min(savedPage ?? restoredPage, pageCount - 1)
+            if (routePage === 'last') {
+                page = pageCount - 1
+            } else if (routePage !== null && routePage !== '') {
+                // 地址里带了具体页码（从书签跳过来）—— 它比服务器上的进度更明确
+                page = Math.min(Math.max(0, Number(routePage) || 0), pageCount - 1)
+            } else {
+                page = Math.min(savedPage ?? 0, pageCount - 1)
+            }
             applyPage(false)
         } else {
             pageLabel.textContent = ''
             updateProgressBar(1)
-            if (savedPage) {
-                // 滚动模式没有页概念，按比例粗略回到上次的位置
-                body.scrollTop = Math.round(body.scrollHeight * 0.0)
+            // 滚动模式没有页的概念，服务器上也只记了「第几章」，
+            // 因此只有书签带过来的百分比能恢复位置，否则就是从这一章开头开始
+            if (Number.isFinite(routePos) && routePos > 0) {
+                body.scrollTop = Math.round((body.scrollHeight - body.clientHeight) * routePos)
             }
         }
         void saveProgress()

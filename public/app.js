@@ -155,10 +155,6 @@ async function render() {
     const host = document.querySelector('#view')
     const shell = document.body
 
-    // 阅读界面全屏：把导航、页脚收起来
-    const isReader = path === 'read' && currentUser() !== null
-    shell.dataset.reader = isReader ? '1' : '0'
-
     let session
     try {
         session = await loadSession()
@@ -166,6 +162,18 @@ async function render() {
         host.replaceChildren(alertBox('error', '连不上服务', err.message))
         return
     }
+
+    /**
+     * 阅读界面全屏：把导航、页脚收起来
+     *
+     * **必须等会话加载完再判断**。早先这段在 `loadSession()` 之前，
+     * 而首次加载时 `currentUser()` 还是 null —— 于是「直接打开或刷新一个阅读链接」
+     * 算出来不是阅读页，`data-reader` 停在 0：导航栏留在屏幕上，
+     * 而它的 `z-index` 比阅读界面高，**正好盖住阅读界面的顶栏按钮**，
+     * 表现为「收藏、目录、设置点了没反应」。从书页点进来时会话已经加载过，
+     * 所以只有刷新这一条路径会踩到，特别难自己发现。
+     */
+    shell.dataset.reader = path === 'read' && session.user ? '1' : '0'
 
     renderTabs(path)
     renderAccount()
