@@ -9,8 +9,21 @@ import { Hono } from 'hono'
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie'
 import type { Context } from 'hono'
 
-import { countUserSources, deleteUserSource, importSources, setSourceEnabled } from './data/db'
-import { findSource, listEnabledSources, listSources } from './data/sources'
+import {
+    countUserSources,
+    deleteUserSource,
+    importSources,
+    recordSourceHealth,
+    setSourceEnabled,
+    type SourceOutcome,
+} from './data/db'
+import {
+    findSource,
+    listEnabledSourcePage,
+    listEnabledSources,
+    listEnabledSourcesByIds,
+    listSources,
+} from './data/sources'
 import type { RegistryOptions } from './data/sources'
 import { addToShelf, getProgress, listShelf, removeFromShelf, saveProgress } from './data/library'
 import type { AddToShelfInput, SaveProgressInput } from './data/library'
@@ -1015,15 +1028,28 @@ app.get('/api/home', async (c) => {
     return c.json({ ...payload, continueReading, count: entries.length })
 })
 
+/** 搜索分页：一页默认搜几个书源（界面默认也是这个数） */
+const SEARCH_PAGE_SIZE = 10
+
+/** 一页的上限 —— 兜住「客户端硬要一次搜 500 个」 */
+const SEARCH_MAX_PAGE = 50
+
+function clampPage(value: number): number {
+    if (!Number.isFinite(value) || value <= 0) return SEARCH_PAGE_SIZE
+    return Math.min(Math.floor(value), SEARCH_MAX_PAGE)
+}
+
 /**
  * 聚合搜索
  *
  * 书源之间并发请求，单个源失败只影响它自己那一条结果。
- * 只搜**启用的**书源；一个都没有时照样返回 200，
- * 但把 sourceCount 一起给出去，前端才能区分「没有书源」和「没搜到」。
+ * **每个请求只搜一页**：免费计划每个请求只有 10 ms CPU，把全部书源（真实安装是
+ * 594 个）读出来再求值必然被掐（见 README「第二十六轮」）。界面默认一页 10 个，
+ * 用户点「继续加载」再要下一页 —— 额度按人的节奏花，而不是被一次搜索烧光。
+ * 顺序由 `listUserSourcePage` 按「健康度」定，先把额度花在还活着的源上。
  */
 app.post('/api/search', async (c) => {
-    let body: { keyword?: string; sourceIds?: string[] }
+    let body: { keyword?: string; sourceIds?: string[]; offset?: number; limit?: number }
     try {
         body = await c.req.json()
     } catch {
@@ -1034,8 +1060,16 @@ app.post('/api/search', async (c) => {
     if (keyword === '') return c.json({ error: 'keyword 不能为空' }, 400)
 
     const origin = new URL(c.req.url).origin
-    const all = await listEnabledSources(c.env.DB, origin, registryOf(c.env))
-    const wanted = body.sourceIds?.length ? all.filter((s) => body.sourceIds!.includes(s.id)) : all
+    const limit = clampPage(Math.floor(Number(body.limit) || SEARCH_PAGE_SIZE))
+    const offset = Math.max(0, Math.floor(Number(body.offset) || 0))
+
+    const page = body.sourceIds?.length
+        ? await listEnabledSourcesByIds(c.env.DB, origin, body.sourceIds, registryOf(c.env)).then(
+              (sources) => ({ sources, total: sources.length }),
+          )
+        : await listEnabledSourcePage(c.env.DB, origin, registryOf(c.env), { offset, limit })
+    const wanted = page.sources
+    const total = page.total
 
     /**
      * 全部书源共用**一个** session
@@ -1076,8 +1110,25 @@ app.post('/api/search', async (c) => {
         }),
     )
 
+    // 回写健康度：搜到书算 ok、报错算 fail、没报错也没结果不动（见 db.ts）
+    try {
+        await recordSourceHealth(
+            c.env.DB,
+            results.map((item) => ({
+                id: item.sourceId,
+                outcome: (item.ok ? (item.count > 0 ? 'ok' : 'idle') : 'fail') as SourceOutcome,
+            })),
+        )
+    } catch {
+        // 健康度只影响「下次怎么排序」，写不进去不该让这次搜索白跑
+    }
+
     return c.json({
         keyword,
+        offset,
+        limit,
+        totalSources: total,
+        searched: results.length,
         sourceCount: results.length,
         totalBooks: results.reduce((sum, r) => sum + r.count, 0),
         sources: results,

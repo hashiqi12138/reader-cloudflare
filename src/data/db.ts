@@ -80,6 +80,87 @@ export async function getUserSource(
     return row ? rowToSource(row) : undefined
 }
 
+/**
+ * 启用书源里、按「健康度」排好序的一页
+ *
+ * 搜索用这个，而不是把全部书源都读出来：
+ * - `LIMIT/OFFSET` 让每个请求**只解析这一页**的规则（594 条全读出来是 4.5 MB JSON，
+ *   单是解析这一步就可能吃掉免费计划那 10 ms 的 CPU 预算）
+ * - 排序把「连续失败 5 次以上」的源放到最后 —— 额度先花在还活着的源上，
+ *   但它们**不会被永久跳过**（网络抖一下不该让一个源永远出局）
+ */
+export async function listUserSourcePage(
+    db: D1Database,
+    offset: number,
+    limit: number,
+): Promise<RegisteredSource[]> {
+    const { results } = await db
+        .prepare(
+            `SELECT ${SELECT_COLUMNS} FROM sources
+             WHERE enabled = 1
+             ORDER BY (fail_streak >= 5), fail_streak, sort_order, name
+             LIMIT ? OFFSET ?`,
+        )
+        .bind(limit, offset)
+        .all<SourceRow>()
+    return (results ?? []).map(rowToSource)
+}
+
+/** 按 id 批量取用户书源（只读点到的这几条，不碰整张表） */
+export async function listUserSourcesByIds(
+    db: D1Database,
+    ids: string[],
+): Promise<RegisteredSource[]> {
+    if (ids.length === 0) return []
+    const placeholders = ids.map(() => '?').join(', ')
+    const { results } = await db
+        .prepare(`SELECT ${SELECT_COLUMNS} FROM sources WHERE id IN (${placeholders})`)
+        .bind(...ids)
+        .all<SourceRow>()
+    return (results ?? []).map(rowToSource)
+}
+
+/** 启用的用户书源总数（分页要让界面知道「还有多少个没搜」） */
+export async function countEnabledSources(db: D1Database): Promise<number> {
+    const row = await db
+        .prepare('SELECT COUNT(*) AS n FROM sources WHERE enabled = 1')
+        .first<{ n: number }>()
+    return row?.n ?? 0
+}
+
+/**
+ * 一轮搜索之后回写书源健康度
+ *
+ * 三态而不是两态，因为「没报错但没搜到」**不该算失败** —— 那通常只是关键词
+ * 不匹配，把它记成失败会让好源被一路排到最后：
+ * - `ok`（搜到了书）：记下时间、连续失败清零
+ * - `fail`（报错/超时/被掐）：连续失败 +1
+ * - `idle`（没报错也没结果）：什么都不动
+ *
+ * 只写这几个源，一条 `batch` 就够（D1 一次往返）。
+ */
+export type SourceOutcome = 'ok' | 'fail' | 'idle'
+
+export async function recordSourceHealth(
+    db: D1Database,
+    outcomes: { id: string; outcome: SourceOutcome }[],
+): Promise<void> {
+    const now = Date.now()
+    const stmts = outcomes
+        .filter((item) => item.outcome !== 'idle' && !item.id.startsWith(BUILTIN_ID_PREFIX))
+        .map((item) =>
+            item.outcome === 'ok'
+                ? db
+                      .prepare('UPDATE sources SET last_ok_at = ?, fail_streak = 0 WHERE id = ?')
+                      .bind(now, item.id)
+                : db
+                      .prepare('UPDATE sources SET fail_streak = fail_streak + 1 WHERE id = ?')
+                      .bind(item.id),
+        )
+    if (stmts.length === 0) return
+    await db.batch(stmts)
+}
+
 export async function countUserSources(db: D1Database): Promise<number> {
     const row = await db.prepare('SELECT COUNT(*) AS n FROM sources').first<{ n: number }>()
     return row?.n ?? 0

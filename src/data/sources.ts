@@ -9,7 +9,13 @@
  */
 
 import type { BookSource } from '../engine/types'
-import { getUserSource, listUserSources } from './db'
+import {
+    countEnabledSources,
+    getUserSource,
+    listUserSources,
+    listUserSourcesByIds,
+    listUserSourcePage,
+} from './db'
 import { BUILTIN_ID_PREFIX, type RegisteredSource } from './types'
 
 export type { RegisteredSource }
@@ -642,6 +648,56 @@ export async function listEnabledSources(
 ): Promise<RegisteredSource[]> {
     const all = await listSources(db, origin, options)
     return all.filter((source) => source.enabled !== false)
+}
+
+/**
+ * 搜索用的一页书源
+ *
+ * 内置书源不落库，所以「前几个」得把它算进去：offset 落在内置段里时先给内置源，
+ * 剩下的再从库里按页取（`listUserSourcePage` 只读这一页的规则）。
+ * 返回的 total 是**内置 + 用户**的总数，界面靠它算「还有多少个源没搜」。
+ */
+export async function listEnabledSourcePage(
+    db: D1Database,
+    origin: string,
+    options: RegistryOptions,
+    page: { offset: number; limit: number },
+): Promise<{ sources: RegisteredSource[]; total: number }> {
+    const builtin = options.includeFixture
+        ? builtinSources(origin).filter((source) => source.enabled !== false)
+        : []
+    const total = builtin.length + (await countEnabledSources(db))
+
+    const offset = Math.max(0, Math.floor(page.offset) || 0)
+    const limit = Math.max(1, Math.floor(page.limit) || 1)
+    // 内置源在前（只有本地/测试才有），不够一页的再从库里补
+    const out: RegisteredSource[] = builtin.slice(offset, offset + limit)
+
+    const userOffset = Math.max(0, offset - builtin.length)
+    const userLimit = limit - out.length
+    if (userLimit > 0) out.push(...(await listUserSourcePage(db, userOffset, userLimit)))
+
+    return { sources: out, total }
+}
+
+/** 按 id 批量取「启用的」书源（只读点到的这几条） */
+export async function listEnabledSourcesByIds(
+    db: D1Database,
+    origin: string,
+    ids: string[],
+    options: RegistryOptions,
+): Promise<RegisteredSource[]> {
+    const wanted = new Set(ids)
+    const builtin = options.includeFixture
+        ? builtinSources(origin).filter(
+              (source) => source.enabled !== false && wanted.has(source.id),
+          )
+        : []
+    const users = await listUserSourcesByIds(
+        db,
+        ids.filter((id) => !id.startsWith(BUILTIN_ID_PREFIX)),
+    )
+    return [...builtin, ...users.filter((source) => source.enabled !== false)]
 }
 
 /** 按 id 取一条书源 */

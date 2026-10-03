@@ -202,7 +202,39 @@ console.log('\n=== 3. 逐源跑通链路 ===')
 // 第 3、4 节只跑**文本源**：它们比的是三种规则方言在同一个页面上的提取结果。
 // 媒体源（图片/音频/文件）的正文形态本来就不同，混进来会让「逐字一致」这个断言失真 ——
 // 比如图片源返回的根本不是文字，比出来必然不等。它们在下面第 13 节单独验证。
-const textSources = list.filter((source) => (source.type ?? 0) === 0)
+console.log('\n=== 搜索分页（免费计划的 10 ms CPU 上限逼出来的形态）===')
+{
+    // 不带 sourceIds：服务端按「健康度」分页，一次只搜一页
+    const page1 = await call('POST', '/api/search', { keyword: '测试', limit: 3 })
+    check(page1.status === 200, '[分页] 一页搜索返回 200', `status=${page1.status}`)
+    const ids1 = (page1.json?.sources ?? []).map((s) => s.sourceId)
+    check(ids1.length <= 3, '[分页] 一页不超过 limit 个源', `searched=${ids1.length}`)
+    check(
+        typeof page1.json?.totalSources === 'number' && page1.json.totalSources > 0,
+        '[分页] 返回启用书源总数（界面靠它算「还有多少个没搜」）',
+        `totalSources=${page1.json?.totalSources}`,
+    )
+    check(page1.json?.offset === 0, '[分页] 首页 offset 是 0', `offset=${page1.json?.offset}`)
+
+    const page2 = await call('POST', '/api/search', { keyword: '测试', limit: 3, offset: 3 })
+    const ids2 = (page2.json?.sources ?? []).map((s) => s.sourceId)
+    check(
+        ids2.length > 0 && ids2.every((id) => !ids1.includes(id)),
+        '[分页] 第二页换了一批源（offset 真的生效）',
+        `p1=${ids1.join(',')} / p2=${ids2.join(',')}`,
+    )
+}
+// limit 的上限兜底（500 → 50）没写成断言：那会真的去搜 50 个源、每源一次外网请求，
+// 本地跑一轮要等很久 —— 不值这个价。上限逻辑在 index.ts 的 clampPage 里，改动时看一眼即可。
+
+/**
+ * 链路测试只跑**内置**测试源
+ *
+ * 用户导入的真实源指向外部站点，国内很多连不上（规则也会随时失效），
+ * 拿它们当断言对象只会让冒烟常年飘红 —— 冒烟要验的是引擎，不是外网站点。
+ * 真实源能不能用，由搜索页的「健康度」记录，见 README「第二十七轮」。
+ */
+const textSources = list.filter((source) => source.builtin && (source.type ?? 0) === 0)
 const results = {}
 for (const source of textSources) {
     console.log(`\n--- ${source.name} ---`)

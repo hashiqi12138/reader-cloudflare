@@ -31,14 +31,7 @@ import {
     toast,
 } from './core.js'
 import { mergeBooks, sourceBookKey } from './merge.js'
-import {
-    SEARCH_CONCURRENCY,
-    SEARCH_SLICE_SIZE,
-    halveSlice,
-    isCpuLimitError,
-    planSlices,
-    runPool,
-} from './searchPlan.js'
+import { SEARCH_MIN_PAGE, SEARCH_PAGE_SIZE, isCpuLimitError, nextPageSize } from './searchPlan.js'
 
 /**
  * 阅读界面的地址
@@ -1208,7 +1201,10 @@ export async function viewSearch(host) {
                 el('div', { class: 'spacer' }, [input]),
                 el('button', { class: 'btn primary', text: '搜索', onclick: () => run() }),
             ]),
-            el('p', { class: 'muted tiny', text: '分批并发打到所有启用的书源，每个源独立成败。' }),
+            el('p', {
+                class: 'muted tiny',
+                text: '一次搜一批书源（先从最可能出结果的开始），要更多就点下面的「继续加载」。',
+            }),
         ]),
         resultHost,
     )
@@ -1222,35 +1218,57 @@ export async function viewSearch(host) {
         lastKeyword = keyword
         resultHost.replaceChildren(skeletonList(4, 'grid'))
 
-        /**
-         * 分片搜索
-         *
-         * 免费计划的 Worker 每个请求只有 10 ms CPU，而一次搜索原本要把**所有**
-         * 书源的规则求值跑在同一个请求里 —— 线上实测会被掐断
-         * （`outcome: exceededCpu` → 浏览器 503）；本地 `wrangler dev` 不设 CPU
-         * 限制，所以这个故障只在线上出现。改成每片几个源的小请求并发跑，
-         * 单片的 CPU 就落在限额内；整片仍被掐掉就劈成两半重试，
-         * 一路劈到单个源为止（见 searchPlan.js）。
-         */
-        let enabled = []
-        try {
-            const list = await api('/api/sources')
-            enabled = (list.sources ?? [])
-                .filter((source) => source.enabled !== false)
-                .map((source) => source.id)
-        } catch (err) {
-            resultHost.replaceChildren(alertBox('error', '读不到书源列表', err.message))
-            return
-        }
-        if (enabled.length === 0) {
-            resultHost.replaceChildren(
-                alertBox('warn', '没有可用的书源', '一份书源都没有，或者都被停用了。'),
-            )
-            return
-        }
-
         const entries = await loadShelf()
         const perSource = []
+        let searched = 0
+        let totalSources = 0
+        let pageLimit = SEARCH_PAGE_SIZE
+        let busy = false
+
+        /**
+         * 拉一页
+         *
+         * 一个请求只搜一页（默认 10 个源）：免费计划每个请求只有 10 ms CPU，
+         * 一次把全部书源读出来再求值必然被掐（见 searchPlan.js 与 README「第二十六轮」）。
+         * 被掐时**不换时刻重试** —— 线上实测额度恢复得很慢，紧接着再发照样被掐 ——
+         * 而是把这一页**折半**再试，一路折到 1 个源。
+         */
+        async function loadPage() {
+            for (;;) {
+                try {
+                    const data = await postJson('/api/search', {
+                        keyword,
+                        offset: searched,
+                        limit: pageLimit,
+                    })
+                    totalSources = data.totalSources ?? searched + (data.searched ?? 0)
+                    perSource.push(...(data.sources ?? []))
+                    searched += data.searched ?? 0
+                    return
+                } catch (err) {
+                    if (isCpuLimitError(err) && pageLimit > SEARCH_MIN_PAGE) {
+                        pageLimit = nextPageSize(pageLimit)
+                        continue
+                    }
+                    throw err
+                }
+            }
+        }
+
+        /** 继续加载：用户点一次才花一批额度 */
+        async function loadMore() {
+            if (busy) return
+            busy = true
+            paint(true)
+            try {
+                await loadPage()
+            } catch (err) {
+                toast(`继续加载失败：${err.message}`)
+            } finally {
+                busy = false
+                paint(true)
+            }
+        }
 
         /**
          * 边搜边画
@@ -1268,7 +1286,7 @@ export async function viewSearch(host) {
 
             const data = {
                 keyword,
-                sourceCount: enabled.length,
+                sourceCount: totalSources,
                 totalBooks: perSource.reduce((sum, per) => sum + (per.count ?? 0), 0),
                 sources: perSource,
             }
@@ -1334,14 +1352,16 @@ export async function viewSearch(host) {
                     )
                 }
                 blocks.push(grid)
-            } else if (data.sources.length < data.sourceCount) {
-                // 还在搜：这时候说「没搜到」是错的 —— 后面的片可能带着结果回来
-                blocks.push(skeletonList(2, 'grid'))
             } else {
+                // 这一页没搜到。还有源没搜时不说死「没搜到」——
+                // 下一步该做的是点下面的「继续加载」
+                const more = searched < totalSources
                 blocks.push(
                     emptyState(
-                        '没搜到',
-                        '换个关键词试试；也可以到「书源」里看看启用的源是不是都被停用了。',
+                        more ? '这一批没有结果' : '没搜到',
+                        more
+                            ? '换个关键词试试；也可以点下面的「继续加载」搜后面的书源。'
+                            : '换个关键词试试；也可以到「书源」里看看启用的源是不是都被停用了。',
                     ),
                 )
             }
@@ -1358,35 +1378,37 @@ export async function viewSearch(host) {
                     ]),
                 )
             }
+
+            // 还有源没搜就摆一个「继续加载」—— 额度由用户点一次花一批
+            if (searched < totalSources) {
+                blocks.push(
+                    el('div', { class: 'load-more' }, [
+                        el('button', {
+                            class: 'btn',
+                            text: busy
+                                ? '加载中…'
+                                : `继续加载（还有 ${totalSources - searched} 个书源）`,
+                            onclick: () => void loadMore(),
+                        }),
+                    ]),
+                )
+            }
+
             resultHost.replaceChildren(...blocks)
         }
 
-        await runPool(
-            planSlices(enabled, SEARCH_SLICE_SIZE),
-            (slice) => postJson('/api/search', { keyword, sourceIds: slice }),
-            {
-                concurrency: SEARCH_CONCURRENCY,
-                onError: (err, slice) => (isCpuLimitError(err) ? halveSlice(slice) : null),
-                onSettled: (entry) => {
-                    if (entry.ok) {
-                        perSource.push(...(entry.value.sources ?? []))
-                    } else {
-                        perSource.push({
-                            sourceId: entry.task[0] ?? '',
-                            sourceName:
-                                entry.task.length === 1
-                                    ? String(entry.task[0] ?? '未知书源')
-                                    : `${entry.task.length} 个书源（同批）`,
-                            ok: false,
-                            count: 0,
-                            error: entry.error?.message ?? String(entry.error),
-                        })
-                    }
-                    paint(false)
-                },
-            },
-        )
-        // 最后一片多半会被上面的节流吞掉，这里补一次强制的
+        try {
+            await loadPage()
+        } catch (err) {
+            resultHost.replaceChildren(alertBox('error', '搜索失败', err.message))
+            return
+        }
+        if (searched === 0 && totalSources === 0) {
+            resultHost.replaceChildren(
+                alertBox('warn', '没有可用的书源', '一份书源都没有，或者都被停用了。'),
+            )
+            return
+        }
         paint(true)
     }
 
