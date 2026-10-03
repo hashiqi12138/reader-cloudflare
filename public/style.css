@@ -1880,6 +1880,54 @@ body[data-reader='1'] main#view {
     padding-left: var(--sp-2);
 }
 
+/* ---------------------------------------------------------------- 笔记 */
+
+/* 笔记的正文是主体：比摘录重、比书签备注大，而且**保留换行** ——
+   人写笔记会分条，把换行压掉的正文读起来是一段糊在一起的字。
+   `overflow-wrap: anywhere` 是给长链接与不换行的长串留的活路，
+   没有它那一段会把整个面板撑出横向滚动。 */
+.note-text {
+    margin-top: 2px;
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--ink);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+/* 写 / 改笔记的输入区：跟列表一起滚，不另开一个面板 ——
+   另开的话「边看已有笔记边写新的」这件事就做不到了 */
+.note-compose {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-2);
+    padding: var(--sp-2);
+    border: 1px solid var(--accent);
+    border-radius: var(--radius-sm);
+    background: var(--surface-2);
+}
+.note-input {
+    width: 100%;
+    min-height: 96px;
+    padding: var(--sp-2);
+    resize: vertical;
+    font: inherit;
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--ink);
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+}
+.note-input:focus {
+    outline: 2px solid var(--accent);
+    outline-offset: -1px;
+}
+/* 输入区上方那段摘录只是交代「这条要挂在哪」，别抢正文的地方 */
+.note-compose .bm-excerpt {
+    -webkit-line-clamp: 2;
+}
+
 /* ---------------------------------------------------------------- 窄屏 */
 
 @media (max-width: 720px) {

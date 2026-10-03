@@ -35,22 +35,30 @@ const goodFile = () => ({
     kind: BACKUP_KIND,
     version: BACKUP_VERSION,
     exportedAt: 1_700_000_000_000,
-    counts: { shelf: 1, progress: 0, bookmarks: 0 },
+    counts: { shelf: 1, progress: 0, bookmarks: 0, notes: 0 },
     shelf: [shelfRecord()],
     progress: [],
     bookmarks: [],
+    notes: [],
 })
 
 describe('buildBackup', () => {
     it('写死 kind 与 version，计数按实际条数算', () => {
         const file = buildBackup(
-            { shelf: [shelfRecord(), shelfRecord()], progress: [], bookmarks: [] },
+            { shelf: [shelfRecord(), shelfRecord()], progress: [], bookmarks: [], notes: [] },
             1234,
         )
         expect(file.kind).toBe(BACKUP_KIND)
         expect(file.version).toBe(BACKUP_VERSION)
         expect(file.exportedAt).toBe(1234)
-        expect(file.counts).toEqual({ shelf: 2, progress: 0, bookmarks: 0 })
+        expect(file.counts).toEqual({ shelf: 2, progress: 0, bookmarks: 0, notes: 0 })
+    })
+
+    it('版本号必须跟着格式走：加了 notes 就该是 v2', () => {
+        // 这条断言是故意「一改就要动」的。往格式里加一份数据**必须**跳版本号：
+        // 旧部署不认新字段，会静默丢掉（见 transfer.ts 里 BACKUP_VERSION 的说明）。
+        // 有人加字段却忘了跳号时，这条会红。
+        expect(BACKUP_VERSION).toBe(2)
     })
 
     it('记录原样带出（不在导出这一步做裁剪）', () => {
@@ -58,6 +66,7 @@ describe('buildBackup', () => {
             shelf: [shelfRecord({ author: '' })],
             progress: [],
             bookmarks: [],
+            notes: [],
         })
         expect(file.shelf[0]?.author).toBe('')
     })
@@ -95,6 +104,21 @@ describe('parseBackup：导出的文件必须能导回来', () => {
                         updatedAt: 1001,
                     },
                 ],
+                notes: [
+                    {
+                        id: 'nt-1',
+                        sourceId: 'a',
+                        bookUrl: '/b',
+                        chapterName: '第一章',
+                        chapterIndex: 3,
+                        pageIndex: 2,
+                        percent: 0.4,
+                        excerpt: '这一段的原文',
+                        text: '这一段的想法：\n换行也要一字不差地带回来',
+                        createdAt: 1002,
+                        updatedAt: 1003,
+                    },
+                ],
             },
             2_000,
         )
@@ -104,12 +128,32 @@ describe('parseBackup：导出的文件必须能导回来', () => {
         expect(parsed.shelf).toEqual(file.shelf)
         expect(parsed.progress).toEqual(file.progress)
         expect(parsed.bookmarks).toEqual(file.bookmarks)
+        expect(parsed.notes).toEqual(file.notes)
+    })
+
+    it('v1 的老文件（没有 notes）照常导入，笔记当成空的', () => {
+        // 反方向是安全的：新代码读旧文件。真正要挡的是「旧代码读新文件」，
+        // 那一边靠版本号（见 BACKUP_VERSION）
+        const old = goodFile()
+        const { notes, ...v1 } = old
+        void notes
+        const parsed = parseBackup({
+            ...v1,
+            version: 1,
+            counts: { shelf: 1, progress: 0, bookmarks: 0 },
+        })
+        expect(parsed.notes).toEqual([])
+        expect(parsed.counts.notes).toBe(0)
+        expect(parsed.shelf).toHaveLength(1)
     })
 
     it('计数以文件里的数组为准，不信文件自己写的 counts', () => {
-        const file = { ...goodFile(), counts: { shelf: 999, progress: 999, bookmarks: 999 } }
+        const file = {
+            ...goodFile(),
+            counts: { shelf: 999, progress: 999, bookmarks: 999, notes: 999 },
+        }
         const parsed = parseBackup(file)
-        expect(parsed.counts).toEqual({ shelf: 1, progress: 0, bookmarks: 0 })
+        expect(parsed.counts).toEqual({ shelf: 1, progress: 0, bookmarks: 0, notes: 0 })
     })
 
     it('缺省的可选字段补成空串 / 0', () => {
@@ -149,10 +193,11 @@ describe('parseBackup：认不出来的文件要当场说清楚', () => {
         expect(() => parseBackup({ ...goodFile(), version: undefined })).toThrow(/缺少版本号/)
     })
 
-    it('三份记录必须是数组', () => {
+    it('四份记录必须是数组', () => {
         expect(() => parseBackup({ ...goodFile(), shelf: {} })).toThrow(/shelf 必须是数组/)
         expect(() => parseBackup({ ...goodFile(), progress: 'x' })).toThrow(/progress 必须是数组/)
         expect(() => parseBackup({ ...goodFile(), bookmarks: 3 })).toThrow(/bookmarks 必须是数组/)
+        expect(() => parseBackup({ ...goodFile(), notes: {} })).toThrow(/notes 必须是数组/)
     })
 
     it('单条记录出错时指出是第几条、哪个字段', () => {
@@ -208,5 +253,48 @@ describe('parseBackup：认不出来的文件要当场说清楚', () => {
                 ],
             }),
         ).toThrow(/note/)
+    })
+})
+
+describe('parseBackup：笔记这一份的边界', () => {
+    const note = (over: Record<string, unknown> = {}) => ({
+        id: 'nt',
+        sourceId: 'a',
+        bookUrl: '/b',
+        text: '写点什么',
+        ...over,
+    })
+
+    it('正文必填：缺了、空串、只有空白都不行', () => {
+        // 这条与 notes.ts 的写入校验是同一条规则。备份文件更容易被手改，
+        // 如果这里放过，库里就会出现「一行空白的笔记」，而列表按正文渲染
+        expect(() => parseBackup({ ...goodFile(), notes: [note({ text: undefined })] })).toThrow(
+            /text/,
+        )
+        expect(() => parseBackup({ ...goodFile(), notes: [note({ text: '  ' })] })).toThrow(/text/)
+    })
+
+    it('坏在第几条要说得出（笔记与书签各自从 1 数起）', () => {
+        expect(() => parseBackup({ ...goodFile(), notes: [note(), note({ text: '' })] })).toThrow(
+            /第 2 条记录的 text/,
+        )
+    })
+
+    it('正文超 5000 字被拒 —— 而不是截断（截断会静默改掉用户写的东西）', () => {
+        expect(() =>
+            parseBackup({ ...goodFile(), notes: [note({ text: '字'.repeat(5001) })] }),
+        ).toThrow(/text/)
+        // 正好 5000 要能过
+        const parsed = parseBackup({ ...goodFile(), notes: [note({ text: '字'.repeat(5000) })] })
+        expect(parsed.notes[0]?.text).toHaveLength(5000)
+    })
+
+    it('条数超上限（5000）当场拒，而不是写一半', () => {
+        expect(() =>
+            parseBackup({
+                ...goodFile(),
+                notes: Array.from({ length: 5001 }, (_, i) => note({ id: `nt-${i}` })),
+            }),
+        ).toThrow(/超过上限/)
     })
 })

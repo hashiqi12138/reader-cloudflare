@@ -371,6 +371,7 @@ export async function viewAccount(host) {
                         `书架新增 ${imported.shelf ?? 0} 本`,
                         `进度写入 ${imported.progress ?? 0} 条（本地更新的 ${imported.progressKept ?? 0} 条保留）`,
                         `书签新增 ${imported.bookmarks ?? 0} 条（已在库里的 ${imported.bookmarksKept ?? 0} 条跳过）`,
+                        `笔记新增 ${imported.notes ?? 0} 条（已在库里的 ${imported.notesKept ?? 0} 条跳过）`,
                     ].join('；'),
                 ),
             )
@@ -386,7 +387,7 @@ export async function viewAccount(host) {
         '数据（导出 / 导入）',
         el('p', {
             class: 'muted tiny',
-            text: '一份备份包含书架、阅读进度与书签。换设备、换部署，或者从别的账号搬过来，都用它。',
+            text: '一份备份包含书架、阅读进度、书签与笔记。换设备、换部署，或者从别的账号搬过来，都用它。',
         }),
         el('div', { class: 'row' }, [
             el('a', {

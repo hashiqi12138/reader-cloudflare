@@ -1618,6 +1618,164 @@ console.log('\n=== 7e. 替换净化规则跟着账号走 ===')
     )
 }
 
+console.log('\n=== 7f. 笔记（独立于书签，且进备份） ===')
+{
+    // 笔记与书签**几乎**同形（一张表、四个接口、位置三件套），唯一的硬差别是
+    // **正文必填**。所以这一段的重心是：正文为空的各种写法都要被挡住，
+    // 以及笔记能进备份、能从备份里回来（换设备不丢东西）。
+
+    const user = await sessionUser('note')
+    const other = await sessionUser('note2')
+    const sourceId = 'builtin:fixture-css'
+    const bookUrl = 'http://127.0.0.1:8787/fixture/book/1'
+    const where = `?sourceId=${encodeURIComponent(sourceId)}&bookUrl=${encodeURIComponent(bookUrl)}`
+
+    const noParams = await user.call('GET', '/api/notes')
+    check(noParams.status === 400, '少参数时 400（不猜是哪本书）', `HTTP ${noParams.status}`)
+
+    const empty = await user.call('GET', `/api/notes${where}`)
+    check(
+        empty.status === 200 && empty.json?.count === 0,
+        '新账号这本书没有笔记，回空数组而不是 404',
+        JSON.stringify(empty.json),
+    )
+
+    // 正文里的换行必须原样带回来 —— 笔记是「一段话」，压掉换行就等于改写了它
+    const body = '第一行想法\n\n第二行：换行要保留'
+    const created = await user.call('POST', '/api/notes', {
+        sourceId,
+        bookUrl,
+        chapterName: '第一章 起风了',
+        chapterIndex: 0,
+        pageIndex: 3,
+        excerpt: '这一段的原文',
+        text: body,
+    })
+    const noteId = created.json?.note?.id ?? ''
+    check(
+        created.status === 201 && noteId !== '' && created.json?.note?.text === body,
+        '写一条笔记：201，换行原样回来',
+        `HTTP ${created.status} ${JSON.stringify(created.json?.note?.text)}`,
+    )
+    check(
+        created.json?.note?.chapterIndex === 0 && created.json?.note?.pageIndex === 3,
+        '位置与摘录一起存下（跳回原处要靠它）',
+        JSON.stringify({
+            chapterIndex: created.json?.note?.chapterIndex,
+            pageIndex: created.json?.note?.pageIndex,
+            excerpt: created.json?.note?.excerpt,
+        }),
+    )
+
+    const blank = await user.call('POST', '/api/notes', { sourceId, bookUrl, text: '   ' })
+    const missing = await user.call('POST', '/api/notes', { sourceId, bookUrl })
+    check(
+        blank.status === 400 && blank.json?.code === 'invalid_note_input' && missing.status === 400,
+        '正文为空 / 没给正文都 400（书签可以只有一个位置，笔记不行）',
+        `blank=${blank.status} ${blank.json?.code} missing=${missing.status}`,
+    )
+
+    // 第二条放在后一章，用来验顺序
+    await user.call('POST', '/api/notes', {
+        sourceId,
+        bookUrl,
+        chapterName: '第二章',
+        chapterIndex: 1,
+        pageIndex: 0,
+        text: '第二章的一点想法',
+    })
+    const listed = await user.call('GET', `/api/notes${where}`)
+    check(
+        listed.json?.count === 2 &&
+            listed.json?.notes?.[0]?.chapterIndex === 0 &&
+            listed.json?.notes?.[1]?.chapterIndex === 1,
+        '两条笔记按章节顺序排（与阅读顺序一致）',
+        JSON.stringify((listed.json?.notes ?? []).map((n) => n.chapterIndex)),
+    )
+
+    const edited = await user.call('PUT', '/api/notes', { id: noteId, text: '改过之后的想法' })
+    check(
+        edited.status === 200 &&
+            edited.json?.note?.text === '改过之后的想法' &&
+            edited.json?.note?.pageIndex === 3 &&
+            edited.json?.note?.chapterIndex === 0 &&
+            edited.json?.note?.createdAt === created.json?.note?.createdAt &&
+            edited.json?.note?.updatedAt > created.json?.note?.updatedAt,
+        '改正文：位置与摘录不动、createdAt 不动、updatedAt 往前走',
+        JSON.stringify({
+            pageIndex: edited.json?.note?.pageIndex,
+            createdAt: edited.json?.note?.createdAt,
+            updatedAt: edited.json?.note?.updatedAt,
+        }),
+    )
+    const editBlank = await user.call('PUT', '/api/notes', { id: noteId, text: '' })
+    const editMissing = await user.call('PUT', '/api/notes', { id: 'not-a-real-id', text: 'x' })
+    check(
+        editBlank.status === 400 &&
+            editMissing.status === 404 &&
+            editMissing.json?.code === 'note_not_found',
+        '改成空正文 400；改一条不存在的 404（含别人的）',
+        `blank=${editBlank.status} missing=${editMissing.status} ${editMissing.json?.code}`,
+    )
+
+    // 隔离：另一个账号既看不到、也删不掉
+    const otherList = await other.call('GET', `/api/notes${where}`)
+    const otherDelete = await other.call('DELETE', `/api/notes?id=${noteId}`)
+    const stillThere = await user.call('GET', `/api/notes${where}`)
+    check(
+        otherList.json?.count === 0 && otherDelete.status === 404 && stillThere.json?.count === 2,
+        '换个身份一条也看不到、也删不掉（笔记挂在 owner 上）',
+        `other=${otherList.json?.count} delete=${otherDelete.status} mine=${stillThere.json?.count}`,
+    )
+
+    // 进备份：导出 → 另一个账号导入 → 读回来
+    const exported = await user.call('GET', '/api/backup')
+    const file = exported.json
+    check(
+        file?.version === 2 &&
+            file?.counts?.notes === 2 &&
+            file?.notes?.[0]?.text === '改过之后的想法',
+        '备份 v2 里带上了笔记（正文一字不差）',
+        `version=${file?.version} counts=${JSON.stringify(file?.counts)}`,
+    )
+
+    const imported = await other.call('POST', '/api/backup', file)
+    const back = await other.call('GET', `/api/notes${where}`)
+    check(
+        imported.status === 200 &&
+            imported.json?.imported?.notes === 2 &&
+            back.json?.count === 2 &&
+            back.json?.notes?.[0]?.text === '改过之后的想法',
+        '另一个账号导入后能把笔记读回来',
+        `HTTP ${imported.status} imported=${JSON.stringify(imported.json?.imported)} count=${back.json?.count}`,
+    )
+    const again = await other.call('POST', '/api/backup', file)
+    check(
+        again.json?.imported?.notes === 0 && again.json?.imported?.notesKept === 2,
+        '同一份文件再导一次：一条不多（按 id 去重）',
+        JSON.stringify(again.json?.imported),
+    )
+
+    // 反方向兼容：v1 的老文件（没有 notes）照常导入
+    const { notes: dropped, ...v1 } = file
+    void dropped
+    const oldImport = await other.call('POST', '/api/backup', { ...v1, version: 1 })
+    check(
+        oldImport.status === 200 && oldImport.json?.imported?.notes === 0,
+        'v1 的老备份照常导入（笔记当成空的，不报错）',
+        `HTTP ${oldImport.status} ${JSON.stringify(oldImport.json?.imported)}`,
+    )
+
+    const removed = await user.call('DELETE', `/api/notes?id=${noteId}`)
+    const afterRemove = await user.call('GET', `/api/notes${where}`)
+    const removeAgain = await user.call('DELETE', `/api/notes?id=${noteId}`)
+    check(
+        removed.status === 200 && afterRemove.json?.count === 1 && removeAgain.status === 404,
+        '删掉一条：剩下 1 条，再删同一条是 404',
+        `removed=${removed.status} left=${afterRemove.json?.count} again=${removeAgain.status}`,
+    )
+}
+
 console.log('\n=== 8. 相对地址以书源地址为基准 ===')
 {
     // 这条是真实书源逼出来的：精华书阁、圣武书库这类书源的 searchUrl 写的是

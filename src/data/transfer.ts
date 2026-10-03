@@ -1,7 +1,7 @@
 /**
- * 书架、阅读进度与书签的**导出 / 导入**
+ * 书架、阅读进度、书签与笔记的**导出 / 导入**
  *
- * 这三样是用户自己攒下来的东西，而它们只存在这个部署的 D1 里 ——
+ * 这四样是用户自己攒下来的东西，而它们只存在这个部署的 D1 里 ——
  * 换一个部署、或者把数据搬到另一个账号，之前**没有任何办法**。
  *
  * 两条贯穿的原则：
@@ -23,15 +23,37 @@ import { ownerForUser } from './accounts'
 
 /** 文件头标识。导入时先认它，免得把一份书源合集当成备份导进来 */
 export const BACKUP_KIND = 'reader-cloudflare-backup'
-export const BACKUP_VERSION = 1
+
+/**
+ * 文件版本
+ *
+ * v2 加了 `notes` 这一份。**这里必须跳版本号，而不是「兼容地多加一个可选数组」**：
+ * 旧部署的导入代码不认 `notes`，一份带笔记的备份导进去会被**静默丢掉全部笔记**，
+ * 而界面上显示的是「导入成功」—— 那正是这套格式最不该有的失败方式。
+ * 版本一跳，旧部署会明确回「这份备份来自更新的版本（v2）」，用户至少知道该升级。
+ *
+ * 反方向没问题：新代码读 v1 文件时 `notes` 缺失就是空数组，照常导入。
+ */
+export const BACKUP_VERSION = 2
 
 /** 单类记录上限。真实用户量级是几百本书、几千条书签，这里留足余量当护栏 */
 const MAX_SHELF_RECORDS = 5000
 const MAX_PROGRESS_RECORDS = 5000
 const MAX_BOOKMARK_RECORDS = 20000
+/**
+ * 笔记的条数上限比书签低一个量级，理由只有一条：**它比书签重得多**。
+ * 一条书签约 300 字节（位置 + 一小段摘录），一条笔记是一段话，按 1 KB 估。
+ * 两万条笔记那就是 20 MB，早就越过 `index.ts` 的 8 MB 请求体上限 ——
+ * 而「能导出、导不回来」是这套格式最不该有的毛病。
+ *
+ * 5000 条（约 5 MB）是个折中：正常使用绝对够（一天写一条也够写十几年），
+ * 而书签与笔记**同时**堆到上限时总体积仍会超过 8 MB —— 那一次导入会回
+ * 413 并说清是体积超了，而不是悄悄少写几条。
+ */
+const MAX_NOTE_RECORDS = 5000
 
 /**
- * 字段长度上限。**与写入那几条路保持一致**（library.ts / bookmarks.ts）：
+ * 字段长度上限。**与写入那几条路保持一致**（library.ts / bookmarks.ts / notes.ts）：
  * 备份文件是外部输入，比写入路径更需要对长度设防
  */
 const MAX_URL = 2048
@@ -39,6 +61,8 @@ const MAX_NAME = 200
 const MAX_CHAPTER_NAME = 200
 const MAX_EXCERPT = 120
 const MAX_NOTE = 500
+const MAX_NOTE_EXCERPT = 200
+const MAX_NOTE_TEXT = 5000
 const MAX_BOOK_KEY = MAX_URL * 2 + 1
 
 export interface BackupShelfRecord {
@@ -76,14 +100,29 @@ export interface BackupBookmarkRecord {
     updatedAt: number
 }
 
+export interface BackupNoteRecord {
+    id: string
+    sourceId: string
+    bookUrl: string
+    chapterName: string
+    chapterIndex: number
+    pageIndex: number
+    percent: number
+    excerpt: string
+    text: string
+    createdAt: number
+    updatedAt: number
+}
+
 export interface BackupFile {
     kind: string
     version: number
     exportedAt: number
-    counts: { shelf: number; progress: number; bookmarks: number }
+    counts: { shelf: number; progress: number; bookmarks: number; notes: number }
     shelf: BackupShelfRecord[]
     progress: BackupProgressRecord[]
     bookmarks: BackupBookmarkRecord[]
+    notes: BackupNoteRecord[]
 }
 
 /**
@@ -111,12 +150,13 @@ function splitBookKey(key: string): { sourceId: string; bookUrl: string } {
 
 // ---------------------------------------------------------------- 导出
 
-/** 组装备份文件。给定三份记录与时间戳，就是一份完整的文件（无副作用） */
+/** 组装备份文件。给定四份记录与时间戳，就是一份完整的文件（无副作用） */
 export function buildBackup(
     data: {
         shelf: BackupShelfRecord[]
         progress: BackupProgressRecord[]
         bookmarks: BackupBookmarkRecord[]
+        notes: BackupNoteRecord[]
     },
     exportedAt = Date.now(),
 ): BackupFile {
@@ -128,15 +168,17 @@ export function buildBackup(
             shelf: data.shelf.length,
             progress: data.progress.length,
             bookmarks: data.bookmarks.length,
+            notes: data.notes.length,
         },
         shelf: data.shelf,
         progress: data.progress,
         bookmarks: data.bookmarks,
+        notes: data.notes,
     }
 }
 
 /**
- * 导出当前账号的三份数据
+ * 导出当前账号的四份数据
  *
  * 直接读表、不复用展示层的查询：文件格式与界面要展示的字段**不是一回事**
  * （比如书架列表要 join 出「最近读到第几章」，而备份只需要原始行）。
@@ -147,7 +189,7 @@ export async function exportBackup(
 ): Promise<BackupFile> {
     const owner = ownerForUser(user)
 
-    const [shelfRows, progressRows, bookmarkRows] = await Promise.all([
+    const [shelfRows, progressRows, bookmarkRows, noteRows] = await Promise.all([
         db
             .prepare(
                 `SELECT source_id, book_url, name, author, cover_url, created_at, updated_at
@@ -167,6 +209,14 @@ export async function exportBackup(
                 `SELECT id, source_id, book_url, chapter_url, chapter_name, chapter_index,
                         page_index, percent, excerpt, note, created_at, updated_at
                    FROM bookmarks WHERE owner = ? ORDER BY created_at`,
+            )
+            .bind(owner)
+            .all<Record<string, unknown>>(),
+        db
+            .prepare(
+                `SELECT id, source_id, book_url, chapter_name, chapter_index,
+                        page_index, percent, excerpt, text, created_at, updated_at
+                   FROM notes WHERE owner = ? ORDER BY created_at`,
             )
             .bind(owner)
             .all<Record<string, unknown>>(),
@@ -201,6 +251,19 @@ export async function exportBackup(
             percent: Number(row.percent ?? 0),
             excerpt: String(row.excerpt ?? ''),
             note: String(row.note ?? ''),
+            createdAt: Number(row.created_at ?? 0),
+            updatedAt: Number(row.updated_at ?? 0),
+        })),
+        notes: (noteRows.results ?? []).map((row) => ({
+            id: String(row.id ?? ''),
+            sourceId: String(row.source_id ?? ''),
+            bookUrl: String(row.book_url ?? ''),
+            chapterName: String(row.chapter_name ?? ''),
+            chapterIndex: Number(row.chapter_index ?? 0),
+            pageIndex: Number(row.page_index ?? 0),
+            percent: Number(row.percent ?? 0),
+            excerpt: String(row.excerpt ?? ''),
+            text: String(row.text ?? ''),
             createdAt: Number(row.created_at ?? 0),
             updatedAt: Number(row.updated_at ?? 0),
         })),
@@ -298,9 +361,12 @@ export function parseBackup(raw: unknown): BackupFile {
     const shelfRaw = records(raw.shelf, 'shelf')
     const progressRaw = records(raw.progress, 'progress')
     const bookmarksRaw = records(raw.bookmarks, 'bookmarks')
+    // v1 的文件没有 notes —— 缺失就是空数组，不是错误（见 BACKUP_VERSION 的说明）
+    const notesRaw = records(raw.notes, 'notes')
     requireWithin(shelfRaw, MAX_SHELF_RECORDS, '书架记录')
     requireWithin(progressRaw, MAX_PROGRESS_RECORDS, '进度记录')
     requireWithin(bookmarksRaw, MAX_BOOKMARK_RECORDS, '书签记录')
+    requireWithin(notesRaw, MAX_NOTE_RECORDS, '笔记记录')
 
     const shelf = shelfRaw.map((item, index) => {
         if (!isPlainObject(item)) fail(index, '记录本身')
@@ -346,14 +412,38 @@ export function parseBackup(raw: unknown): BackupFile {
         }
     })
 
+    const notes = notesRaw.map((item, index) => {
+        if (!isPlainObject(item)) fail(index, '记录本身')
+        return {
+            id: text(item.id, 'id', index, 128, true),
+            sourceId: text(item.sourceId, 'sourceId', index, MAX_URL, true),
+            bookUrl: text(item.bookUrl, 'bookUrl', index, MAX_URL, true),
+            chapterName: text(item.chapterName, 'chapterName', index, MAX_CHAPTER_NAME),
+            chapterIndex: count(item.chapterIndex, 'chapterIndex', index),
+            pageIndex: count(item.pageIndex, 'pageIndex', index),
+            percent: ratio(item.percent, 'percent', index),
+            excerpt: text(item.excerpt, 'excerpt', index, MAX_NOTE_EXCERPT),
+            // 正文必填，与 notes.ts 一致：没有正文的笔记在列表里就是一行空白
+            text: text(item.text, 'text', index, MAX_NOTE_TEXT, true),
+            createdAt: timestamp(item.createdAt, 'createdAt', index),
+            updatedAt: timestamp(item.updatedAt, 'updatedAt', index),
+        }
+    })
+
     return {
         kind: BACKUP_KIND,
         version,
         exportedAt: timestamp(raw.exportedAt, 'exportedAt', 0),
-        counts: { shelf: shelf.length, progress: progress.length, bookmarks: bookmarks.length },
+        counts: {
+            shelf: shelf.length,
+            progress: progress.length,
+            bookmarks: bookmarks.length,
+            notes: notes.length,
+        },
         shelf,
         progress,
         bookmarks,
+        notes,
     }
 }
 
@@ -370,6 +460,10 @@ export interface ImportReport {
     bookmarks: number
     /** 已经在库里、跳过的书签（同一份文件导两次时就是这些） */
     bookmarksKept: number
+    /** 新加的笔记 */
+    notes: number
+    /** 已经在库里、跳过的笔记 */
+    notesKept: number
 }
 
 /** `book_key` 与 library.ts / bookmarks.ts 用同一形态：书源 id + 换行 + 书籍地址 */
@@ -386,6 +480,8 @@ const keyOf = (sourceId: string, bookUrl: string): string => `${sourceId}\n${boo
  *   倒回去。比 `updated_at`，新的那份留下。
  * - **书签：按 id 去重。** 同一份文件导两次不该变成两倍书签；而书签的 id 是随机串，
  *   同一份文件里的 id 是稳定的，所以按 id 判重正好。
+ * - **笔记：与书签同一条规则（按 id 去重）。** 「我写的一段话」是内容，不是位置，
+ *   导入时用另一份覆盖本机那一份没有道理 —— 谁也不会希望导个备份把自己的笔记改掉。
  */
 export async function importBackup(
     db: D1Database,
@@ -400,6 +496,7 @@ export async function importBackup(
     const shelfChunk = Math.max(1, Math.floor(100 / 9))
     const progressChunk = Math.max(1, Math.floor(100 / 7))
     const bookmarkChunk = Math.max(1, Math.floor(100 / 14))
+    const noteChunk = Math.max(1, Math.floor(100 / 13))
 
     let shelfAdded = 0
     for (let i = 0; i < backup.shelf.length; i += shelfChunk) {
@@ -486,11 +583,43 @@ export async function importBackup(
         bookmarksAdded += Number(result.meta?.changes ?? 0)
     }
 
+    let notesAdded = 0
+    for (let i = 0; i < backup.notes.length; i += noteChunk) {
+        const chunk = backup.notes.slice(i, i + noteChunk)
+        const values = chunk.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').join(', ')
+        const statement = db.prepare(
+            `INSERT INTO notes
+                 (owner, id, book_key, source_id, book_url, chapter_name,
+                  chapter_index, page_index, percent, excerpt, text, created_at, updated_at)
+             VALUES ${values}
+             ON CONFLICT(owner, id) DO NOTHING`,
+        )
+        const bound = chunk.flatMap((record) => [
+            owner,
+            record.id,
+            keyOf(record.sourceId, record.bookUrl).slice(0, MAX_BOOK_KEY),
+            record.sourceId,
+            record.bookUrl,
+            record.chapterName,
+            record.chapterIndex,
+            record.pageIndex,
+            record.percent,
+            record.excerpt,
+            record.text,
+            record.createdAt > 0 ? record.createdAt : now,
+            record.updatedAt > 0 ? record.updatedAt : now,
+        ])
+        const result = await statement.bind(...bound).run()
+        notesAdded += Number(result.meta?.changes ?? 0)
+    }
+
     return {
         shelf: shelfAdded,
         progress: progressWritten,
         progressKept: backup.progress.length - progressWritten,
         bookmarks: bookmarksAdded,
         bookmarksKept: backup.bookmarks.length - bookmarksAdded,
+        notes: notesAdded,
+        notesKept: backup.notes.length - notesAdded,
     }
 }

@@ -180,6 +180,22 @@ export async function viewRead(host) {
         title: '书签',
         onclick: () => openBookmarks(),
     })
+    /**
+     * 笔记按钮
+     *
+     * 与书签分开放，而不是塞进书签面板做成两个页签：两者的**入口时机不同**。
+     * 书签是「标一下位置」，翻着翻着随手按；笔记是「写一段话」，按下去是要落座的。
+     * 塞进同一个面板还会让「这一处有没有书签」那个判断多一个「当前在看哪一页签」的前提。
+     *
+     * 图片 / 音频章也允许记笔记（位置仍然记得下来，只是摘录会短）——
+     * 「这一章的图缺了两张」也是一种要写下来的东西。
+     */
+    const notesBtn = el('button', {
+        class: 'icon-btn',
+        text: '📝',
+        title: '笔记',
+        onclick: () => openNotes(),
+    })
     const searchBtn = el('button', {
         class: 'icon-btn',
         text: '🔍',
@@ -198,6 +214,7 @@ export async function viewRead(host) {
         el('div', { class: 'spacer' }),
         collectBtn,
         bookmarkBtn,
+        notesBtn,
         el('button', {
             class: 'icon-btn',
             text: '☰',
@@ -959,11 +976,17 @@ export async function viewRead(host) {
         return max > 0 ? Math.min(1, Math.max(0, body.scrollTop / max)) : 0
     }
 
-    /** 当前位置的正文片段，加书签时写进列表 —— 只写「第 37 章」看不出记住了什么 */
-    function currentExcerpt() {
+    /**
+     * 当前位置的正文片段
+     *
+     * 加书签时写进列表 —— 只写「第 37 章」看不出记住了什么。
+     * 长度可调：书签那一处只要一眼认出来（80 字），笔记要交代「这条记的是哪一段」，
+     * 给到 200 字（服务端 notes 的摘录上限也是 200，两边对得上）。
+     */
+    function currentExcerpt(limit = 80) {
         const paragraphs = [...flow.children]
         if (paragraphs.length === 0) return ''
-        const clip = (node) => (node.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 80)
+        const clip = (node) => (node.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, limit)
 
         if (mode === 'page') {
             const found = paragraphs.find((node) => columnOf(node) === page)
@@ -1196,6 +1219,277 @@ export async function viewRead(host) {
             ]),
             () => {
                 editingId = null
+            },
+        )
+
+        renderHead()
+        listHost.replaceChildren(el('p', { class: 'muted tiny', text: '正在读取…' }))
+        await reload()
+    }
+
+    // ---- 笔记 ----
+
+    let notes = []
+    let notesLoaded = false
+
+    async function loadNotes(force = false) {
+        if (notesLoaded && !force) return notes
+        const data = await api(`/api/notes?${paramsOf({ sourceId, bookUrl })}`)
+        notes = data.notes ?? []
+        notesLoaded = true
+        return notes
+    }
+
+    /** 当前这一处的说法，写笔记时显示在输入框上方：「这条要挂在哪」 */
+    function whereAmI() {
+        const name = chapter.name || `第 ${index + 1} 章`
+        return mode === 'page'
+            ? `${name} · 第 ${page + 1} 页`
+            : `${name} · ${Math.round(scrollRatio() * 100)}%`
+    }
+
+    /**
+     * 笔记面板
+     *
+     * 与书签面板长得像（同一套 `.bm-*` 样式），但有三处不同：
+     *
+     * 1. **正文是主体**：占列表里最大的地方，且**保留换行**（CSS 的 `pre-wrap`）。
+     *    把换行压掉的笔记读起来是一段糊在一起的字，而人写笔记是会分条的。
+     * 2. **可以就地改正文**（书签只改备注）。改的和写的是同一个输入区，差别只在
+     *    提交时是 PUT 还是 POST —— 两份几乎一样的表单必然会各自长歪。
+     * 3. **不改位置**：摘录与位置是写这条笔记那一刻的事实，改它们等于换一处笔记，
+     *    那是删掉重写（服务端的 PUT 也只认正文，见 `data/notes.ts`）。
+     */
+    async function openNotes() {
+        const summary = el('p', { class: 'muted tiny' })
+        const listHost = el('div', { class: 'bm-list' })
+        const writeBtn = el('button', { class: 'btn primary sm', text: '写一条笔记' })
+        /** null = 没在写；非 null 就是正在编辑的那一条（新建时是个空壳） */
+        let draft = null
+
+        function renderHead() {
+            summary.textContent =
+                notes.length === 0 ? '这本书还没有笔记。' : `共 ${notes.length} 条笔记。`
+        }
+
+        function renderList() {
+            const rows = []
+            if (draft) rows.push(composer())
+            for (const item of notes) rows.push(viewRow(item))
+
+            if (rows.length === 0) {
+                listHost.replaceChildren(
+                    el('p', {
+                        class: 'muted tiny center',
+                        text: '还没有笔记。读到想说点什么的地方，按「写一条笔记」。',
+                    }),
+                )
+                return
+            }
+            listHost.replaceChildren(...rows)
+        }
+
+        function composer() {
+            const existing = draft.id ? draft : null
+            const excerpt = existing ? existing.excerpt : currentExcerpt(200)
+
+            // textarea 的初始内容**不能**用 `value`：`el` 是 `setAttribute`，
+            // 而 textarea 的值来自它的子文本，那个属性会被静默忽略
+            const area = el('textarea', {
+                class: 'note-input',
+                rows: '6',
+                placeholder: '写点什么（换行会保留）',
+            })
+            area.value = existing ? existing.text : ''
+
+            const saveBtn = el('button', {
+                class: 'btn primary sm',
+                text: existing ? '保存修改' : '记下这条',
+            })
+            saveBtn.addEventListener('click', () => void save())
+
+            /**
+             * 提交
+             *
+             * 空正文在这里就挡住，不发给服务端：服务端也会 400（正文必填），
+             * 但那要绕一圈网络才告诉用户「你什么都没写」。
+             */
+            async function save() {
+                const text = area.value.trim()
+                if (text === '') {
+                    toast('笔记不能是空的', 'error')
+                    area.focus()
+                    return
+                }
+                saveBtn.disabled = true
+                try {
+                    if (existing) {
+                        await api('/api/notes', {
+                            method: 'PUT',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ id: existing.id, text }),
+                        })
+                        toast('笔记已改')
+                    } else {
+                        await api('/api/notes', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                sourceId,
+                                bookUrl,
+                                chapterName: chapter.name,
+                                chapterIndex: index,
+                                pageIndex: mode === 'page' ? page : 0,
+                                percent: mode === 'page' ? 0 : scrollRatio(),
+                                excerpt,
+                                text,
+                            }),
+                        })
+                        toast('已记下')
+                    }
+                    draft = null
+                    await reload()
+                } catch (err) {
+                    toast(`没存上：${err.message}`, 'error')
+                    saveBtn.disabled = false
+                }
+            }
+
+            // 输入框里回车要换行，所以提交走 Ctrl/⌘ + Enter（书签那个单行输入框
+            // 才能用直接回车提交 —— 这两处不能统一，统一哪一边都会别扭）
+            area.addEventListener('keydown', (event) => {
+                if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                    event.preventDefault()
+                    void save()
+                }
+                if (event.key === 'Escape') {
+                    event.preventDefault()
+                    draft = null
+                    renderList()
+                }
+            })
+
+            return el('div', { class: 'note-compose' }, [
+                el('p', {
+                    class: 'muted tiny',
+                    text: existing
+                        ? `正在改：${chapterLabel(existing)}`
+                        : `会挂在这里：${whereAmI()}`,
+                }),
+                excerpt ? el('div', { class: 'bm-excerpt', text: excerpt }) : null,
+                area,
+                el('div', { class: 'row' }, [
+                    saveBtn,
+                    el('button', {
+                        class: 'btn ghost sm',
+                        text: '取消',
+                        onclick: () => {
+                            draft = null
+                            renderList()
+                        },
+                    }),
+                ]),
+            ])
+        }
+
+        function chapterLabel(item) {
+            return item.chapterName || `第 ${item.chapterIndex + 1} 章`
+        }
+
+        function viewRow(item) {
+            return el('div', { class: 'bm-row' }, [
+                el(
+                    'button',
+                    {
+                        class: 'bm-main',
+                        title: '跳到这条笔记记的那一处',
+                        onclick: () => {
+                            closeSheets()
+                            jumpTo(item.chapterIndex, {
+                                pageIndex: item.pageIndex,
+                                percent: item.percent,
+                            })
+                        },
+                    },
+                    [
+                        el('div', { class: 'bm-head' }, [
+                            el('span', { class: 'bm-chapter', text: chapterLabel(item) }),
+                            el('span', {
+                                class: 'bm-time',
+                                // 改过的笔记显示「改于」：看到的时间与自己记忆里的
+                                // 写作时间对不上时，得知道是改过而不是记错了
+                                text:
+                                    item.updatedAt > item.createdAt
+                                        ? `改于 ${relativeTime(item.updatedAt)}`
+                                        : relativeTime(item.createdAt),
+                            }),
+                        ]),
+                        item.excerpt
+                            ? el('div', { class: 'bm-excerpt', text: item.excerpt })
+                            : null,
+                        el('div', { class: 'note-text', text: item.text }),
+                    ],
+                ),
+                el('button', {
+                    class: 'icon-btn',
+                    text: '✎',
+                    title: '改这条笔记',
+                    onclick: () => {
+                        draft = item
+                        renderList()
+                        listHost.querySelector('textarea')?.focus()
+                    },
+                }),
+                el('button', {
+                    class: 'icon-btn',
+                    text: '×',
+                    title: '删除',
+                    onclick: () => void remove(item),
+                }),
+            ])
+        }
+
+        async function remove(item) {
+            try {
+                await api(`/api/notes?${paramsOf({ id: item.id })}`, { method: 'DELETE' })
+                toast('笔记已删除')
+                if (draft && draft.id === item.id) draft = null
+                await reload()
+            } catch (err) {
+                toast(`删不掉：${err.message}`, 'error')
+            }
+        }
+
+        async function reload() {
+            try {
+                await loadNotes(true)
+            } catch (err) {
+                toast(`笔记读不到：${err.message}`, 'error')
+                notes = []
+            }
+            renderHead()
+            renderList()
+        }
+
+        writeBtn.addEventListener('click', () => {
+            draft = { text: '' }
+            renderList()
+            listHost.querySelector('textarea')?.focus()
+        })
+
+        openSheet(
+            '笔记',
+            el('div', { class: 'settings' }, [
+                el('p', {
+                    class: 'muted tiny',
+                    text: '笔记按章节顺序排，点一条就跳回它记的那一处。与书签是两件事：书签记位置，笔记记一段话。',
+                }),
+                summary,
+                el('div', { class: 'row' }, [writeBtn]),
+                listHost,
+            ]),
+            () => {
+                draft = null
             },
         )
 

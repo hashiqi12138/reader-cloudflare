@@ -16,6 +16,8 @@ import { addToShelf, getProgress, listShelf, removeFromShelf, saveProgress } fro
 import type { AddToShelfInput, SaveProgressInput } from './data/library'
 import { addBookmark, listBookmarks, removeBookmark, updateBookmarkNote } from './data/bookmarks'
 import type { BookmarkInput } from './data/bookmarks'
+import { addNote, listNotes, removeNote, updateNoteText } from './data/notes'
+import type { NoteInput } from './data/notes'
 import {
     SESSION_TTL_MS,
     anonymousDataExists,
@@ -64,9 +66,10 @@ const MAX_IMPORT_BODY_BYTES = 4 * 1024 * 1024
 /**
  * 备份文件的请求体上限，比书源导入宽松
  *
- * 书签记录比书源轻得多、但条数可以很多（一条约 300 字节，两万条约 6 MB），
- * 而 `data/transfer.ts` 里给书签留的上限就是两万条 —— 两边要能对得上，
- * 否则「允许导出、导不回来」。
+ * 按记录条数估：书签一条约 300 字节、两万条约 6 MB；笔记一条是一段话、
+ * 按 1 KB 估，5000 条约 5 MB。两者**同时**堆到上限就超过这个数了 ——
+ * 那一次导入会回 413 并说清是体积超了，而不是悄悄少写几条
+ * （上限之间的这种关系在 `data/transfer.ts` 里也写了一遍，改动时要一起看）。
  */
 const MAX_BACKUP_BODY_BYTES = 8 * 1024 * 1024
 
@@ -504,6 +507,99 @@ app.delete('/api/bookmarks', async (c) => {
     }
 })
 
+/**
+ * 笔记
+ *
+ * 与书签分开成两张表与两组接口，但形状一致（见迁移 `0010` 的注释）：
+ * 书签记的是**位置**，笔记记的是**一段话**。所以这里按「一本书的全部笔记」读写，
+ * 每条各自可改可删 —— 与「进度只有一条」那种单条覆盖不是一类东西。
+ *
+ * 与书签唯一的行为差别在**正文必填**：空正文直接 400（见 `data/notes.ts`）。
+ */
+app.get('/api/notes', async (c) => {
+    let owner: string
+    try {
+        owner = await ownerOf(c)
+    } catch (err) {
+        return fail(c, err)
+    }
+    const sourceId = c.req.query('sourceId') ?? ''
+    const bookUrl = c.req.query('bookUrl') ?? ''
+    if (sourceId === '' || bookUrl === '') {
+        return c.json({ error: '缺少 sourceId 或 bookUrl 参数' }, 400)
+    }
+
+    const notes = await listNotes(c.env.DB, owner, bookKey(sourceId, bookUrl))
+    return c.json({ count: notes.length, notes })
+})
+
+app.post('/api/notes', async (c) => {
+    let owner: string
+    try {
+        owner = await ownerOf(c)
+    } catch (err) {
+        return fail(c, err)
+    }
+
+    let body: NoteInput
+    try {
+        body = await c.req.json()
+    } catch {
+        return c.json({ error: '请求体必须是 JSON' }, 400)
+    }
+
+    try {
+        const note = await addNote(c.env.DB, owner, body)
+        return c.json({ note }, 201)
+    } catch (err) {
+        return fail(c, err)
+    }
+})
+
+/** 改正文。位置与摘录不动 —— 改它们等于换一处笔记，那是删掉重写 */
+app.put('/api/notes', async (c) => {
+    let owner: string
+    try {
+        owner = await ownerOf(c)
+    } catch (err) {
+        return fail(c, err)
+    }
+
+    let body: { id?: unknown; text?: unknown }
+    try {
+        body = await c.req.json()
+    } catch {
+        return c.json({ error: '请求体必须是 JSON' }, 400)
+    }
+    const id = typeof body.id === 'string' ? body.id : ''
+    if (id === '') return c.json({ error: '缺少 id' }, 400)
+
+    try {
+        const note = await updateNoteText(c.env.DB, owner, id, body.text)
+        return c.json({ note })
+    } catch (err) {
+        return fail(c, err)
+    }
+})
+
+app.delete('/api/notes', async (c) => {
+    let owner: string
+    try {
+        owner = await ownerOf(c)
+    } catch (err) {
+        return fail(c, err)
+    }
+    const id = c.req.query('id') ?? ''
+    if (id === '') return c.json({ error: '缺少 id 参数' }, 400)
+
+    try {
+        const removed = await removeNote(c.env.DB, owner, id)
+        return c.json({ removed: removed.id, chapterName: removed.chapterName })
+    } catch (err) {
+        return fail(c, err)
+    }
+})
+
 // ---------------------------------------------------------------- 账号
 
 /**
@@ -646,7 +742,7 @@ app.post('/api/account/password', async (c) => {
 // ---------------------------------------------------------------- 备份（导出 / 导入）
 
 /**
- * 导出：书架 + 阅读进度 + 书签，一个文件
+ * 导出：书架 + 阅读进度 + 书签 + 笔记，一个文件
  *
  * 回的是**文件**（`Content-Disposition: attachment`），前端只要一个普通链接 ——
  * 会话是 HttpOnly cookie，同源链接天然带得上，不必先 fetch 再拼 Blob。
@@ -773,7 +869,7 @@ app.put('/api/replace', async (c) => {
  * 导入：把一份备份合并进当前账号
  *
  * 请求体就是导出的那份文件原文。合并规则见 `data/transfer.ts`，一句话：
- * **书架已有的不动、进度按「谁更新」取、书签按 id 去重** —— 于是同一份文件
+ * **书架已有的不动、进度按「谁更新」取、书签与笔记按 id 去重** —— 于是同一份文件
  * 导两次是幂等的，而把旧设备的备份导进新设备不会把读到的新章节倒回去。
  */
 app.post('/api/backup', async (c) => {
