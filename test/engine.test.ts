@@ -126,7 +126,7 @@ describe('正则链', () => {
         expect(ops[1]).toEqual({ pattern: 'C', replacement: 'D', onlyOne: false })
     })
 
-    it('### 结尾表示只替换第一个匹配', () => {
+    it('### 结尾标记最后一个 op 是 OnlyOne（只取第一个匹配）', () => {
         const { ops } = splitRegexChain('tag.a@text##第(.+?)章##章节###')
         expect(ops).toEqual([{ pattern: '第(.+?)章', replacement: '章节', onlyOne: true }])
     })
@@ -141,13 +141,43 @@ describe('正则链', () => {
         expect(ops[0]!.replacement).toBe('a#b')
     })
 
-    it('净化是循环替换，OnlyOne 只替换第一处', () => {
+    it('净化是循环替换；`###` 是**取第一个匹配**，不是「整段里只替换第一处」', () => {
         const text = 'A1A2A3'
         expect(applyRegexOps(text, [{ pattern: 'A', replacement: '-', onlyOne: false }])).toBe(
             '-1-2-3',
         )
-        expect(applyRegexOps(text, [{ pattern: 'A', replacement: '-', onlyOne: true }])).toBe(
-            '-1A2A3',
+        // `###` 的结果是**匹配到的那一段**（第一个 `A` 换成 `-` → `-`），
+        // 而不是整段文本里少了一处 `A`（那会得到 `-1A2A3`）。线上 112 处 `###`
+        // 规则全是这个意图：约 30 条封面规则要从 href 里抠出数字再拼一条新地址，
+        // 按「整段替换」会拼出 `/book//files/…jpg.html` 这种坏地址（见 regex.ts 的说明）
+        expect(applyRegexOps(text, [{ pattern: 'A', replacement: '-', onlyOne: true }])).toBe('-')
+    })
+
+    it('`###` 的真实形状：从 href 里抠数字拼新地址 / 抠出数字加后缀', () => {
+        expect(
+            applyRegexOps('/book/12345.html', [
+                {
+                    pattern: '.+\\D((\\d+)\\d{3})\\D',
+                    replacement: '/img/$2/$1/$1s.jpg',
+                    onlyOne: true,
+                },
+            ]),
+        ).toBe('/img/12/12345/12345s.jpg')
+        // 🧨快看漫画 的 lastChapter：简介里抠出字数再加「章」
+        expect(
+            applyRegexOps('这本书一共有 123 个字', [
+                { pattern: '(\\d+)', replacement: '$1章', onlyOne: true },
+            ]),
+        ).toBe('123章')
+    })
+
+    it('`###` 没匹配到就取不到东西（空串），不返回原文', () => {
+        expect(applyRegexOps('abc', [{ pattern: '\\d+', replacement: 'x', onlyOne: true }])).toBe(
+            '',
+        )
+        // 净化那侧相反：没匹配到就是原文没变
+        expect(applyRegexOps('abc', [{ pattern: '\\d+', replacement: 'x', onlyOne: false }])).toBe(
+            'abc',
         )
     })
 

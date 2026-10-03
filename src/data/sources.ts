@@ -50,7 +50,11 @@ export function fixtureSource(origin: string): RegisteredSource {
         ruleBookInfo: {
             name: '@css:h1.book-name@text',
             author: '@css:span.book-author@text',
-            intro: '@css:div.book-intro@text',
+            // 空选择器 + 取值链：规则直接以 `##正则##$1###` 开头，从**整页原文**里抠字段。
+            // 线上 55 处这么写（⚡📂未来天王 六个字段、🔞PO18文学 的 wordCount …），
+            // 所以这一条钉住两件事：空选择器的输入是整页；`###` 是「取第一个匹配」
+            // 而不是「整段里替换第一处」（后者会让 intro 等于整页）
+            intro: '##class="book-intro">([^<]+)<##$1###',
             tocUrl: '@css:a.toc-link@href',
         },
         ruleToc: {
@@ -369,13 +373,19 @@ export function fixtureSelectorJsSource(origin: string): RegisteredSource {
             chapterUrl: '@css:a@href',
         },
         ruleContent: {
-            // `p@text` 命中 3 个段落：`result` 属于「按字符串用」的那一类。
-            // 脚本读 `result.split('\n')`，与「多命中就绑数组」的旧行为直接冲突 ——
-            // 所以这一条同时是这一轮的回归哨兵。
+            /**
+             * `p@text` 命中 3 个段落，而且**三段齐全**：
+             *
+             *   1. 选择器命中多个 → `result` 按字符串绑（旧行为绑数组，`split` 直接抛错）；
+             *   2. `##第一段。##第1段。##` 这条链在 `@js:` **之前** ——
+             *      旧实现先切链、再找 `@js:`，于是脚本一次都不执行、`第1段。` 留在正文里；
+             *   3. 脚本再把 `第1段。` 换回 `第一段。`，所以正文与其余方言**逐字一致**。
+             *
+             * 顺序弄反、绑法弄错、链丢掉，三者任一都会让「逐字一致」这条断言失败。
+             */
             content:
-                `@css:div#content p@text@js:` +
-                `result.split('\\n').map(function (s) { return s.trim() })` +
-                `.filter(function (s) { return s !== '' }).join('\\n')`,
+                `@css:div#content p@text##第一段。##第1段。##@js:` +
+                `result.replace('第1段。', '第一段。')`,
         },
     }
 }

@@ -88,3 +88,14 @@ export function hasRuleSyntax(skeleton: string): boolean {
 export function templatePattern(): RegExp {
     return /\{\{([\s\S]*?)\}\}/g
 }
+
+/**
+ * 把 `{{...}}` 整段去掉，得到骨架
+ *
+ * 与 `expandTemplates` 里那份骨架是同一个变换（那边顺手把展开值也拼了出来）。
+ * 单独留一个函数，是因为**判一段前缀**时会用到：规则里 `@js:` 尾巴把 `{{}}`
+ * 切成两半之后，要判的是前缀那一半的骨架（见 `analyze.ts` 的 `evalRule`）。
+ */
+export function skeletonOf(text: string): string {
+    return text.replace(templatePattern(), '')
+}

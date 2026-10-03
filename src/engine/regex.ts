@@ -72,7 +72,30 @@ export function splitRegexChain(rule: string): { selector: string; ops: RegexOp[
     return { selector, ops }
 }
 
-/** 对一段文本套用正则链 */
+/**
+ * 对一段文本套用正则链
+ *
+ * 两种语义（对应 `##正则##替换` 与 `##正则##替换###`）：
+ *
+ *   - **净化**（无 `###`）：循环匹配、**全部替换**，结果还是整段文本。
+ *     用途是把正文里的广告、字数统计、翻页提示洗掉（线上 392 处），
+ *     值本身不变，只是其中若干段被换掉。
+ *   - **取值**（`###`，OnlyOne）：**只取第一个匹配**，结果就是那一段，
+ *     替换只作用在它自己身上。
+ *
+ * 第二种以前实现成了「整段文本里替换第一个匹配」—— 结果仍是**整段文本**，
+ * 于是取值类规则全都拿到一段没用的长文本：
+ *
+ *   `a.0@href` 的值是 `/book/12345.html`，规则是
+ *   `##.+\D((\d+)\d{3})\D##/files/article/image/$2/$1/$1s.jpg###`，
+ *   想要的是 `/files/article/image/12/12345/12345s.jpg`；
+ *   按「整段替换」会得到 `/book//files/article/image/12/12345/12345s.jpg.html`。
+ *   这个封面写法线上有十几个源在用（黄易、若雨中文、万象书城、棉花糖 …），
+ *   另外 `##isvip##🔒###`（isVip 字段）按整段替换会等于**整页**。
+ *
+ * 没匹配到就取不到东西 → 空串。与 AllInOne（匹配不到就不产出）一致；
+ * 不返回原文，是因为「取第一个匹配」这件事本身没成功，返回原文等于给一个假值。
+ */
 export function applyRegexOps(input: string, ops: RegexOp[]): string {
     let out = input
     for (const op of ops) {
@@ -83,7 +106,12 @@ export function applyRegexOps(input: string, ops: RegexOp[]): string {
             // 单个书源里的正则写坏了，不该让整次搜索失败：跳过它并保留原文
             continue
         }
-        out = op.onlyOne ? out.replace(re, op.replacement) : out.replace(re, op.replacement)
+        if (!op.onlyOne) {
+            out = out.replace(re, op.replacement)
+            continue
+        }
+        const match = re.exec(out)
+        out = match === null ? '' : match[0].replace(re, op.replacement)
     }
     return out
 }

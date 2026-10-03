@@ -31,6 +31,17 @@ export const RULE_GROUPS = ['ruleSearch', 'ruleBookInfo', 'ruleToc', 'ruleConten
  */
 export const URL_FIELDS = ['searchUrl', 'exploreUrl']
 
+/**
+ * 规则组里**不是规则**的字段
+ *
+ * 它们装的是配置或 JS，引擎从不拿它们去求值：
+ *   - `replaceRegex` 是正文净化正则（`applyReplaceRegex` 直接当正则用），形如
+ *     `##正则##替换` —— 线上 151 处里 **132 处以 `##` 开头**、10 处含 `@js:`。
+ *     当成规则收进来会一次报出上百条「选择器为空」的假阳性（实测就是这个数）
+ *   - `imageDecode` 是图片重排的 JS 片段（要靠 Android 的 BitmapFactory，本引擎不实现）
+ */
+const NON_RULE_FIELDS = new Set(['replaceRegex', 'imageDecode'])
+
 function parsePayload(value: unknown): Record<string, unknown> | null {
     if (typeof value !== 'string') return null
     try {
@@ -97,6 +108,7 @@ export function ruleFieldsOf(source: Record<string, unknown>): RuleField[] {
                 // 名字以 `Js` 结尾的字段**本身就是 JS**（`callBackJs` / `webJs` / `formatJs`），
                 // 里面不带 `@js:` 标记。收进来的话，JS 里以 `//` 开头的注释行会被当成 XPath 表达式
                 if (/Js$/.test(field)) continue
+                if (NON_RULE_FIELDS.has(field)) continue
                 out.push({ path: `${group}.${field}`, value })
             }
         }

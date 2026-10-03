@@ -21,9 +21,15 @@ import { extractValues, parseHtml, reparseFragment, selectNodes } from './select
 import { jsonPathToStrings } from './jsonpath'
 import { runInSandbox, sandboxResultToString, sandboxResultToStrings } from './js'
 import type { SandboxGetElements, SandboxGetString, SandboxLimits } from './js'
-import { classifyTemplate, hasRuleSyntax, stripRuleMarker, templatePattern } from './template'
-import { splitRuleText } from './ruleText'
-import { indexOfJsMarker, JS_MARKER, matchDirective, ruleHasJs } from './directives'
+import {
+    classifyTemplate,
+    hasRuleSyntax,
+    skeletonOf,
+    stripRuleMarker,
+    templatePattern,
+} from './template'
+import { splitJsTail, splitRuleText } from './ruleText'
+import { matchDirective, ruleHasJs } from './directives'
 import { resultWantsArray } from './resultShape'
 import { isAttributeView, normalizeXPathFunctions, runXPath, splitXPathExtract } from './xpath'
 
@@ -404,7 +410,15 @@ export async function analyzeStrings(
     return evalRule(sel, expanded, skeleton, ctx)
 }
 
-/** 连接符与正则链的解析；`skeleton` 与 `rule` 结构对应 */
+/**
+ * 连接符、`@js:` 尾巴与正则链的解析；`skeleton` 与 `rule` 结构对应
+ *
+ * 拆分顺序是**连接符 → `@js:` → `##` 链**，这个顺序本身有语义：
+ *   - 连接符要最先切，`||` / `&&` / `%%` 是同级规则之间的关系，且 JS 区域里的不算；
+ *   - `@js:` 必须排在 `##` 链**之前**：它是一条分界线，两边的链各归各自那一侧。
+ *     反过来先切 `##` 链，`选择器##过滤##@js:代码` 里的脚本就会被当成替换串的一部分、
+ *     一次都不执行（而且不报错）—— 见 `ruleText.ts` 的 `splitJsTail`。
+ */
 async function evalRule(
     sel: Selection,
     rule: string,
@@ -441,6 +455,50 @@ async function evalRule(
         }
     }
 
+    const jsTail = splitJsTail(rule)
+    if (jsTail) {
+        /**
+         * 整条规则以 `@js:` 开头（前面没有选择器）时，`result` 是**页面原文** ——
+         * 只有一份，不存在「绑数组」那回事，所以走 `sourceResultGlobals`。
+         *
+         * 真实书源里这是常规写法：天脉漫画的正文就是
+         * `@js:var start = result.indexOf('id="cp_img"')…`；`result` 若是空串，
+         * 规则会「执行成功但什么都取不到」，喜马拉雅的目录规则更直接：
+         * 对空串 `JSON.parse` 就地报错。
+         */
+        const bareJs = jsTail.before.trim() === ''
+        const source = ctx.result ?? sel.source
+
+        // 前置那一段照旧求值：它可能是「选择器 + 自己的链」，也可能就是空的。
+        // 递归进来时 `@js:` 已经被切走了（`splitJsTail` 取的是**第一个**标记），不会转圈
+        const values = bareJs
+            ? []
+            : await evalRule(
+                  sel,
+                  jsTail.before,
+                  skeleton === null ? null : skeletonOf(jsTail.before),
+                  ctx,
+              )
+
+        const produced = await runInSandbox(
+            jsTail.code,
+            {
+                ...baseGlobals(ctx),
+                ...(bareJs
+                    ? sourceResultGlobals(jsTail.code, source)
+                    : resultGlobals(jsTail.code, values)),
+                src: sel.source,
+            },
+            sandboxLimits(sel, ctx),
+        )
+        const out = sandboxResultToStrings(produced)
+
+        // 代码之后还有一条链（`选择器@js:代码##正则##替换`）：它作用在脚本的**输出**上
+        if (jsTail.after === '') return out
+        const afterOps = splitRegexChain(`x${jsTail.after}`).ops
+        return afterOps.length ? out.map((v) => applyRegexOps(v, afterOps)) : out
+    }
+
     const { selector, ops } = splitRegexChain(rule)
     const skeletonSelector = skeleton === null ? null : splitRegexChain(skeleton).selector
 
@@ -448,6 +506,26 @@ async function evalRule(
     if (skeletonSelector !== null && !hasRuleSyntax(skeletonSelector)) {
         // 展开之后是字面文本（`"/api/tracks/{{$.id}}"` 这类），直接当结果
         values = selector.trim() === '' ? [] : [selector]
+    } else if (selector.trim() === '' && ops[ops.length - 1]?.onlyOne === true) {
+        /**
+         * **空选择器 + 取值链（`###`）= 从当前原文里取**。规则直接以 `##正则##$1###`
+         * 开头，就是从整页里抠一个字段：
+         *
+         *   `🔞PO18文学 / ruleBookInfo.wordCount`  →  `##总字数：([^<]+)<##$1###`
+         *   `⚡📂未来天王 / ruleBookInfo.name`      →  `##:book_name"[^"]+"([^"]*)##$1###`
+         *
+         * 线上 55 处这么写（⚡📂未来天王 六个字段、🔞PO18文学、📂被电子书、🎈腐小说、
+         * 📂笔下文学 的 nextTocUrl …）。之前这一步落到空数组上，这些字段**一律取不到值**，
+         * 而且不报错。取的是与 AllInOne（`applyAllInOne(sel.source, …)`）、顶格 `@js:`
+         * （`sourceResultGlobals`）同一份**页面原文**。
+         *
+         * 只对**取值**链成立：`##正则##替换`（净化）要的是一个「被净化的值」，
+         * 空选择器给不出来 —— 那就什么都不取（`📂天地中文` 的
+         * `text||##最新章节.*` 这种 `||` 兜底分支，今天就该是空的，不能变成整页）。
+         */
+        values = [sel.source]
+    } else if (selector.trim() === '') {
+        values = []
     } else {
         values = await evalSelectorChain(sel, selector, ctx)
     }
@@ -455,7 +533,7 @@ async function evalRule(
     return ops.length ? values.map((v) => applyRegexOps(v, ops)) : values
 }
 
-/** 处理 `<js></js>` 链与 `@js:` 尾巴 */
+/** 处理 `<js></js>` 链（`@js:` 尾巴在 `evalRule` 那一层就切走了，这里不再有） */
 async function evalSelectorChain(
     sel: Selection,
     selector: string,
@@ -508,37 +586,20 @@ async function evalSelectorChain(
     return values
 }
 
-/** 单段规则：可能是纯选择器，也可能是「选择器 + @js」 */
+/**
+ * 单段规则：一段**不含 `@js:` 尾巴**的选择器
+ *
+ * `@js:` 尾巴（`选择器@js:代码`）在 `evalRule` 那一层就被 `splitJsTail` 切走了，
+ * 因为它必须排在 `##` 链**之前**切 —— 见那里的说明。
+ */
 async function evalSingleSegment(
     sel: Selection,
     segment: string,
     ctx: RuleContext,
 ): Promise<string[]> {
-    // `@js:` 标记**不区分大小写**（`选择器@JS:代码` 在真实书源里有）
-    const jsAt = indexOfJsMarker(segment)
-    const head = jsAt === -1 ? segment : segment.slice(0, jsAt).replace(/@$/, '')
-    const jsCode = jsAt === -1 ? null : segment.slice(jsAt + JS_MARKER.length)
-
-    // 整条规则只有 `@js:`，没有前置选择器
-    //
-    // 此时 `result` 必须绑成**当前页面的原文**。真实书源里这是常规写法
-    // （天脉漫画的正文就是 `@js:var start = result.indexOf('id="cp_img"')…`），
-    // 而 `result` 若是空串，规则会「执行成功但什么都取不到」；
-    // 喜马拉雅的目录规则更直接：对空串 JSON.parse 就地报错。
-    if (head.trim() === '' && jsCode !== null) {
-        const result = await runInSandbox(
-            jsCode,
-            {
-                ...baseGlobals(ctx),
-                ...sourceResultGlobals(jsCode, ctx.result ?? sel.source),
-                src: sel.source,
-            },
-            sandboxLimits(sel, ctx),
-        )
-        // 逐个返回（见 evalSelectorChain 里的同一处说明）：`@js:` 列表规则
-        // 返回数组时，条目数必须等于数组长度
-        return sandboxResultToStrings(result)
-    }
+    // 冗余的 `@` 标记（`{{@@h1@text}}`、`div.x@@js:代码` 这类）从尾部去掉一个 `@`：
+    // 选择器自己不会以 `@` 结尾，尾巴上那个 `@` 只可能属于标记
+    const head = segment.replace(/@$/, '')
 
     let kind = detectKind(head)
 
@@ -548,27 +609,9 @@ async function evalSingleSegment(
         if (asField) kind = { kind: 'json', body: asField }
     }
 
-    let values: string[]
-
-    if (kind.kind === 'allinone') {
-        values = applyAllInOne(sel.source, head)
-    } else {
-        values = evalSelector(sel, kind.body, kind.kind)
-    }
-
-    if (jsCode === null) return values
-
-    const result = await runInSandbox(
-        jsCode,
-        {
-            ...baseGlobals(ctx),
-            ...resultGlobals(jsCode, values),
-            src: sel.source,
-        },
-        sandboxLimits(sel, ctx),
-    )
-    // 同上：选择器 + `@js:` 尾巴用在列表规则上时也一样
-    return sandboxResultToStrings(result)
+    return kind.kind === 'allinone'
+        ? applyAllInOne(sel.source, head)
+        : evalSelector(sel, kind.body, kind.kind)
 }
 
 /**
@@ -772,7 +815,13 @@ export async function analyzeSelections(
      * 接口型书源（音频、漫画）的列表规则几乎全是这个形态，症状是
      * **一条都搜不到、而且全程不报错**。
      */
-    const isJsRule = matchDirective(selector)?.name === 'js' || /<js[\s>]/i.test(selector)
+    // `splitJsTail(trimmed)` 那一项是为 `选择器##过滤##@js:代码` 补的：`selector` 只到
+    // 第一个 `##` 为止、看不见后面的 `@js:`，于是这种列表规则会走节点那条路 ——
+    // 节点那条路**跑不了脚本**，`ops` 之后的结果直接被当条目，JS 一次都不执行。
+    const isJsRule =
+        matchDirective(selector)?.name === 'js' ||
+        /<js[\s>]/i.test(selector) ||
+        splitJsTail(trimmed) !== null
 
     let nodes: any[] | null = null
     let reversed = false

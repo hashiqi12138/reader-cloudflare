@@ -254,19 +254,45 @@ if (succeeded.length < 2) {
     )
 
     /**
-     * 单独把 `选择器@js:` 那条点出来
+     * 把 `选择器@js:` 那条单独点出来
      *
-     * 它的正文规则是 `div#content p@text@js:result.split('\n')…` —— 选择器**命中 3 个段落**，
-     * 而脚本按**字符串**用 `result`。引擎早先按「命中多个 → 数组」绑定，这一条会直接抛
-     * `TypeError: result.split is not a function`，表现是正文为空。
+     * 它的正文规则是 `div#content p@text##第一段。##第1段。##@js:result.replace(…)`，
+     * 三段语义全在一个规则里：选择器**命中 3 个段落**、`result` 按**字符串**绑、
+     * 净化链在 `@js:` **之前**、脚本再把 `第1段。` 换回 `第一段。`。
      * 上面「逐字一致」那条断言已经覆盖了它，这里再单独断言一次，是为了让
-     * **失败信息直接点出「多命中绑错了类型」**，而不是淹没在七条方言的比对里。
+     * **失败信息直接点出是哪一段语义坏了**，而不是淹没在七条方言的比对里。
      */
     const selectorJs = results['builtin:fixture-selector-js']
     check(
         Boolean(selectorJs) && selectorJs.content.split('\n').length >= 3,
-        '选择器@js: 多命中的结果按换行拼成字符串，段落一条不少',
-        selectorJs ? JSON.stringify(selectorJs.content.slice(0, 60)) : '这条源没跑通',
+        '选择器@js: 的链在脚本之前跑，正文段落一条不少',
+        selectorJs ? JSON.stringify(selectorJs.content.slice(0, 70)) : '这条源没跑通',
+    )
+}
+
+console.log('\n=== 4b. 空选择器 + 取值链（`##正则##$1###`）===')
+{
+    /**
+     * CSS 方言的 `ruleBookInfo.intro` 写成了 `##class="book-intro">([^<]+)<##$1###` ——
+     * 前面**没有选择器**，直接以净化链开头。线上 55 处这么写
+     * （⚡📂未来天王 六个字段、🔞PO18文学 的 wordCount、📂被电子书 …）。
+     *
+     * 一条规则同时钉住两件事：空选择器的输入是**整页原文**；`###` 是「取第一个匹配」
+     * （结果是匹配到的那一段），不是「整段里替换第一处」—— 后者会让 intro 等于**整页**。
+     * 拿 XPath 方言的 `//div[@class="book-intro"]/text()` 当参照：两条路必须给出同一段简介。
+     */
+    const bookOf = (id) =>
+        getJson(
+            `/api/book?sourceId=${encodeURIComponent(id)}&url=${encodeURIComponent(`${BASE}/fixture/book/1`)}`,
+        )
+    const fromCss = await bookOf('builtin:fixture-css')
+    const fromXPath = await bookOf('builtin:fixture-xpath')
+    const intro = String(fromCss.json?.intro ?? '')
+    const viaXPath = String(fromXPath.json?.intro ?? '')
+    check(
+        intro.length > 0 && intro === viaXPath,
+        '空选择器 + `###` 从整页里抠出了简介（不是整页、也不是空）',
+        `css=${JSON.stringify(intro.slice(0, 50))} xpath=${JSON.stringify(viaXPath.slice(0, 50))}`,
     )
 }
 
