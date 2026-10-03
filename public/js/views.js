@@ -21,10 +21,12 @@ import {
     prefs,
     register as doRegister,
     relativeTime,
+    setChildren,
     skeletonBlock,
     skeletonList,
     toast,
 } from './core.js'
+import { mergeBooks, sourceBookKey } from './merge.js'
 
 /**
  * 阅读界面的地址
@@ -201,7 +203,17 @@ export async function viewLogin(host, notice) {
  */
 export function bookCard(book, sourceId, options = {}) {
     const entries = options.entries ?? null
-    const saved = entries ? inShelf(entries, sourceId, book.bookUrl) : false
+    /**
+     * 合并卡片要按「**任一**书源有这本」算已在书架
+     *
+     * 搜索结果是按书合并的，一条卡片背后可能有十几个源；只看主源的话，
+     * 从别的源加过这本书再搜一次，卡片还是显示「加入书架」，点了才发现重复。
+     */
+    const saved = options.savedAny
+        ? options.savedAny.some((item) => inShelf(entries, item.sourceId, item.bookUrl))
+        : entries
+          ? inShelf(entries, sourceId, book.bookUrl)
+          : false
 
     const meta = [book.author || '未知作者', book.kind || '', book.lastChapter || '']
         .filter(Boolean)
@@ -886,6 +898,24 @@ export async function viewExplore(host) {
 
 let lastKeyword = ''
 
+/**
+ * 最近一次搜索的合并结果，供**详情页换源**用
+ *
+ * 键是 (书源, 书籍地址)：详情页只知道「自己在哪一源、哪一条地址」，
+ * 从这里反查出「同一条书在别的源上的地址」。刷新页面缓存就没了 ——
+ * 那时详情页只是不显示「换源」那一排，读书不受影响。
+ */
+const mergedIndex = new Map()
+
+function rememberMerged(merged) {
+    mergedIndex.clear()
+    for (const item of merged) {
+        for (const source of item.sources) {
+            mergedIndex.set(sourceBookKey(source.sourceId, source.book.bookUrl), item)
+        }
+    }
+}
+
 export async function viewSearch(host) {
     const input = el('input', {
         type: 'search',
@@ -934,33 +964,73 @@ export async function viewSearch(host) {
         }
 
         const entries = await loadShelf()
+
+        /**
+         * **按书合并**，而不是按书源分块列出来
+         *
+         * 按源分块的话，同一本书在十几个源上出现十几次（真实安装里搜一个热词就是一整页
+         * 重复）；而且源越多越严重 —— 加源本来是为了「多几条路能读到书」，
+         * 结果反而让搜索结果更难用。合并之后一条卡片代表一本书，
+         * 主源进详情页、那里再换源（见下方 rememberMerged）。
+         */
+        const succeeded = (data.sources ?? []).filter(
+            (per) => per.ok && (per.books ?? []).length > 0,
+        )
+        const merged = mergeBooks(succeeded, {
+            // 已经在书架里的那一源优先 —— 从搜索点进去就是上次读的那个源
+            prefer: (sourceId, book) => inShelf(entries, sourceId, book.bookUrl),
+        })
+        rememberMerged(merged)
+
         const blocks = [
             el('p', {
                 class: 'muted',
-                text: `命中 ${data.totalBooks} 本，来自 ${data.sourceCount} 个书源`,
+                text: `命中 ${data.totalBooks} 本，来自 ${data.sourceCount} 个书源；按书合并后是 ${merged.length} 本`,
             }),
         ]
         const failed = []
 
         for (const per of data.sources ?? []) {
-            if (!per.ok) {
-                failed.push(`${per.sourceName}：${per.error ?? '未知错误'}`)
-                continue
-            }
-            if ((per.books ?? []).length === 0) continue
+            if (!per.ok) failed.push(`${per.sourceName}：${per.error ?? '未知错误'}`)
+        }
 
+        if (merged.length > 0) {
             const grid = el('div', { class: 'grid' })
-            for (const book of per.books) {
+            for (const item of merged) {
+                const preferred = item.preferred
                 grid.append(
-                    bookCard(book, per.sourceId, {
+                    bookCard({ ...item, bookUrl: preferred.book.bookUrl }, preferred.sourceId, {
                         entries,
-                        sourceLabel: per.sourceName,
+                        // 一条卡片背后可能有很多源，任一源加过就算已在书架
+                        savedAny: item.sources.map((source) => ({
+                            sourceId: source.sourceId,
+                            bookUrl: source.book.bookUrl,
+                        })),
+                        sourceLabel:
+                            item.sources.length > 1
+                                ? `${item.sources.length} 个书源`
+                                : preferred.sourceName,
                         onRead: () =>
-                            go(readUrl(per.sourceId, book.bookUrl, book.name, book.author, 0)),
+                            go(
+                                readUrl(
+                                    preferred.sourceId,
+                                    preferred.book.bookUrl,
+                                    item.name,
+                                    item.author,
+                                    0,
+                                ),
+                            ),
                     }),
                 )
             }
-            blocks.push(sectionTitle(`${per.sourceName}（${per.books.length}）`), grid)
+            blocks.push(grid)
+        } else {
+            blocks.push(
+                emptyState(
+                    '没搜到',
+                    '换个关键词试试；也可以到「书源」里看看启用的源是不是都被停用了。',
+                ),
+            )
         }
 
         if (failed.length > 0) {
@@ -1328,7 +1398,35 @@ export async function viewBook(host) {
               ])
             : null
 
-    host.replaceChildren(
+    /**
+     * 换源：别的书源上也有这本书时，列一排按钮
+     *
+     * 搜索结果是按书合并的，所以「这本书在哪些源上有」这件事只有这里能回答 ——
+     * 换了源之后同一个页面重新走一遍，地址换成那一源的地址，其余一切照旧。
+     * 缓存来自最近一次搜索；直接分享链接进来（没搜过）时这一排不出现，不影响读书。
+     */
+    const group = mergedIndex.get(sourceBookKey(sourceId, target))
+    const others = (group?.sources ?? []).filter((item) => item.sourceId !== sourceId)
+    const switchRow =
+        others.length > 0
+            ? el('section', { class: 'card switch-sources' }, [
+                  el('h2', { text: `换源（还有 ${others.length} 个书源有这本书）` }),
+                  el(
+                      'div',
+                      { class: 'row' },
+                      others.map((item) =>
+                          el('button', {
+                              class: 'btn sm ghost',
+                              text: item.sourceName,
+                              title: `用「${item.sourceName}」打开这本书`,
+                              onclick: () => go(bookUrl(item.sourceId, item.book)),
+                          }),
+                      ),
+                  ),
+              ])
+            : null
+
+    setChildren(host, [
         el('article', { class: 'book-detail card' }, [
             el('div', { class: 'book-detail-head' }, [
                 coverNode(info.coverUrl, name, 'cover large'),
@@ -1346,9 +1444,10 @@ export async function viewBook(host) {
                   ])
                 : null,
         ]),
+        switchRow,
         warning ? alertBox('warn', '这份目录可能不完整', warning) : null,
         chapterList
             ? el('section', { class: 'card' }, [el('h2', { text: '目录' }), chapterList])
             : null,
-    )
+    ])
 }

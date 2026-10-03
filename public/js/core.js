@@ -1,11 +1,15 @@
 /*
  * 前端基础设施：DOM 构造、接口调用、登录态、偏好、以及几个共用组件。
  *
- * 两条从旧版沿用下来的硬规矩：
+ * 三条硬规矩：
  * 1. **一律不拼 HTML 字符串**。书名、作者、正文、分类名全来自第三方站点与书源，
  *    用 innerHTML 等于把外部内容当代码执行。所有外部文本都走 textContent（见 el()）。
  * 2. 路由用 hash 而不是 History API：hash 不需要服务端配合回退，
  *    少一处「刷新页面 404」的坑，也省掉一份 SPA 回退配置的维护。
+ * 3. **子节点一律走 `el()` / `append()` / `setChildren()`**，不要直接调原生
+ *    `replaceChildren()` / `append()`。`null` 与 `undefined` 在原生方法里会被
+ *    `String()` 成文本 —— 于是页面上真的渲染出一个 `null`（详情页出现过一次）。
+ *    这三个封装把空值吃掉，调用处不必层层判断。
  */
 
 // ---------------------------------------------------------------- DOM
@@ -32,6 +36,18 @@ export function append(node, children) {
         node.append(child instanceof Node ? child : document.createTextNode(String(child)))
     }
     return node
+}
+
+/**
+ * 清空并重设子节点 —— 原生 `replaceChildren(...)` 的安全版本
+ *
+ * 三元表达式里写 `cond ? node : null` 是最顺手的写法，而原生的 `replaceChildren` /
+ * `append` 会把那个 `null` 变成字符串 `"null"` 渲染出来。要让**所有**子节点都过一遍
+ * `append()` 的过滤，就只有走这里。
+ */
+export function setChildren(host, children = []) {
+    host.replaceChildren()
+    return append(host, children)
 }
 
 export const frag = (...children) => append(document.createDocumentFragment(), children)
