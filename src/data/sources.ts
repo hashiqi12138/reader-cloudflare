@@ -326,6 +326,61 @@ export function fixtureTemplateSource(origin: string): RegisteredSource {
 }
 
 /**
+ * `选择器@js:` 的源 —— 选择器**命中多个**，而脚本按**字符串**用 `result`
+ *
+ * 专钉「`result` 绑数组还是字符串」这件事（见 README「`选择器@js:` 里 `result` 绑什么」）：
+ * `div#content p@text` 会命中 3 个段落，早先引擎按「命中多个 → 数组」绑定，
+ * 于是 `result.split` 按数组调直接抛 `TypeError`（🎨🔞鸟鸟韩漫 的正文就是这么坏的）。
+ * 按字符串绑定时，它的正文与其余各方言**逐字相同**。
+ *
+ * 正因为参与第 3、4 节的对照，它才有断言价值：绑错类型时取到的是报错，
+ * 而不是「差不多的一段字」。
+ */
+export function fixtureSelectorJsSource(origin: string): RegisteredSource {
+    return {
+        id: 'builtin:fixture-selector-js',
+        builtin: true,
+        sortOrder: 11,
+        bookSourceName: '内置测试站点（选择器@js: 规则）',
+        bookSourceUrl: origin,
+        bookSourceGroup: '测试',
+        bookSourceComment: '验证 选择器@js: 里 result 多命中时的绑法',
+        bookSourceType: 0,
+        enabled: true,
+
+        searchUrl: `${origin}/fixture/search?q={{key}}&p={{page}}`,
+        ruleSearch: {
+            bookList: '@css:div.result-item',
+            name: '@css:h3.title@text',
+            author: '@css:span.author@text',
+            kind: '@css:span.kind@text',
+            intro: '@css:p.intro@text',
+            bookUrl: '@css:h3.title a@href',
+        },
+        ruleBookInfo: {
+            name: '@css:h1.book-name@text',
+            author: '@css:span.book-author@text',
+            intro: '@css:div.book-intro@text',
+            tocUrl: '@css:a.toc-link@href',
+        },
+        ruleToc: {
+            chapterList: '@css:ul.chapter-list li',
+            chapterName: '@css:a@text',
+            chapterUrl: '@css:a@href',
+        },
+        ruleContent: {
+            // `p@text` 命中 3 个段落：`result` 属于「按字符串用」的那一类。
+            // 脚本读 `result.split('\n')`，与「多命中就绑数组」的旧行为直接冲突 ——
+            // 所以这一条同时是这一轮的回归哨兵。
+            content:
+                `@css:div#content p@text@js:` +
+                `result.split('\\n').map(function (s) { return s.trim() })` +
+                `.filter(function (s) { return s !== '' }).join('\\n')`,
+        },
+    }
+}
+
+/**
  * 图片源（bookSourceType=2）
  *
  * 正文规则取的是 `<img>` 标签，而且**真地址在 data-src 上**，与真实漫画站一致。
@@ -550,6 +605,7 @@ export function builtinSources(origin: string): RegisteredSource[] {
         fixtureJsonSource(origin),
         fixtureJsResultSource(origin),
         fixtureTemplateSource(origin),
+        fixtureSelectorJsSource(origin),
         fixtureImageSource(origin),
         fixtureAudioSource(origin),
         fixtureAudioNoRuleSource(origin),

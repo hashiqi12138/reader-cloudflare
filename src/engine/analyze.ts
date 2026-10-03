@@ -24,6 +24,7 @@ import type { SandboxGetElements, SandboxGetString, SandboxLimits } from './js'
 import { classifyTemplate, hasRuleSyntax, stripRuleMarker, templatePattern } from './template'
 import { splitRuleText } from './ruleText'
 import { indexOfJsMarker, JS_MARKER, matchDirective, ruleHasJs } from './directives'
+import { resultWantsArray } from './resultShape'
 import { isAttributeView, normalizeXPathFunctions, runXPath, splitXPathExtract } from './xpath'
 
 /** 一次规则求值所面对的上下文：一个可继续筛选的节点集 */
@@ -331,7 +332,7 @@ async function evalTemplate(sel: Selection, inner: string, ctx: RuleContext): Pr
         try {
             const value = await runInSandbox(
                 text,
-                { ...baseGlobals(ctx), ...resultGlobals(text, sel.source), src: sel.source },
+                { ...baseGlobals(ctx), ...sourceResultGlobals(text, sel.source), src: sel.source },
                 sandboxLimits(sel, ctx),
             )
             return sandboxResultToString(value)
@@ -492,7 +493,7 @@ async function evalSelectorChain(
             part.text,
             {
                 ...baseGlobals(ctx),
-                ...resultGlobals(part.text, values.length > 1 ? values : (values[0] ?? '')),
+                ...resultGlobals(part.text, values),
                 src: current.source,
             },
             sandboxLimits(current, ctx),
@@ -529,7 +530,7 @@ async function evalSingleSegment(
             jsCode,
             {
                 ...baseGlobals(ctx),
-                ...resultGlobals(jsCode, ctx.result ?? sel.source),
+                ...sourceResultGlobals(jsCode, ctx.result ?? sel.source),
                 src: sel.source,
             },
             sandboxLimits(sel, ctx),
@@ -561,7 +562,7 @@ async function evalSingleSegment(
         jsCode,
         {
             ...baseGlobals(ctx),
-            ...resultGlobals(jsCode, values.length > 1 ? values : (values[0] ?? '')),
+            ...resultGlobals(jsCode, values),
             src: sel.source,
         },
         sandboxLimits(sel, ctx),
@@ -661,11 +662,35 @@ function baseGlobals(ctx: RuleContext): Record<string, unknown> {
 const RESULT_AS_JSOUP =
     /\bresult\s*\.\s*(select|attr|first|last|get|eq|size|isEmpty|textNodes|eachText|html|outerHtml|hasClass|children|not|filter|matches|matchesOwn|tagName|ownText)\s*\(/
 
-/** 传给沙箱的 `result` 与「要不要包成 jsoup 对象」 */
-function resultGlobals(code: string, value: unknown): Record<string, unknown> {
+/**
+ * 传给沙箱的 `result`（前面选择器取到的值）与「要不要包成 jsoup 对象」
+ *
+ * 绑数组还是拼成字符串由 `resultWantsArray` 按**脚本自己的写法**决定，
+ * 而不是按命中数量 —— 按数量决定的话，同一条规则在单页与多页两种页面上
+ * 类型不同，按字符串写的源遇到多页就报 `result.split is not a function`。
+ * 判定依据与线上账本见 `resultShape.ts`。
+ *
+ * 注意这里**不看 `values.length`**：`result[0]` 写在只命中 1 个值的页面上时
+ * 也必须拿到那 1 个值，而不是这个字符串的第 1 个**字符**。
+ */
+function resultGlobals(code: string, values: string[]): Record<string, unknown> {
+    const value: unknown = resultWantsArray(code) ? values : values.join('\n')
     return {
         result: value,
         __resultAsJsoup: typeof value === 'string' && RESULT_AS_JSOUP.test(code),
+    }
+}
+
+/**
+ * `result` 绑成**页面原文**时用它（整条规则只有 `@js:`、前面没有选择器）
+ *
+ * 原文只有一份，不存在「绑数组」这一说；`resultWantsArray` 那套判据在这里不适用。
+ * 参数是 `unknown` 而非 `string`：上下文里的 `result` 可能是调用方给的任意值。
+ */
+function sourceResultGlobals(code: string, source: unknown): Record<string, unknown> {
+    return {
+        result: source,
+        __resultAsJsoup: typeof source === 'string' && RESULT_AS_JSOUP.test(code),
     }
 }
 

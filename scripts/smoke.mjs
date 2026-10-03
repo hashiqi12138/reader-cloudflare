@@ -119,10 +119,10 @@ console.log('\n=== 2. 书源列表 ===')
 const sources = await getJson('/api/sources')
 check(sources.status === 200, 'GET /api/sources 返回 200')
 const list = sources.json?.sources ?? []
-// 必须是六个：对照验证要求 CSS / XPath / JS / JSON / @js:result / 字段模板 六条路径都在场
+// 必须是七个：对照验证要求 CSS / XPath / JS / JSON / @js:result / 字段模板 / 选择器@js: 七条路径都在场
 check(
-    list.length >= 6,
-    '六个测试书源齐备（CSS / XPath / JS / JSON / @js:result / 字段模板 各一）',
+    list.length >= 7,
+    '七个测试书源齐备（CSS / XPath / JS / JSON / @js:result / 字段模板 / 选择器@js: 各一）',
     `count=${list.length}`,
 )
 if (list.length === 0) {
@@ -251,6 +251,22 @@ if (succeeded.length < 2) {
             .split('\n')
             .map((line) => '        ' + line)
             .join('\n'),
+    )
+
+    /**
+     * 单独把 `选择器@js:` 那条点出来
+     *
+     * 它的正文规则是 `div#content p@text@js:result.split('\n')…` —— 选择器**命中 3 个段落**，
+     * 而脚本按**字符串**用 `result`。引擎早先按「命中多个 → 数组」绑定，这一条会直接抛
+     * `TypeError: result.split is not a function`，表现是正文为空。
+     * 上面「逐字一致」那条断言已经覆盖了它，这里再单独断言一次，是为了让
+     * **失败信息直接点出「多命中绑错了类型」**，而不是淹没在七条方言的比对里。
+     */
+    const selectorJs = results['builtin:fixture-selector-js']
+    check(
+        Boolean(selectorJs) && selectorJs.content.split('\n').length >= 3,
+        '选择器@js: 多命中的结果按换行拼成字符串，段落一条不少',
+        selectorJs ? JSON.stringify(selectorJs.content.slice(0, 60)) : '这条源没跑通',
     )
 }
 
@@ -2518,7 +2534,7 @@ console.log('\n=== 20. 节点级助手与对称加解密（java.getElements / cr
 console.log('\n=== 结果 ===')
 if (failures.length === 0) {
     console.log(
-        `全部通过：搜索 → 详情 → 目录 → 正文，${succeeded.length} 个书源（CSS / XPath / JS / JSON / @js:result / 字段模板）结果一致，` +
+        `全部通过：搜索 → 详情 → 目录 → 正文，${succeeded.length} 个书源（CSS / XPath / JS / JSON / @js:result / 字段模板 / 选择器@js:）结果一致，` +
             '图片/音频/文件源各自取回对应形态，媒体代取与签名保护正常',
     )
 } else {
