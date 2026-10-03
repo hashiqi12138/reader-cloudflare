@@ -31,6 +31,14 @@ import {
     toast,
 } from './core.js'
 import { mergeBooks, sourceBookKey } from './merge.js'
+import {
+    SEARCH_CONCURRENCY,
+    SEARCH_SLICE_SIZE,
+    halveSlice,
+    isCpuLimitError,
+    planSlices,
+    runPool,
+} from './searchPlan.js'
 
 /**
  * 阅读界面的地址
@@ -1200,7 +1208,7 @@ export async function viewSearch(host) {
                 el('div', { class: 'spacer' }, [input]),
                 el('button', { class: 'btn primary', text: '搜索', onclick: () => run() }),
             ]),
-            el('p', { class: 'muted tiny', text: '并发打到所有启用的书源，每个源独立成败。' }),
+            el('p', { class: 'muted tiny', text: '分批并发打到所有启用的书源，每个源独立成败。' }),
         ]),
         resultHost,
     )
@@ -1214,19 +1222,66 @@ export async function viewSearch(host) {
         lastKeyword = keyword
         resultHost.replaceChildren(skeletonList(4, 'grid'))
 
-        let data
+        /**
+         * 分片搜索
+         *
+         * 免费计划的 Worker 每个请求只有 10 ms CPU，而一次搜索原本要把**所有**
+         * 书源的规则求值跑在同一个请求里 —— 线上实测会被掐断
+         * （`outcome: exceededCpu` → 浏览器 503）；本地 `wrangler dev` 不设 CPU
+         * 限制，所以这个故障只在线上出现。改成每片几个源的小请求并发跑，
+         * 单片的 CPU 就落在限额内；整片仍被掐掉就劈成两半重试，
+         * 一路劈到单个源为止（见 searchPlan.js）。
+         */
+        let enabled = []
         try {
-            data = await postJson('/api/search', { keyword })
+            const list = await api('/api/sources')
+            enabled = (list.sources ?? [])
+                .filter((source) => source.enabled !== false)
+                .map((source) => source.id)
         } catch (err) {
-            resultHost.replaceChildren(alertBox('error', '搜索失败', err.message))
+            resultHost.replaceChildren(alertBox('error', '读不到书源列表', err.message))
             return
         }
-
-        if (data.sourceCount === 0) {
+        if (enabled.length === 0) {
             resultHost.replaceChildren(
                 alertBox('warn', '没有可用的书源', '一份书源都没有，或者都被停用了。'),
             )
             return
+        }
+
+        const settled = await runPool(
+            planSlices(enabled, SEARCH_SLICE_SIZE),
+            (slice) => postJson('/api/search', { keyword, sourceIds: slice }),
+            {
+                concurrency: SEARCH_CONCURRENCY,
+                onError: (err, slice) => (isCpuLimitError(err) ? halveSlice(slice) : null),
+            },
+        )
+
+        // 摊平成原来那种「一个源一条」的形状，下面的渲染逻辑一行都不用改
+        const perSource = []
+        for (const entry of settled) {
+            if (entry.ok) {
+                perSource.push(...(entry.value.sources ?? []))
+                continue
+            }
+            perSource.push({
+                sourceId: entry.task[0] ?? '',
+                sourceName:
+                    entry.task.length === 1
+                        ? String(entry.task[0] ?? '未知书源')
+                        : `${entry.task.length} 个书源（同批）`,
+                ok: false,
+                count: 0,
+                error: entry.error?.message ?? String(entry.error),
+            })
+        }
+
+        const data = {
+            keyword,
+            sourceCount: enabled.length,
+            totalBooks: perSource.reduce((sum, per) => sum + (per.count ?? 0), 0),
+            sources: perSource,
         }
 
         const entries = await loadShelf()
