@@ -328,6 +328,13 @@ export const postJson = (path, body, options = {}) =>
 /** 与 postJson 相同，但 401 由调用方自己处理（见 api 的 authAttempt 说明） */
 export const postAuth = (path, body) => postJson(path, body, { authAttempt: true })
 
+export const patchJson = (path, body) =>
+    api(path, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+    })
+
 // ---------------------------------------------------------------- 登录态
 
 let session = { loaded: false, user: null, claimable: false }
@@ -364,6 +371,29 @@ export async function logout() {
     } finally {
         clearSession()
     }
+}
+
+/**
+ * 改显示名
+ *
+ * 成功后就地把会话里的用户换成服务端返回的那一份：顶栏的名字立刻是新的，
+ * 不必再问一次 `/api/auth/me`。用户名不变（它是登录凭据）。
+ */
+export async function saveDisplayName(displayName) {
+    const data = await patchJson('/api/account', { displayName })
+    if (data?.user) session.user = data.user
+    return data?.user ?? null
+}
+
+/**
+ * 改密码
+ *
+ * 走普通的 `postJson` 而不是 `postAuth`：当前密码填错时服务端回的是 **400**
+ * （表单错误），而 401 只可能是会话本身失效 —— 后者理应触发全局的重新登录提示。
+ * 两件事分得开，就不必像登录页那样把它标记成 authAttempt。
+ */
+export async function savePassword(currentPassword, newPassword) {
+    return postJson('/api/account/password', { currentPassword, newPassword })
 }
 
 /** 把本机匿名身份名下的书架与进度并入当前账号 */

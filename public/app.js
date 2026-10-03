@@ -13,13 +13,13 @@ import {
     el,
     go,
     loadSession,
-    logout,
     setUnauthorizedHandler,
     toast,
 } from './js/core.js'
 import { viewRead } from './js/reader.js'
 import {
     invalidateShelf,
+    viewAccount,
     viewBook,
     viewExplore,
     viewHome,
@@ -45,6 +45,7 @@ const VIEWS = {
     sources: viewSources,
     book: viewBook,
     read: viewRead,
+    account: viewAccount,
 }
 
 function parseRoute() {
@@ -89,6 +90,12 @@ function renderTabs(active) {
     )
 }
 
+/**
+ * 顶栏右上角：进账号页
+ *
+ * 这里以前是「`显示名 · 退出`，点一下直接退出登录」—— 于是账号页根本不存在，
+ * 也就**没有任何入口能改密码**。改成点名字进账号页，退出登录挪进那一页里。
+ */
 function renderAccount() {
     const slot = document.querySelector('#account')
     const user = currentUser()
@@ -96,14 +103,9 @@ function renderAccount() {
         user
             ? el('button', {
                   class: 'btn sm ghost',
-                  text: `${user.displayName} · 退出`,
-                  title: '退出登录',
-                  onclick: async () => {
-                      await logout()
-                      invalidateShelf()
-                      toast('已退出登录')
-                      go('#/login')
-                  },
+                  text: user.displayName,
+                  title: '账号设置（显示名 / 密码 / 退出登录）',
+                  onclick: () => go('#/account'),
               })
             : el('button', {
                   class: 'btn sm primary',
@@ -112,6 +114,9 @@ function renderAccount() {
               }),
     )
 }
+
+// 账号页改了显示名 → 顶栏那份也要跟着变（跨模块，用一个事件解耦）
+window.addEventListener('reader:account-changed', renderAccount)
 
 /** 升级提示：本机还有一份匿名书架没并进账号 */
 function claimBanner() {

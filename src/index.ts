@@ -20,12 +20,14 @@ import {
     SESSION_TTL_MS,
     anonymousDataExists,
     authenticate,
+    changePassword,
     claimAnonymousData,
     createAccount,
     createSession,
     ownerForUser,
     pruneSessions,
     revokeSession,
+    updateDisplayName,
     userForToken,
 } from './data/accounts'
 import type { AccountUser } from './data/accounts'
@@ -565,6 +567,58 @@ app.get('/api/auth/me', async (c) => {
         }
     }
     return c.json({ user: user ?? null, claimable })
+})
+
+/**
+ * 改显示名
+ *
+ * 用户名不跟着改：它是登录凭据，改它等于把「改名」和「换个账号登」绑在一起。
+ */
+app.patch('/api/account', async (c) => {
+    let body: { displayName?: string }
+    try {
+        body = await c.req.json()
+    } catch {
+        return c.json({ error: '请求体必须是 JSON' }, 400)
+    }
+
+    try {
+        const user = await requireUser(c)
+        const updated = await updateDisplayName(c.env.DB, user.id, body.displayName)
+        return c.json({ user: updated })
+    } catch (err) {
+        return fail(c, err)
+    }
+})
+
+/**
+ * 改密码
+ *
+ * 必须带当前密码；成功后**其它设备上的会话全部失效**，当前这条留着
+ * （否则用户改完密码会发现自己也被踢下线了）。返回踢掉了几条，
+ * 界面上可以直接说清「其它 2 台设备需要重新登录」。
+ */
+app.post('/api/account/password', async (c) => {
+    let body: { currentPassword?: string; newPassword?: string }
+    try {
+        body = await c.req.json()
+    } catch {
+        return c.json({ error: '请求体必须是 JSON' }, 400)
+    }
+
+    try {
+        const user = await requireUser(c)
+        const result = await changePassword(
+            c.env.DB,
+            user,
+            body.currentPassword,
+            body.newPassword,
+            getCookie(c, SESSION_COOKIE) ?? null,
+        )
+        return c.json({ ok: true, ...result })
+    } catch (err) {
+        return fail(c, err)
+    }
 })
 
 /** 把本机匿名身份名下的书架与进度并入当前账号（一次性动作，可重复调用） */

@@ -883,6 +883,119 @@ console.log('\n=== 7. 账号、书架、阅读进度与书签 ===')
     check((await callA('GET', bmQuery)).json?.count === 0, '书签已清理')
 }
 
+console.log('\n=== 7b. 改显示名与改密码 ===')
+{
+    /**
+     * 账号设置这一页原先不存在（顶栏那个按钮直接就是「退出登录」），服务端也连接口都没有 ——
+     * 于是用户一旦怀疑密码泄露，唯一能做的是重新注册一个账号，书架、进度、书签全留在旧的里。
+     *
+     * 这一节盯住三件容易做错的事：
+     *   1. 改密码必须**带当前密码**（否则一条偷来的会话就能永久占住账号），
+     *      而且失败要计进失败计数 —— 不然这里就是个不限速的口令猜测入口；
+     *   2. 改完之后**其它设备的会话必须失效**，而当前这条必须还能用；
+     *   3. 新密码要真的登得进去，旧密码要真的登不进去。
+     */
+    const user = await sessionUser('smokeacct')
+    check(user.status === 201, '注册一个临时账号用于账号设置', `status=${user.status}`)
+
+    const renamed = await user.call('PATCH', '/api/account', { displayName: '读书人·烟雾' })
+    check(
+        renamed.status === 200 && renamed.json?.user?.displayName === '读书人·烟雾',
+        '改显示名：返回新的显示名',
+        `status=${renamed.status} displayName=${renamed.json?.user?.displayName}`,
+    )
+    const me = await user.call('GET', '/api/auth/me')
+    check(
+        me.json?.user?.displayName === '读书人·烟雾' && me.json?.user?.username === user.username,
+        '改显示名之后 /me 跟着变，用户名不变',
+        `displayName=${me.json?.user?.displayName} username=${me.json?.user?.username}`,
+    )
+    const badName = await user.call('PATCH', '/api/account', { displayName: '张三\n李四' })
+    check(badName.status === 400, '显示名里的换行被拒（400）', `status=${badName.status}`)
+
+    // 「另一台设备」：同一账号再登一次，拿第二条会话
+    const secondLogin = await fetch(`${BASE}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: user.username, password: 'smoke-password-1' }),
+    })
+    const secondCookie = (secondLogin.headers.get('set-cookie') ?? '').split(';')[0]
+    check(
+        secondLogin.status === 200 && secondCookie !== '',
+        '同一账号在「另一台设备」上再登一次',
+        `status=${secondLogin.status}`,
+    )
+
+    const wrongCurrent = await user.call('POST', '/api/account/password', {
+        currentPassword: 'not-the-password',
+        newPassword: 'smoke-password-2',
+    })
+    check(
+        wrongCurrent.status === 400,
+        '当前密码不对时被拒（400，而不是 500）',
+        `status=${wrongCurrent.status}`,
+    )
+
+    const samePassword = await user.call('POST', '/api/account/password', {
+        currentPassword: 'smoke-password-1',
+        newPassword: 'smoke-password-1',
+    })
+    check(
+        samePassword.status === 400,
+        '新密码与当前密码相同被拒（400）',
+        `status=${samePassword.status}`,
+    )
+
+    const weakNext = await user.call('POST', '/api/account/password', {
+        currentPassword: 'smoke-password-1',
+        newPassword: 'short',
+    })
+    check(
+        weakNext.status === 400,
+        '新密码太短被拒（400）—— 与注册共用同一份长度校验',
+        `status=${weakNext.status}`,
+    )
+
+    const changed = await user.call('POST', '/api/account/password', {
+        currentPassword: 'smoke-password-1',
+        newPassword: 'smoke-password-2',
+    })
+    check(
+        changed.status === 200 && Number(changed.json?.revoked ?? 0) >= 1,
+        '改密码成功，并踢掉了其它设备上的会话',
+        `status=${changed.status} revoked=${changed.json?.revoked}`,
+    )
+
+    const stillMine = await user.call('GET', '/api/auth/me')
+    check(
+        stillMine.json?.user != null,
+        '当前这条会话仍然有效（没把自己也踢下线）',
+        `user=${stillMine.json?.user?.username ?? 'null'}`,
+    )
+
+    const kicked = await fetch(`${BASE}/api/auth/me`, { headers: { cookie: secondCookie } })
+    const kickedBody = parseMaybeJson(await kicked.text())
+    check(
+        kickedBody?.user == null,
+        '另一台设备的会话已失效',
+        `user=${kickedBody?.user?.username ?? 'null'}`,
+    )
+
+    const oldLogin = await fetch(`${BASE}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: user.username, password: 'smoke-password-1' }),
+    })
+    check(oldLogin.status === 401, '旧密码登不进去了（401）', `status=${oldLogin.status}`)
+
+    const newLogin = await fetch(`${BASE}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: user.username, password: 'smoke-password-2' }),
+    })
+    check(newLogin.status === 200, '新密码能登进去', `status=${newLogin.status}`)
+}
+
 console.log('\n=== 8. 相对地址以书源地址为基准 ===')
 {
     // 这条是真实书源逼出来的：精华书阁、圣武书库这类书源的 searchUrl 写的是

@@ -16,11 +16,14 @@ import {
     go,
     loadSession,
     login as doLogin,
+    logout,
     paramsOf,
     postJson,
     prefs,
     register as doRegister,
     relativeTime,
+    saveDisplayName,
+    savePassword,
     setChildren,
     skeletonBlock,
     skeletonList,
@@ -191,6 +194,181 @@ export async function viewLogin(host, notice) {
     )
     username.focus()
     renderSwitch()
+}
+
+// ---------------------------------------------------------------- 账号
+
+/**
+ * 账号设置：改显示名、改密码、退出登录
+ *
+ * 这一页原先不存在 —— 顶栏那个按钮直接就是「退出登录」，于是**没有任何入口能改密码**
+ * （服务端连接口都没有）。对「长期使用」来说这是硬缺口：一旦怀疑密码泄露，
+ * 用户唯一能做的是重新注册一个账号，而那会把书架、进度、书签全丢下。
+ *
+ * 三处刻意的设计：
+ *
+ * 1. 改密码要**当前密码**（服务端强制，见 `changePassword`）与**确认新密码**（纯界面体贴：
+ *    密码框是掩码的，打错了自己看不见）。
+ * 2. 改完密码**当前这条会话留着**，其它设备的会话由服务端踢掉，并在界面上说清踢了几条 ——
+ *    「密码改了但别的设备还能用」是比不改更糟的状态。
+ * 3. 显示名只管界面上那个称呼，**用户名不跟着改**：它是登录凭据。
+ */
+export async function viewAccount(host) {
+    const user = currentUser()
+    if (!user) {
+        host.replaceChildren(emptyState('先登录', '登录之后才能看到账号设置。'))
+        return
+    }
+
+    const card = (title, ...children) =>
+        el('section', { class: 'card' }, [el('h2', { text: title }), ...children])
+
+    // ---- 显示名 ----
+    const nameInput = el('input', {
+        type: 'text',
+        maxlength: '24',
+        value: user.displayName,
+    })
+    const nameStatus = el('div')
+    const nameSubmit = el('button', { class: 'btn primary', type: 'submit', text: '保存' })
+
+    const nameForm = el(
+        'form',
+        {
+            onsubmit: async (event) => {
+                event.preventDefault()
+                nameStatus.replaceChildren()
+                nameSubmit.disabled = true
+                try {
+                    const updated = await saveDisplayName(String(nameInput.value).trim())
+                    toast(`显示名已改为「${updated?.displayName ?? ''}」`)
+                    /**
+                     * 顶栏那一份也是从会话里读的，通知它重画（app.js 监听这个事件）
+                     *
+                     * `bubbles: true` 不能省：事件派发在 `document` 上，而监听在 `window`，
+                     * 默认不冒泡就**到不了**监听器 —— 表现是「改名成功、提示也对，顶栏还是旧名字」。
+                     */
+                    document.dispatchEvent(
+                        new CustomEvent('reader:account-changed', { bubbles: true }),
+                    )
+                } catch (err) {
+                    nameStatus.replaceChildren(alertBox('error', '没能改显示名', err.message))
+                } finally {
+                    nameSubmit.disabled = false
+                }
+            },
+        },
+        [
+            el('label', { class: 'field' }, [
+                el('span', { class: 'field-label', text: '显示名' }),
+                nameInput,
+            ]),
+            el('p', { class: 'muted tiny', text: '只改界面上显示的名字，登录用的用户名不变。' }),
+            nameSubmit,
+            nameStatus,
+        ],
+    )
+
+    // ---- 密码 ----
+    const currentInput = el('input', {
+        type: 'password',
+        autocomplete: 'current-password',
+        placeholder: '当前密码',
+    })
+    const nextInput = el('input', {
+        type: 'password',
+        autocomplete: 'new-password',
+        placeholder: '新密码（至少 8 位）',
+    })
+    const againInput = el('input', {
+        type: 'password',
+        autocomplete: 'new-password',
+        placeholder: '再输一次新密码',
+    })
+    const passwordStatus = el('div')
+    const passwordSubmit = el('button', { class: 'btn primary', type: 'submit', text: '改密码' })
+
+    const passwordForm = el(
+        'form',
+        {
+            onsubmit: async (event) => {
+                event.preventDefault()
+                passwordStatus.replaceChildren()
+                const next = String(nextInput.value)
+                if (next !== String(againInput.value)) {
+                    passwordStatus.replaceChildren(
+                        alertBox('error', '两次输入的新密码不一样', '那两栏要填同一个。'),
+                    )
+                    return
+                }
+                passwordSubmit.disabled = true
+                passwordSubmit.textContent = '提交中…'
+                try {
+                    const result = await savePassword(String(currentInput.value), next)
+                    currentInput.value = ''
+                    nextInput.value = ''
+                    againInput.value = ''
+                    const revoked = Number(result?.revoked ?? 0)
+                    passwordStatus.replaceChildren(
+                        alertBox(
+                            'ok',
+                            '密码已改',
+                            revoked > 0
+                                ? `其它 ${revoked} 台设备上的登录已经失效，需要重新登录。`
+                                : '其它设备上的登录不受影响。',
+                        ),
+                    )
+                } catch (err) {
+                    passwordStatus.replaceChildren(alertBox('error', '没能改密码', err.message))
+                } finally {
+                    passwordSubmit.disabled = false
+                    passwordSubmit.textContent = '改密码'
+                }
+            },
+        },
+        [
+            el('label', { class: 'field' }, [
+                el('span', { class: 'field-label', text: '当前密码' }),
+                currentInput,
+            ]),
+            el('label', { class: 'field' }, [
+                el('span', { class: 'field-label', text: '新密码' }),
+                nextInput,
+            ]),
+            el('label', { class: 'field' }, [
+                el('span', { class: 'field-label', text: '确认新密码' }),
+                againInput,
+            ]),
+            passwordSubmit,
+            passwordStatus,
+        ],
+    )
+
+    setChildren(host, [
+        el('h1', { text: '账号' }),
+        card('显示名', nameForm),
+        card('密码', passwordForm),
+        card(
+            '账号信息',
+            el('p', { class: 'muted tiny', text: `用户名：${user.username}` }),
+            el('p', {
+                class: 'muted tiny',
+                text: `注册于 ${new Date(user.createdAt).toLocaleString('zh-CN')}`,
+            }),
+            el('div', { class: 'row' }, [
+                el('button', {
+                    class: 'btn ghost',
+                    text: '退出登录',
+                    onclick: async () => {
+                        await logout()
+                        invalidateShelf()
+                        toast('已退出登录')
+                        go('#/login')
+                    },
+                }),
+            ]),
+        ),
+    ])
 }
 
 // ---------------------------------------------------------------- 书籍卡片
