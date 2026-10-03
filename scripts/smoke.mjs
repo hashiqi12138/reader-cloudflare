@@ -296,6 +296,100 @@ console.log('\n=== 4b. 空选择器 + 取值链（`##正则##$1###`）===')
     )
 }
 
+console.log('\n=== 4c. 列表规则开头的 `+` 与**顶格** `<js>` ===')
+{
+    /**
+     * 两件事出自同一类症状：**规则跑起来了，但看到的不是它要的那份内容**。
+     *
+     *   1. 开头的 `+`（线上 8 处：6 处 chapterList + 2 处 bookList）早先是一条明确报错
+     *      「列表规则 AllInOne(js) 暂未实现：以 + 开头的规则」，于是 `+@css:.bookbox`
+     *      这种**纯 CSS** 列表规则整条目录/搜索直接变成报错。语料否掉了「`+` = AllInOne」
+     *      那个读法（AllInOne 必须以 `:` 开头），剥掉按后面的规则求值即可。
+     *   2. **顶格** `<js>` 块里的 `result` 之前是**空串**（它从 `values = []` 起步）。
+     *      顶格 `<js>` 与顶格 `@js:` 是同一件事：`result` 该是**页面原文**。
+     *      `⚡📂全本小说网`/`📂基友书屋`/`📂趣书小说`/`🔞po18城` 的目录规则都靠这条。
+     *
+     * 三种 `+` 形态各来一条（`@js:` / `<js>` / `@css:`），断言的是**条目数与章节名**，
+     * 因为这条路上的失败大多是静默的：剥不掉就整条报错，剥掉了但 `result` 是空串就是 0 条。
+     */
+    const id = `user:${BASE}`
+    const tocUrl = `${BASE}/fixture/toc/1`
+    const expected = ['第一章 起风了', '第二章 雨落下来', '第三章 天晴了']
+    // 在**整页原文**上扫 `<li><a href="…">…</a></li>`：只有拿到页面原文才扫得出 3 条
+    const SCAN = `var h = String(result);var re = /<li><a href="([^"]+)">([^<]+)<\\/a><\\/li>/g;var m;var out = [];while ((m = re.exec(h))) { out.push(JSON.stringify({ name: m[2], url: m[1] })) }return out`
+
+    // 字段规则的默认写法配的是「条目是一段 JSON」的形态；节点型条目要用选择器，
+    // 所以 CSS 那一条单独覆盖（否则 `JSON.parse(<li>…)` 会抛错、条目全被丢掉，
+    // 看起来像 `+@css:` 没生效 —— 其实是测试自己的字段规则配错了）
+    const importWith = (name, chapterList, extra = {}) =>
+        call(
+            'POST',
+            '/api/sources',
+            JSON.stringify([
+                {
+                    bookSourceName: name,
+                    bookSourceUrl: BASE,
+                    ruleToc: {
+                        chapterList,
+                        chapterName: '@js:JSON.parse(result).name',
+                        chapterUrl: '@js:JSON.parse(result).url',
+                        ...extra,
+                    },
+                },
+            ]),
+        )
+
+    const tocOf = async () => {
+        const res = await getJson(
+            `/api/toc?sourceId=${encodeURIComponent(id)}&url=${encodeURIComponent(tocUrl)}`,
+        )
+        return res.json?.chapters ?? []
+    }
+
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+
+    // ---- 形态 1：`+@js:`（剥完是顶格 `@js:`，`result` = 页面原文） ----
+    await importWith('列表标记测试源（+@js:）', `+@js:(function(){${SCAN}})()`)
+    let chapters = await tocOf()
+    check(
+        chapters.length === 3 &&
+            chapters[0]?.name === expected[0] &&
+            chapters[2]?.name === expected[2],
+        '`+@js:` 剥掉之后脚本拿到页面原文，目录 3 条',
+        `count=${chapters.length} names=${JSON.stringify(chapters.map((c) => c.name))}`,
+    )
+    check(
+        String(chapters[0]?.url ?? '') === `${BASE}/fixture/chapter/1/1`,
+        '`+@js:` 里的相对地址照常按书源地址补全',
+        String(chapters[0]?.url),
+    )
+
+    // ---- 形态 2：`+<js>`（剥完是顶格 `<js>`，同样要页面原文） ----
+    await importWith('列表标记测试源（+<js>）', `+<js>\n(function(){${SCAN}})()\n</js>`)
+    chapters = await tocOf()
+    check(
+        chapters.length === 3 &&
+            chapters[0]?.name === expected[0] &&
+            chapters[1]?.name === expected[1],
+        '`+<js>` 剥掉之后 `result` 是页面原文（不是空串），目录 3 条',
+        `count=${chapters.length} names=${JSON.stringify(chapters.map((c) => c.name))}`,
+    )
+
+    // ---- 形态 3：`+@css:`（剥掉就是普通 CSS 列表规则） ----
+    await importWith('列表标记测试源（+@css:）', '+@css:ul.chapter-list li', {
+        chapterName: '@css:a@text',
+        chapterUrl: '@css:a@href',
+    })
+    chapters = await tocOf()
+    check(
+        chapters.length === 3 && chapters[2]?.name === expected[2],
+        '`+@css:` 剥掉之后就是普通 CSS 列表规则，同样 3 条',
+        `count=${chapters.length} names=${JSON.stringify(chapters.map((c) => c.name))}`,
+    )
+
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+}
+
 console.log('\n=== 5. 书源管理（D1） ===')
 {
     const importedId = `user:${BASE}`

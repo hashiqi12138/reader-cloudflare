@@ -548,10 +548,13 @@ async function evalSelectorChain(
 
     let current: Selection = sel
     let values: string[] = []
+    /** 前面有没有跑过选择器 —— 决定首个 `<js>` 块里的 `result` 是「页面原文」还是「空」 */
+    let sawSelector = false
 
     for (const part of jsBlocks) {
         if (part.kind === 'selector') {
             if (part.text === '') continue
+            sawSelector = true
             const kind = detectKind(part.text)
             if (kind.kind === 'allinone') {
                 values = applyAllInOne(current.source, part.text)
@@ -567,11 +570,30 @@ async function evalSelectorChain(
         // 空的 <js></js> 只是一个分隔符，表示「把上面的结果重新解析继续筛」
         if (part.text.trim() === '') continue
 
+        /**
+         * **顶格 `<js>` 块里的 `result` 是页面原文**，与顶格 `@js:` 一致
+         *
+         * 同一条规则里 `result` 的初始值就是「正在被解析的那份内容」，
+         * `@js:` 那条路径早就是这么做的（见上面 `evalRule` 里的 `bareJs`）。
+         * `<js>` 这条路径之前漏了：它从 `values = []` 起步，于是 `result` 是**空串**。
+         *
+         * 线上 247 处顶格 `<js>` 里只有十几处真的读 `result`，但每一处都读的是整页：
+         * `⚡📂全本小说网` 的目录 `String(result)` 之后 `page.indexOf('class="list3"')`、
+         * `📂基友书屋` 的目录 `org.jsoup.Jsoup.parse(result)`、
+         * `📂趣书小说` 的 `result.match(/<b>1<\/b>\/(\d+)/)`。
+         * 给空串的表现是 `null.match` 之类的报错，或是「目录 0 条、不报错」。
+         *
+         * 判据是「前面**跑过选择器没有**」，而不是「`values` 空不空」：
+         * 选择器命中 0 个时 `result` 本来就该是空（上一阶段的结果为空），
+         * 那时候给它塞整页会把「这条规则取不到东西」变成「取到一整页」。
+         */
         const result = await runInSandbox(
             part.text,
             {
                 ...baseGlobals(ctx),
-                ...resultGlobals(part.text, values),
+                ...(sawSelector
+                    ? resultGlobals(part.text, values)
+                    : sourceResultGlobals(part.text, ctx.result ?? current.source)),
                 src: current.source,
             },
             sandboxLimits(current, ctx),
@@ -792,9 +814,36 @@ export async function analyzeSelections(
         return merged
     }
 
-    // `+` 开头是 ListAllInOne（JS 产出列表），当前不支持，明确报错而不是静默返回空
+    /**
+     * 列表规则开头的 `+` 是一个**标记**，剥掉它按后面的规则正常求值
+     *
+     * 线上 8 处（6 处 chapterList + 2 处 bookList，见 `test/ruleTail.scan.test.ts` 的账本）：
+     * `+@js:…`（3）、`+<js>…</js>`（3）、`+@css:…`（2）。
+     *
+     * 早先这里直接抛「列表规则 AllInOne(js) 暂未实现」，判断依据是社区文档里那句
+     * 「在搜索列表、发现列表和目录中使用可以用 `+` 开头，使用 AllInOne 规则」。
+     * 但语料否掉了 AllInOne 这个读法：`📂内裤奇缘小说` 写的是 `+@css:#lieb dl`、
+     * `⚡📂️快眼小说` 写的是 `+@css:.bookbox` —— AllInOne 必须以 `:` 开头，
+     * 这两个 `+` 后面跟的是 CSS 选择器，怎么读都读不成 AllInOne。
+     *
+     * 剥掉之后剩下的是什么，语料给出的答案是一致的：
+     *
+     *   - `+@css:` 两处 → 就是普通 CSS 列表规则，与不带 `+` 的写法毫无差别
+     *   - `+@js:` 三处 → 剥完是**顶格** `@js:`，`result` 绑页面原文，
+     *     而这三个脚本（`⚡📂武道文学`、`📂明月小说`、`📚海棠/蓝海搜书`）
+     *     确实都是在整页上做 `Jsoup.parse(result)` / 正则扫描
+     *   - `+<js>` 三处 → 剥完是**顶格** `<js>`，同样要 `result` = 页面原文
+     *     （`🔞po18城` 的 `String(result).replace(…)`、`📂趣书小说` 的
+     *     `result.match(/<b>1<\/b>\/(\d+)/)` 都是整页扫描）
+     *
+     * 唯一不能从语料确认的是「`+` 是否还有『把本页结果追加到已有结果上』的含义」。
+     * 这一条**不影响我们的行为**：多页目录本来就是累加的
+     * （`ops.ts` 里 `chapters.push(…)` 逐页往后接），单页时也没有「已有结果」可追加。
+     * 所以剥掉 `+` 在两种读法下**结果相同**，不需要押注哪一种。
+     */
     if (trimmed.startsWith('+')) {
-        throw new UnsupportedRuleError('列表规则 AllInOne(js) 暂未实现：以 + 开头的规则')
+        const rest = trimmed.slice(1)
+        return rest.trim() === '' ? [] : analyzeSelections(sel, rest, ctx)
     }
 
     const { selector, ops } = splitRegexChain(trimmed)
