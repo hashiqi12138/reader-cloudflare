@@ -440,26 +440,53 @@ console.log('\n=== 4d. `选择器@js:` 里 `result` 绑成节点（Elements）==
     await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
 
     /**
-     * 只断言**单命中**这一条路（它是端到端验过的那条）。
-     *
-     * 多命中（同一个选择器命中 2 个以上元素）在 Node 的替身沙箱里行为正确
-     * （`test/nodeBinding.test.ts` 钉着），但在真实 workerd 里这条冒烟返回 0 条 ——
-     * **差异还没定位**，所以不放一条会红的断言进来充数，缺口记在 README 的「后续计划」里。
+     * 选择器取到的必须是**带 href 的元素**（`li a`），不能是 `li` ——
+     * `li` 上本来就没有 href，`e.attr('href')` 当然是空串，条目会被当成「没有地址」丢掉。
+     * 这一条第一版就踩了：断言红了半天，以为是引擎的问题，其实是测试自己的选择器取错了元素。
      */
+    const SEL = '@css:ul.chapter-list li a'
+
+    // ---- 集合级：`result.size()` + 逐个元素 ----
     await importWith(
-        '节点绑定测试源（单命中 + 下标）',
-        `@css:ul.chapter-list@js:(function(){var links=result.select('a');var o=[];for(var i=0;i<links.length;i++){var e=links[i];${ITEM}}return o})()`,
+        '节点绑定测试源（集合级）',
+        `${SEL}@js:(function(){var o=[];var s=result.size();for(var i=0;i<s;i++){var e=result[i];${ITEM}}return o})()`,
     )
-    const chapters = await tocOf()
+    let chapters = await tocOf()
+    check(
+        chapters.length === 3 &&
+            chapters[0]?.name === expected[0] &&
+            chapters[2]?.name === expected[2],
+        '`result.size()` 与逐个元素拿到 3 个节点，章节名与地址都对',
+        `count=${chapters.length} names=${JSON.stringify(chapters.map((c) => c.name))}`,
+    )
+
+    // ---- 迭代式：`result.forEach(e => e.attr(...))`（🔞西瓜书屋 的形状） ----
+    await importWith(
+        '节点绑定测试源（迭代式）',
+        `${SEL}@js:(function(){var o=[];result.forEach(function(e){${ITEM}});return o})()`,
+    )
+    chapters = await tocOf()
     check(
         chapters.length === 3 && chapters[1]?.name === expected[1],
-        '`result.select("a")` 的返回值能下标（`links[i]`），3 条都取到',
+        '`result.forEach(e => e.attr("href"))` 里的 `e` 是元素（能取到 href）',
         `count=${chapters.length} names=${JSON.stringify(chapters.map((c) => c.name))}`,
     )
     check(
         chapters.every((c) => String(c.url).startsWith(`${BASE}/fixture/chapter/`)),
         '每个元素的 `attr("href")` 取到了自己的地址（不是空串）',
         JSON.stringify(chapters.map((c) => c.url)),
+    )
+
+    // ---- 单命中 + `result.select("a")`：select 的返回值必须能下标（🔞紫云宫 的形状） ----
+    await importWith(
+        '节点绑定测试源（select + 下标）',
+        `@css:ul.chapter-list@js:(function(){var links=result.select("a");var o=[];for(var i=0;i<links.length;i++){var e=links[i];${ITEM}}return o})()`,
+    )
+    chapters = await tocOf()
+    check(
+        chapters.length === 3 && chapters[2]?.name === expected[2],
+        '`result.select("a")` 的返回值能下标（`links[i]`），3 条都取到',
+        `count=${chapters.length} names=${JSON.stringify(chapters.map((c) => c.name))}`,
     )
 
     await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)

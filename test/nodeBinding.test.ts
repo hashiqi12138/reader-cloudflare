@@ -19,10 +19,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
  * 沙箱在 Node 里跑不起来（QuickJS 的 `.wasm`），所以换成**回显型替身**：
  * 于是「脚本看到的是什么内容、什么形态」成了可断言的东西。
  *
- * **注意这一组钉的是「引擎交给沙箱什么」，不是端到端行为。** 其中**多命中**那两条
- * 在真实 workerd 里还没跑通（冒烟 4d 只断言了单命中那条）：同一个选择器命中 2 个以上
- * 元素时，宿主侧看起来拿到的是空节点集，`result.size()` 算出来是 0。
- * 差异还没定位，缺口记在 README 的「后续计划」里 —— 所以这里的绿色**不等于**那条路能用。
+ * 一条踩过的坑记在这里：夹具里的 `div.row` 是**没有 `href` 的 div**，
+ * 断言「`attr('href')` 取到了值」必须用里面那个 `a`（`.row a`）。第一版用 `div.row`
+ * 去验 `e.attr('href')`，红色的是测试自己 —— 元素本来就没有 href。
  */
 const state = vi.hoisted(() => ({ calls: [] as Array<{ code: string; result: unknown }> }))
 
@@ -83,6 +82,16 @@ describe('按 jsoup 用 result：绑节点本身的 HTML', () => {
         expect(Array.isArray(result)).toBe(true)
         expect(result).toHaveLength(2)
         // 元素要是**节点**才取得到 href；给纯文本的话这里是两个空串
+        for (const item of result as string[]) expect(item).toContain('<a href="/')
+    })
+
+    it('多命中 + `result.forEach(e => …)` —— 迭代式同样拿到节点（🔞西瓜书屋 的形状）', async () => {
+        // 只调 `forEach` 与元素级方法（没有集合级方法），判据靠 ITEM_AS_JSOUP 认出来
+        const result = await seen(
+            'div.row@js:(function(){var o=[];result.forEach(function(e){o.push(e.attr("href"))});return o})()',
+        )
+        expect(Array.isArray(result)).toBe(true)
+        expect(result).toHaveLength(2)
         for (const item of result as string[]) expect(item).toContain('<a href="/')
     })
 

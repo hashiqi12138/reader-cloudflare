@@ -798,10 +798,27 @@ const RESULT_AS_JSOUP =
     /\bresult\s*\.\s*(select|attr|first|last|get|eq|size|isEmpty|textNodes|eachText|html|outerHtml|hasClass|children|not|filter|matches|matchesOwn|tagName|ownText)\s*\(/
 
 /**
+ * 脚本在**迭代 `result` 的回调**里对条目调 jsoup 方法
+ *
+ *   `result.forEach(e => e.attr('href'))`   ← 🔞西瓜书屋 的目录规则就长这样
+ *   `result.map(x => x.text())`
+ *
+ * 这类写法要的同样是**元素**：`attr` / `text` / `select` 只有节点才给得出来，
+ * 给纯文本的话 `e.attr(...)` 恒为空串 —— 而且**不报错**。
+ *
+ * 认的是「回调参数上出现了一个**只有元素才有**的方法名」，方法名表刻意不含
+ * `split` / `replace` / `trim` / `slice` 这些字符串方法，所以
+ * 「迭代一串文本做字符串处理」的写法不会被误判。
+ */
+const ITEM_AS_JSOUP =
+    /\bresult\s*\.\s*(?:map|forEach|filter|find|findIndex|some|every|flatMap|reduce)\s*\(\s*(?:function\s*)?\(?\s*([A-Za-z_$][\w$]*)\s*\)?\s*(?:=>)?[\s\S]{0,300}?\b\1\s*\.\s*(?:attr|select|text|html|outerHtml|ownText|tagName|hasClass|hasAttr|val|className|textNodes|eachText|matches|matchesOwn|children|first|last|get|eq|size|index|id)\s*\(/
+
+/**
  * 脚本是不是「**按节点用** `result`」
  *
- * 认的是**集合级方法**：`result.size()` / `result.select(…)` / `result.first()` …
- * 这些在字符串与字符串数组上都**不存在**，出现了就说明脚本要的是 jsoup 的 `Elements`。
+ * 两种写法都算：直接调集合级方法（`result.size()` / `result.select(…)`），
+ * 以及迭代回调里对条目调元素级方法（`result.forEach(e => e.attr('href'))`）。
+ * 后者在字符串与字符串数组上同样不存在。
  *
  * 与 `resultShape.ts` 的优先级保持一致：**按字符串用优先**。
  * 两种写法写在同一条规则里时（`📂就去看网` 那种），只有「字符串 + jsoup 方法」
@@ -809,16 +826,10 @@ const RESULT_AS_JSOUP =
  *
  * 抽成函数是为了让 `evalRule`（决定**交给脚本什么内容**）与 `resultGlobals`
  * （决定**绑成数组还是字符串**）用的是同一个判据 —— 两处各写一遍必然跑偏。
- *
- * **已知缺口：`result.forEach(e => e.attr('href'))` 这种「只迭代、不调集合级方法」的写法
- * 认不出来**（🔞西瓜书屋 的目录规则就是这一种）。判据本来想再加一条「回调参数上调了
- * 元素级方法」，但那一版**没能端到端跑通** —— 冒烟里同样的规则返回 0 条，
- * 而同一套逻辑在 Node 的替身沙箱里是通过的，没能定位到差异出在哪。
- * 没有定位清楚就不放进正式路径：判宽了会把本该按字符串处理的规则改成给节点
- * （静默换成另一种内容），比现在这样留个缺口更难查。缺口记在 README 的「后续计划」里。
  */
 function wantsJsoupResult(code: string): boolean {
-    return RESULT_AS_JSOUP.test(code) && !resultWantsString(code)
+    if (resultWantsString(code)) return false
+    return RESULT_AS_JSOUP.test(code) || ITEM_AS_JSOUP.test(code)
 }
 
 /**
