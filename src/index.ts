@@ -32,6 +32,7 @@ import {
 } from './data/accounts'
 import type { AccountUser } from './data/accounts'
 import { exportBackup, importBackup } from './data/transfer'
+import { bookmarkFileName, loadBookmarkRows, renderCsv, renderMarkdown } from './data/bookmarkList'
 import { buildHomeSections, readHomeCache, writeHomeCache } from './data/home'
 import { DataError, bookKey } from './data/types'
 import { getOrCreateMediaSecret } from './data/settings'
@@ -646,6 +647,37 @@ app.get('/api/backup', async (c) => {
         const stamp = new Date(backup.exportedAt).toISOString().slice(0, 10)
         return c.json(backup, 200, {
             'Content-Disposition': `attachment; filename="reader-backup-${stamp}.json"`,
+        })
+    } catch (err) {
+        return fail(c, err)
+    }
+})
+
+/**
+ * 导出**书签清单**（Markdown / CSV）
+ *
+ * 与 `/api/backup` 的分工：那个是「整份数据、能导回来」，这个是「能读、能贴、能进表格」。
+ * 所以回的是纯文本 + 中文文件名（走 RFC 5987 的 `filename*`），不是 JSON。
+ *
+ * `?format=md|csv`（默认 md），可选 `?sourceId=&bookUrl=` 只导某一本。
+ * 过滤**必须两个参数一起给**：只给一个的话按「全部」处理，而不是猜 ——
+ * 「以为导的是这一本、其实导了全部」这种错没人会去核对。
+ */
+app.get('/api/export/bookmarks', async (c) => {
+    try {
+        const user = await requireUser(c)
+        const format = c.req.query('format') === 'csv' ? 'csv' : 'md'
+        const sourceId = c.req.query('sourceId')
+        const bookUrl = c.req.query('bookUrl')
+        const filter = sourceId && bookUrl ? { sourceId, bookUrl } : {}
+
+        const rows = await loadBookmarkRows(c.env.DB, user, filter)
+        const at = Date.now()
+        const body = format === 'csv' ? renderCsv(rows) : renderMarkdown(rows, at)
+        return c.body(body, 200, {
+            'Content-Type':
+                format === 'csv' ? 'text/csv; charset=utf-8' : 'text/markdown; charset=utf-8',
+            'Content-Disposition': contentDisposition(bookmarkFileName(rows, format, at)),
         })
     } catch (err) {
         return fail(c, err)

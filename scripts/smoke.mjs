@@ -1356,6 +1356,120 @@ console.log('\n=== 7c. 导出 / 导入备份 ===')
     check(anon.status === 401, '未登录不能导出（401）', `status=${anon.status}`)
 }
 
+console.log('\n=== 7d. 书签清单导出（Markdown / CSV）===')
+{
+    /**
+     * 与「导出备份」的分工：那个是整份数据的 JSON（为了能导回来），
+     * 这个是**能读**的清单（摘录 + 备注，按章节排）。断言的是内容形态：
+     * 时区写没写、Markdown 表格会不会被摘录里的竖线拆散、CSV 有没有 BOM 与 CRLF、
+     * 中文文件名有没有走 `filename*`、只给一半过滤参数时会不会「以为导的是这本」。
+     */
+    const sourceId = 'builtin:fixture-css'
+    const bookUrl = `${BASE}/fixture/book/1`
+
+    const anon = await fetch(`${BASE}/api/export/bookmarks`)
+    check(anon.status === 401, '未登录导出书签清单返回 401', `status=${anon.status}`)
+
+    const e = await sessionUser('smokee')
+    // 先把两本书加进书架：清单里的书名/作者是**从书架拼的**（书签表里没有书名），
+    // 不加的话两本书都会显示成空书名 —— 那也是一种真实情况，但会把「按书分组」这条测没了
+    for (const [url, name, author] of [
+        [bookUrl, '测试小说·甲', '作者甲'],
+        [`${BASE}/fixture/book/2`, '测试小说·乙', '作者乙'],
+    ]) {
+        await e.call('POST', '/api/shelf', { sourceId, bookUrl: url, name, author })
+    }
+    const addBookmark = (url, excerpt, note) =>
+        e.call('POST', '/api/bookmarks', {
+            sourceId,
+            bookUrl: url,
+            chapterUrl: `${BASE}/fixture/chapter/1/1`,
+            chapterName: '第一章 起风了',
+            chapterIndex: 0,
+            pageIndex: 2,
+            excerpt,
+            note,
+        })
+    await addBookmark(bookUrl, '这是一段摘录', '备注|带竖线')
+    await addBookmark(`${BASE}/fixture/book/2`, '另一段,带逗号', '另一条')
+
+    const getText = async (query) => {
+        const res = await fetch(`${BASE}/api/export/bookmarks${query}`, {
+            headers: { cookie: e.cookie },
+        })
+        // BOM 会被 `res.text()` / `TextDecoder` 吃掉，所以字节要单独留一份来断言
+        const bytes = new Uint8Array(await res.arrayBuffer())
+        return {
+            status: res.status,
+            type: res.headers.get('content-type') ?? '',
+            disposition: res.headers.get('content-disposition') ?? '',
+            bytes,
+            body: new TextDecoder().decode(bytes),
+        }
+    }
+
+    const md = await getText('?format=md')
+    check(
+        md.status === 200 && md.type.includes('text/markdown'),
+        'Markdown 清单回 text/markdown',
+        `${md.status} ${md.type}`,
+    )
+    check(
+        md.body.includes('# 书签清单') &&
+            md.body.includes('（UTC+8）') &&
+            md.body.includes('- 共 2 条，来自 2 本书'),
+        '清单里写了时区与条数',
+        JSON.stringify(md.body.split('\n').slice(0, 6)),
+    )
+    check(
+        md.body.includes('备注\\|带竖线'),
+        'Markdown 表格里的竖线被转义（否则列数会变）',
+        JSON.stringify(md.body.split('\n').find((line) => line.includes('竖线')) ?? ''),
+    )
+    check(
+        md.disposition.includes("filename*=UTF-8''") &&
+            md.disposition.includes('%E4%B9%A6%E7%AD%BE'),
+        '中文文件名走 filename*（头部里不能出现非 ASCII）',
+        md.disposition,
+    )
+
+    const csv = await getText('?format=csv')
+    check(
+        csv.status === 200 && csv.type.includes('text/csv'),
+        'CSV 清单回 text/csv',
+        `${csv.status} ${csv.type}`,
+    )
+    check(
+        csv.bytes[0] === 0xef &&
+            csv.bytes[1] === 0xbb &&
+            csv.bytes[2] === 0xbf &&
+            csv.body.includes('\r\n') &&
+            csv.body.includes('书名,作者,章节,位置,摘录,备注,添加时间'),
+        'CSV 带 BOM 与 CRLF（不然 Excel 双击是乱码）',
+        `${csv.bytes[0]},${csv.bytes[1]},${csv.bytes[2]} ${JSON.stringify(csv.body.slice(0, 40))}`,
+    )
+    check(
+        csv.body.includes('"另一段,带逗号"'),
+        'CSV 里含逗号的字段加了引号',
+        JSON.stringify(csv.body.split('\r\n').find((line) => line.includes('逗号')) ?? ''),
+    )
+
+    const one = await getText(
+        `?format=md&sourceId=${encodeURIComponent(sourceId)}&bookUrl=${encodeURIComponent(bookUrl)}`,
+    )
+    check(
+        one.body.includes('- 共 1 条，来自 1 本书') && one.body.includes('这是一段摘录'),
+        '给全 sourceId + bookUrl 时只导这一本',
+        JSON.stringify(one.body.split('\n').slice(0, 5)),
+    )
+    const half = await getText(`?format=md&sourceId=${encodeURIComponent(sourceId)}`)
+    check(
+        half.body.includes('- 共 2 条，来自 2 本书'),
+        '只给一半参数时按「全部」处理（不猜）',
+        JSON.stringify(half.body.split('\n').slice(0, 5)),
+    )
+}
+
 console.log('\n=== 8. 相对地址以书源地址为基准 ===')
 {
     // 这条是真实书源逼出来的：精华书阁、圣武书库这类书源的 searchUrl 写的是

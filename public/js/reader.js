@@ -1151,11 +1151,38 @@ export async function viewRead(host) {
             }
         })
 
+        /**
+         * 导出这本书的书签清单
+         *
+         * 与账号页的「导出备份」不是一回事：那个是整份数据的 JSON（为了能导回来），
+         * 这里要的是一份**能读**的清单（摘录 + 备注，按章节排），拿去贴进笔记软件。
+         * 两种格式都给：Markdown 给人看，CSV 给表格（带 BOM，Excel 双击不乱码）。
+         *
+         * 用普通链接就够 —— 会话是 HttpOnly cookie，同源链接天然带得上，
+         * 不必先 fetch 再拼 Blob（`Content-Disposition` 会让它走下载而不是跳走）。
+         */
+        const exportHref = (format) =>
+            `/api/export/bookmarks?${paramsOf({ sourceId, bookUrl, format })}`
+
         openSheet(
             '书签',
             el('div', { class: 'settings' }, [
                 summary,
                 el('div', { class: 'row' }, [addBtn]),
+                el('div', { class: 'row' }, [
+                    el('a', {
+                        class: 'btn ghost sm',
+                        href: exportHref('md'),
+                        text: '导出 .md',
+                        title: '下载这本书的书签 Markdown 清单',
+                    }),
+                    el('a', {
+                        class: 'btn ghost sm',
+                        href: exportHref('csv'),
+                        text: '导出 .csv',
+                        title: '下载 CSV（带 BOM，Excel 双击可读）',
+                    }),
+                ]),
                 listHost,
             ]),
             () => {

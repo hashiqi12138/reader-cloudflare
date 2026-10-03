@@ -396,6 +396,24 @@ export async function viewAccount(host) {
                 title: '下载一个 JSON 文件（文件名带日期）',
             }),
         ]),
+        el('p', {
+            class: 'muted tiny',
+            text: '只想把书签导成一份能读的清单？这里有一份全部书签的 Markdown / CSV（在阅读界面的书签面板里还能只导当前这本）。',
+        }),
+        el('div', { class: 'row' }, [
+            el('a', {
+                class: 'btn ghost',
+                href: '/api/export/bookmarks?format=md',
+                text: '书签清单 .md',
+                title: '按书分组，带摘录与备注',
+            }),
+            el('a', {
+                class: 'btn ghost',
+                href: '/api/export/bookmarks?format=csv',
+                text: '书签清单 .csv',
+                title: '带 BOM，Excel 双击不乱码',
+            }),
+        ]),
         el('label', { class: 'field' }, [
             el('span', { class: 'field-label', text: '导入' }),
             backupFile,
