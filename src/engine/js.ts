@@ -47,7 +47,7 @@ import {
 import type { SandboxHttp } from './types'
 import { base64OfUtf8, bytesOfBase64, utf8OfBase64 } from '../lib/base64'
 import { DEFAULT_TIME_OFFSET_HOURS, formatJavaTime } from '../lib/javatime'
-import { md5Bytes, md5Hex } from '../lib/hash'
+import { md5Bytes, md5Hex, sha256Hex } from '../lib/hash'
 import { runSymmetric, type SymmetricRequest } from '../lib/symmetric'
 import { JsoupBridge } from './jsoupBridge'
 
@@ -200,19 +200,56 @@ var java = {
   // 书源里它们常和取数据写在同一个 try 里，缺一个就是
   // 「not a function」把整条规则带走（线上 12 条源在用）。这里记进日志，
   // 既不丢信息，也不让规则失败。
+  //
+  // 全量数过之后又补了同一类动作（一共 24 处引用）：
+  //   openUrl / open / openWeb / openBook —— 让 App 去打开地址或页面。
+  //     java.open("explore", url, book) 这种是「跳到发现页」，openUrl(u) 是
+  //     「在浏览器里打开 u」（⚡📂八一中文网 拿它提示「搜索地址已更新」）
+  //   refreshTocUrl  —— 让 App 重新拉一次目录
+  //   upLoginData    —— 上传登录态（书源的登录脚本里调）
+  //   copyText       —— 复制到剪贴板
+  //   sleep          —— 睡一会儿。**Worker 里没有阻塞线程这回事**，只能忽略；
+  //                     真要等待的话书源该用「再发一次请求」，不是 sleep
   toast: function (s) { __host.log('[toast] ' + String(s)) },
   longToast: function (s) { __host.log('[toast] ' + String(s)) },
   refreshExplore: function () {},
+  refreshTocUrl: function () { __host.log('[refreshTocUrl] 本引擎按需重新取目录，忽略') },
+  upLoginData: function () { __host.log('[upLoginData] 本引擎没有登录态上传，忽略') },
+  openUrl: function (u) { __host.log('[openUrl] 打不开外部浏览器，忽略：' + String(u).slice(0, 120)) },
+  open: function (u) { __host.log('[open] 没有可跳转的界面，忽略：' + String(u).slice(0, 120)) },
+  openWeb: function (u) { __host.log('[openWeb] 打不开外部浏览器，忽略：' + String(u).slice(0, 120)) },
+  openBook: function (u) { __host.log('[openBook] 没有可跳转的界面，忽略：' + String(u).slice(0, 120)) },
+  copyText: function (s) { __host.log('[copyText] 没有剪贴板，忽略：' + String(s).slice(0, 60)) },
+  sleep: function () { __host.log('[sleep] Worker 里不能阻塞，忽略') },
+  // 跨源搜索是 App 级能力（java.searchBook(key, source)），服务端做不了。
+  // 返回空串 + 记日志，而不是抛错：它出现在「其它书源里有没有这本」这类**附加信息**里，
+  // 抛错会把整条规则带走，比这个字段少一个值更糟；返回空的话症状是「这个字段没值」，
+  // 一眼能看出是没做，而不是给了一个错的值。
+  searchBook: function (key) {
+    __host.log('[searchBook] 本引擎不做跨源搜索，返回空：' + String(key).slice(0, 60))
+    return ''
+  },
   getWebViewUA: function () {
-    return 'Mozilla/5.0 (Linux; Android 13; Pixel 7 Build/TQ3A.230805.001; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/114.0.5735.196 Mobile Safari/537.36'
+    return 'Mozilla/5.0 (Linux; Android 13; Pixel 7 Build; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/114.0.5735.196 Mobile Safari/537.36'
+  },
+  // 随机 UUID。线上 5 处，用来拼「本次请求的一次性标识」
+  randomUUID: function () {
+    var hex = '0123456789abcdef'
+    var out = ''
+    for (var i = 0; i < 32; i++) out += hex.charAt(Math.floor(Math.random() * 16))
+    return (
+      out.slice(0, 8) + '-' + out.slice(8, 12) + '-4' + out.slice(13, 16) + '-a' +
+      out.slice(17, 20) + '-' + out.slice(20)
+    )
   },
 
   // 把一条规则当成字符串求值。当前节点只有规则求值层知道，所以要过宿主桥。
   // 时机上它是 asyncify 的：脚本里是同步调用，宿主侧 await。
   getString: function (rule, content) {
+    var c = content === undefined || content === null ? java.__content : content
     var raw = __host.getString(JSON.stringify([
       String(rule),
-      content === undefined || content === null ? null : String(content),
+      c === undefined || c === null ? null : String(c),
     ]))
     var res = JSON.parse(raw)
     if (!res.ok) { throw new Error(res.error) }
@@ -226,9 +263,10 @@ var java = {
   // 线上 32 处 getElements + 9 处 getElement，写法横跨 CSS、JSOUP 简写与 XPath，
   // 都由规则求值层统一处理，这里不做方言判断。
   getElements: function (rule, content) {
+    var c = content === undefined || content === null ? java.__content : content
     var raw = __host.getElements(JSON.stringify([
       String(rule),
-      content === undefined || content === null ? null : String(content),
+      c === undefined || c === null ? null : String(c),
     ]))
     var res = JSON.parse(raw)
     if (!res.ok) { throw new Error(res.error) }
@@ -394,7 +432,37 @@ var java = {
   webView: function () { throw new Error('本引擎不支持 java.webView（需要 WebView 渲染）') },
   startBrowserAwait: function () { throw new Error('本引擎不支持 java.startBrowserAwait（需要浏览器）') },
   startBrowser: function () { throw new Error('本引擎不支持 java.startBrowser（需要浏览器）') },
-  setContent: function () { throw new Error('本引擎不支持 java.setContent（需要 WebView）') },
+  // java.setContent(content[, baseUrl])：把「当前内容」换成传进来的这一段
+  //
+  // Legado 里它改的是**后续规则求值的对象**：设过之后，java.getString(规则) 与
+  // java.getElements(规则) 不带第二个参数时就在这份内容上求值，而不是在原来的页面上。
+  // ⚡📂八一中文网 的搜索规则就是这个套路 —— 发现搜索地址变了就自己 POST 一次，
+  // 用 setContent 把响应换成新内容，再 getElements("#nr||#sitebox dl") 取结果
+  // （线上 13 条源 / 18 处）。早先这里是一条「需要 WebView」的明确报错，
+  // 但这件事**根本不需要 WebView**：getString / getElements 本来就有
+  // 「第二个参数是内容」那条路（显式传内容线上几十处），这里只是把「不传第二个参数」
+  // 也变成传。所以改成真的实现。
+  //
+  // 第二个参数（新的 baseUrl）**忽略**：相对地址由宿主侧按这次请求的上下文补全，
+  // 沙箱改不了它。语料里传它的只有一处，且传的是同一个地址。
+  setContent: function (content) {
+    java.__content = content === undefined || content === null ? '' : String(content)
+    return java.__content
+  },
+  // 没设过 setContent 时用「当前节点」（宿主侧解释 null）
+  __content: null,
+
+  // java.digestHex(str[, algorithm])：摘要的十六进制
+  //
+  // 线上 5 处，算法是 MD5 与 SHA-256（后者在拼 App 接口签名）。其余算法**明确报错**，
+  // 不静默给空 —— 签名算错的表现是「接口返回 403 / 数据不对」，比报错难查得多。
+  digestHex: function (s, algorithm) {
+    var alg = String(algorithm === undefined || algorithm === null ? 'MD5' : algorithm)
+      .toUpperCase().replace(/-/g, '')
+    if (alg === 'MD5') return __host.md5(String(s))
+    if (alg === 'SHA256') return __host.sha256(String(s))
+    throw new Error('本引擎的 java.digestHex 只实现了 MD5 与 SHA-256，不支持 ' + alg)
+  },
   getFile: function () { throw new Error('本引擎不支持 java.getFile（没有可持久化的文件系统）') },
   queryTTF: function () { throw new Error('本引擎不支持 java.queryTTF（字体混淆）') },
   alert: function (s) { __host.log('[alert] ' + String(s)) },
@@ -1172,6 +1240,20 @@ async function executeInSandbox(
         })
         vm.setProp(host, 'getElements', getElementsFn)
         getElementsFn.dispose()
+
+        /**
+         * SHA-256 的同步桥（脚本里同步、宿主侧 await）
+         *
+         * WebCrypto 的 `subtle.digest` 只给 Promise，所以这条桥必须是 asyncify 的；
+         * 而沙箱本来就是 asyncify 的，写法与上面几条异步桥完全一样。
+         * 给 `java.digestHex(str, 'SHA-256')` 用（线上 5 处）。
+         */
+        const sha256Fn = vm.newAsyncifiedFunction('sha256', async (arg) => {
+            const text = String(vm.dump(arg))
+            return vm.newString(await sha256Hex(text))
+        })
+        vm.setProp(host, 'sha256', sha256Fn)
+        sha256Fn.dispose()
 
         const requestFn = vm.newAsyncifiedFunction('request', async (arg) => {
             const optionsJson = String(vm.dump(arg))

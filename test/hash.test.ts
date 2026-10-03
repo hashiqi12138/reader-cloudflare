@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
-import { md5Hex } from '../src/lib/hash'
+import { md5Hex, sha256Hex } from '../src/lib/hash'
 
 /**
  * MD5 是「要么全对、要么全错」的那类实现：中间任何一处移位或字节序写错，
@@ -48,6 +48,46 @@ describe('md5Hex', () => {
         expect(md5Hex('abc')).toBe('900150983cd24fb0d6963f7d28e17f72')
         expect(md5Hex('The quick brown fox jumps over the lazy dog')).toBe(
             '9e107d9d372bb6826bd81d3542a419d6',
+        )
+    })
+})
+
+/**
+ * SHA-256 走的是 WebCrypto（`crypto.subtle.digest`），不是自己实现的，
+ * 但它要能被 `java.digestHex` 用上，就必须：**返回十六进制**、**按 UTF-8 取字节**、
+ * 而且**异步**（这一点靠签名保证，调用方要 await）。
+ * 这里同样和 `node:crypto` 对拍。
+ */
+describe('sha256Hex', () => {
+    it('和 node:crypto 的结果一致（含多字节与长输入）', async () => {
+        const samples = [
+            '',
+            'a',
+            'abc',
+            '中文',
+            '禁漫天堂API',
+            'x'.repeat(55),
+            'x'.repeat(64),
+            'x'.repeat(1000),
+            '简体中文 + English + 日本語 + 1234567890',
+        ]
+        for (const sample of samples) {
+            const expected = createHash('sha256').update(sample, 'utf8').digest('hex')
+            const actual = await sha256Hex(sample)
+            expect(actual, `输入 ${JSON.stringify(sample.slice(0, 20))}`).toBe(expected)
+        }
+    })
+
+    it('输出固定是 64 位小写十六进制', async () => {
+        expect(await sha256Hex('中文')).toMatch(/^[0-9a-f]{64}$/)
+    })
+
+    it('对已知向量给出标准答案', async () => {
+        expect(await sha256Hex('')).toBe(
+            'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+        )
+        expect(await sha256Hex('abc')).toBe(
+            'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
         )
     })
 })

@@ -35,6 +35,7 @@
 | JS 写在 URL 字段里（`searchUrl` 的 `@js:` / `<js>`）                                                | 已实现（见「URL 字段里的 JS」；线上 `searchUrl` 带 JS 的有 85 条）                                                                          |
 | URL 里的 `<,...>` 可选段（「第一页不要页码」）                                                      | 已实现（`/latest/<,index_{{page}}.html>`；见「第九轮」）                                                                                    |
 | `java.getString` / `getStringList` / `timeFormat[UTC]` / `md5Encode` / hex / connect / toNumChapter | 已实现（见「沙箱助手」）                                                                                                                    |
+| `java.setContent` / `digestHex`（含 SHA-256）/ 一批 UI 动作 / `randomUUID`                          | 已实现（`setContent` 是换掉「当前内容」；UI 动作是 no-op；见「第二十二轮」）                                                                |
 | `java.getElements` / `getElement`（节点级规则求值）                                                 | 已实现（复用列表规则求值 + jsoup 片段桥；线上 41 处）                                                                                       |
 | `java.createSymmetricCrypto` / `aesBase64DecodeToString`（AES / DES）                               | 已实现（纯 JS 同步 AES-128/192/256 与 DES，CBC/ECB，PKCS7/Zero；线上 33 处）                                                                |
 | `java.base64DecodeToByteArray` 等字节形态                                                           | 已实现（按 UTF-8 取字节，不再被解码成字符串毁掉二进制）                                                                                     |
@@ -800,12 +801,46 @@ base64 同样是 UTF-8 语义（`src/lib/base64.ts`）。**不能写成 `btoa(st
 报的还是一句与书源毫无关系的宿主错误 —— 现在按「先取 UTF-8 字节、再逐字节交给 `btoa`」
 的标准做法实现，单测里与 `Buffer.from(text,'utf8').toString('base64')` 逐字对拍。
 
-### 纯 UI 动作：`java.toast` / `java.longToast` / `java.refreshExplore`
+### 纯 UI 动作：`java.toast` / `longToast` / `openUrl` / `open` / `refreshTocUrl` …
 
 服务端没有界面可弹，所以它们是 no-op —— **但必须有**。
 书源里它们常和取数据写在同一个 `try` 里，缺一个就是「not a function」把整条规则带走，
 而报错信息完全看不出是「弹个提示」这件事导致的。现在它们只往日志里写一行，
 既不丢信息，也不让规则失败。`java.getWebViewUA` 同理，返回一个固定的安卓 WebView UA。
+
+这条清单是**按语料数出来的**，不是拍脑袋定的（`java.xxx(` 在 594 条源里的分布）：
+`openUrl` / `open` / `openWeb` / `openBook`（打开地址或页面）、`refreshTocUrl`、
+`upLoginData`（上传登录态）、`copyText`、`sleep`（Worker 里不能阻塞，只能忽略）、
+`randomUUID`（线上 5 处，返回一个 36 位的 UUID 串），一共 24 处引用。
+两个刻意的例外：
+
+- **`java.searchBook(key, source)`（跨源搜索）返回空串 + 记日志**，而不是抛错。
+  它出现在「其它书源里有没有这本」这类**附加信息**里，抛错会把整条规则带走；
+  返回空的话症状是「这个字段没值」，一眼能看出是没做，而不是给了一个错的值
+- **`java.setContent` 是真做的**，见下一节
+
+### `java.setContent(内容)`：换掉「当前内容」
+
+Legado 里它改的是**后续规则求值的对象**：设过之后，`java.getString(规则)` 与
+`java.getElements(规则)` 不带第二个参数时就在这份内容上求值，而不是在原来的页面上。
+`⚡📂八一中文网` 的搜索规则就是这个套路 —— 发现搜索地址变了就自己 POST 一次，
+把响应换成新内容，再 `getElements("#nr||#sitebox dl")` 取结果（线上 13 条源 / 18 处）。
+
+早先这里是一条「需要 WebView」的明确报错，**但这件事根本不需要 WebView**：
+`getString` / `getElements` 本来就有「第二个参数是内容」那条路（显式传内容线上几十处），
+沙箱侧只要把「不传第二个参数」也变成传，就够。第二个参数（新的 baseUrl）忽略 ——
+相对地址由宿主侧按这次请求的上下文补全，沙箱改不了它。
+
+### `java.digestHex(字符串[, 算法])`
+
+摘要的十六进制。线上用到的算法是 **MD5 与 SHA-256**（后者在拼 App 接口的签名）。
+MD5 走同步桥（`src/lib/hash.ts` 自己实现的，见「沙箱助手」开头）；
+SHA-256 不必自己实现 —— WebCrypto 就有，代价只是 `crypto.subtle.digest` **只给 Promise**，
+所以它是一条**异步桥**（`vm.newAsyncifiedFunction`）。异步在这里不额外花什么：
+沙箱本来就是 asyncify 的，`java.ajax` 就是「脚本里同步、宿主侧 await」。
+
+其余算法**明确报错**（`只实现了 MD5 与 SHA-256，不支持 SHA512`）。签名算错的表现是
+「接口返回 403 / 数据不对」，比报错难查得多，所以宁可在这里炸。
 
 ### `java.getElements(规则[, 内容])` / `java.getElement(规则[, 内容])`
 
@@ -1838,16 +1873,57 @@ D1 里** —— 换一个部署、或者想把数据搬到另一个账号，之�
 验证：新增 9 项单测（`test/nodeBinding.test.ts`：多命中/单命中的形态、迭代式、
 显式取值不被改、字符串优先、0 命中给空数组、顶格 `@js:` 不受影响）并做了哨兵验证
 （关掉节点绑定，红的正是那几条「要节点 HTML」的）；冒烟新增 4d 段 3 条断言，
-三种形状各一条；全量 527 项单测与整段冒烟通过。
+三种形状各一条；全量 530 项单测与整段冒烟通过。
+
+### 第二十二轮：把「缺函数」这一类一次扫干净 —— 先按语料数，再动手
+
+上一轮结尾留着一条教训：**推不动的时候先加日志，别加猜想**。这一轮开头照它做了一次
+「先数再说」—— 但数的是另一件事：`java.xxx(` 在 594 条源里各出现多少次。
+
+数出来的分布里，高频的那些（`ajax` 126 源、`getString` 70 源、`log` 68 源、
+`toast` 53 源、`md5Encode` 29 源 …）都已经实现。**真正的问题在长尾**：
+有一批名字**一次都没实现**，而它们的失败方式是最难查的那种 ——
+`xxx is not a function` 会把**整条规则**带走，而书源里这些调用常和取数据写在同一个
+`try` 里，报错信息完全看不出是「弹个提示」这件事导致的。
+
+按「能不能在服务端做出等价的东西」分了三类，分别处理：
+
+| 类别                  | 做法                             | 这一轮补的                                                                                                        |
+| --------------------- | -------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| 纯 UI / App 动作      | **no-op + 记日志**               | `openUrl` / `open` / `openWeb` / `openBook` / `refreshTocUrl` / `upLoginData` / `copyText` / `sleep`（24 处引用） |
+| 服务端能做，只是没做  | **真做**                         | `java.setContent`（13 条源 / 18 处）、`java.digestHex`（5 处）、`java.randomUUID`（5 处）                         |
+| 真需要 Android 运行时 | **带名字的明确报错**（维持原样） | `webView` / `startBrowserAwait` / `startBrowser`、`Packages.Cipher` / `BitmapFactory`                             |
+
+**`java.setContent` 是这一轮唯一有分量的一个。** 它以前挂在「需要 WebView」那一堆里 ——
+但**这件事根本不需要 WebView**：它要的是「把后续规则求值的对象换掉」，而
+`getString` / `getElements` 本来就有「第二个参数是内容」那条路（显式传内容线上几十处）。
+所以只要在沙箱侧把「不传第二个参数」也变成传，整件事就成了。`⚡📂八一中文网` 的搜索规则
+正是这个套路：发现搜索地址变了就自己 POST 一次，把响应换成新内容再取结果。
+**把一条「明确报错」降级成「真实现」，前提是先确认它到底缺的是什么能力** ——
+这一轮它缺的只是一个变量。
+
+**`java.digestHex` 顺带补上了 SHA-256。** 线上这个函数用的算法是 MD5 与 SHA-256
+（后者在拼 App 接口签名）。MD5 我们已经自己实现了一份（WebCrypto 不给），
+但 SHA-256 **不必自己实现** —— WebCrypto 就有，代价只是 `subtle.digest` 只给 Promise，
+所以它是一条**异步桥**。这里没有为了「统一」去手抄一份 SHA-256，也没有因为「桥是同步的」
+就不做：沙箱本来就是 asyncify 的，加一条异步桥与加一条同步桥写法一样。
+其余算法**明确报错**（签名算错的表现是「接口返回 403」，比报错难查得多）。
+
+验证：`sha256Hex` 3 项单测（与 `node:crypto` 对拍 + 已知向量 + 输出形状）；
+冒烟新增 15b 段 4 条断言 —— `setContent` 之后 `getString` 在换过的内容上求值、
+`digestHex` 两个算法都是标准答案、12 个 UI/App 动作连着一起来不炸、没实现的算法明确报错。
+顺带记一个小坑：那条「明确报错」的断言第一次是红的，因为 `coverUrl` 是**地址字段**，
+引擎把错误文本当地址转义了 —— 断言要先 `decodeURIComponent`（这条也是「测试自己看错了对象」，
+跟上一轮同一类，只是这次一眼就看出来了）。
 
 ## 验证
 
 ```bash
 npm install
 npm run db:migrate   # 建本地 D1 表（首次、以及每次新增迁移后）
-npm test             # 单元测试（527 项，Node 里毫秒级跑完；另有六个默认跳过的全量扫描，见下）
+npm test             # 单元测试（530 项，Node 里毫秒级跑完；另有六个默认跳过的全量扫描，见下）
 npm run dev          # 起本地服务，浏览器打开首页即可用；另开一个终端跑下面这条
-npm run smoke        # 端到端：链路 + 书源管理 + 静态资源 + 账号/书架/进度/书签 + 改显示名/改密码 + 导出导入备份 + 媒体 + 字段模板 + 选择器@js: + 空选择器取值 + 列表标记（+ / 顶格 <js>） + 沙箱助手 + 节点级助手/加解密 + 连接符切分 + 列表规则 + URL 字段 JS + 发现/首页
+npm run smoke        # 端到端：链路 + 书源管理 + 静态资源 + 账号/书架/进度/书签 + 改显示名/改密码 + 导出导入备份 + 媒体 + 字段模板 + 选择器@js: + 空选择器取值 + 列表标记（+ / 顶格 <js>） + 沙箱助手 + setContent/digestHex/UI 动作 + 节点级助手/加解密 + 连接符切分 + 列表规则 + URL 字段 JS + 发现/首页
 ```
 
 单元测试只覆盖**纯函数**（规则解析、规则文本切分、规则前缀的匹配、规则尾巴的先后与取值、
@@ -1888,7 +1964,7 @@ XPath 适配层与规则文本、`选择器@js:` 里 `result` 的绑法判定、
 内置测试站点（`/fixture/*`）是项目自己造的，不依赖任何第三方站点 —— 第三方站会改版、
 会挂、在 CI 机房会被墙，拿它做回归会出现"今天绿明天红，却说不清是谁的问题"。
 
-`npm run smoke` 分二十五段，其中二十二段值得单独说：
+`npm run smoke` 分二十六段，其中二十三段值得单独说：
 
 **多方言对照。** 内置站点配了七套书源 —— 分别用 `@css:`、XPath、`@js: + java.ajax`、
 JSONPath、顶格 `@js:` 引用 `result`、字段 `{{}}` 模板、`选择器@js:` 七种规则写法打同一份数据。
@@ -1927,7 +2003,7 @@ JSONPath、顶格 `@js:` 引用 `result`、字段 `{{}}` 模板、`选择器@js:
 `/fixture/book/{{$.id}}` 必须拼成一条正常地址 —— 它在修之前恒为空串。
 另外验「不支持的复合过滤器必须报错」，而不是静默返回 0 条。
 
-**沙箱助手。** `java.getString` 在模板里跑通 JSONPath、第二个参数换内容求值；
+**沙箱助手（含 15b 节的补测）。** `java.getString` 在模板里跑通 JSONPath、第二个参数换内容求值；
 `java.timeFormat` 默认按 +8 渲染、`java.timeFormatUTC` 按显式偏移渲染
 （拿固定时间戳断言，所以「差 8 小时」这种错跑不掉）；
 `java.md5Encode` 与 hex 互转按已知向量断言；
@@ -2236,9 +2312,12 @@ cheerio 能不能解析、QuickJS 的 WASM 能不能在线上加载、D1 绑定�
 
 ## 后续计划
 
-1. **沙箱还缺的 `java` 助手与 Java 互操作** —— `java.setContent` / `java.webView` /
-   `java.startBrowserAwait`（需要 WebView）、以及 `Packages.*` 里除 MD5 之外的类
-   （`Cipher`、`BitmapFactory`…）。
+1. **沙箱还缺的 `java` 助手与 Java 互操作** —— 这一轮按语料补掉了一批（见「第二十二轮」）：
+   `java.setContent`、`java.digestHex`（MD5 + SHA-256）、`openUrl` / `open` / `openWeb` /
+   `openBook` / `refreshTocUrl` / `upLoginData` / `copyText` / `sleep` / `searchBook` /
+   `randomUUID`。**还剩的是真需要 Android 运行时的那些**：`java.webView` /
+   `java.startBrowserAwait` / `java.startBrowser`（都要浏览器）、以及 `Packages.*` 里
+   除 MD5 之外的类（`Cipher`、`BitmapFactory`…）。
    它们和 `imageDecode` 是同一类：都需要一个能在沙箱里用的 Java / Android 运行时替身。
    缺的时候是**带名字的明确报错**，不是静默返回空 —— 剩下 28 条分类失败里就有一批是这一类的。
    （`java.getElements` / `getElement` 与 AES / DES 那几个已在「第十一轮」补上。）

@@ -2266,6 +2266,80 @@ console.log('\n=== 15. 沙箱助手（java.getString / timeFormat / md5 / hex / 
     check(!left.some((s) => s.id === id), '沙箱助手测试源已清理')
 }
 
+console.log('\n=== 15b. java.setContent / digestHex / 一批 UI 动作 ===')
+{
+    /**
+     * 这一节补的是「沙箱里缺函数」这一类 —— 它的症状最难查：
+     * `xxx is not a function` 会把**整条规则**带走，而书源里这些调用常和取数据写在同一个
+     * `try` 里。全量数过之后（`java.xxx(` 的分布）补了这些：
+     *
+     *   - `java.setContent(content)`：设过之后 `getString` / `getElements` 不带第二个参数
+     *     就在这份内容上求值。早先是一条「需要 WebView」的报错，但它根本不需要 WebView。
+     *     `⚡📂八一中文网` 的搜索规则靠它（13 源 / 18 处）
+     *   - `java.digestHex(str, alg)`：线上用 MD5 与 SHA-256（后者走 WebCrypto 的异步桥）
+     *   - 一批 UI/App 动作：openUrl / open / openWeb / openBook / refreshTocUrl /
+     *     upLoginData / copyText / sleep / searchBook（24 处引用）
+     */
+    const id = `user:${BASE}`
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: '沙箱助手补测源',
+                bookSourceUrl: BASE,
+                ruleBookInfo: {
+                    // setContent 之后，不带第二个参数的 getString 应当在这段内容上求值
+                    name: `@js:java.setContent('<div id="sc">换过的内容</div>'); java.getString('#sc@text')`,
+                    // 两个算法都要对：MD5 走同步桥，SHA-256 走异步桥
+                    author: `@js:java.digestHex('abc', 'MD5') + '|' + java.digestHex('abc', 'SHA-256')`,
+                    // 所有 UI/App 动作连着一起来一遍：一个都不能是 not a function
+                    intro: `@js:java.toast('x'); java.longToast('x'); java.refreshExplore(); java.refreshTocUrl(); java.upLoginData(); java.openUrl('http://x'); java.open('login'); java.openWeb('http://x'); java.openBook('1'); java.copyText('x'); java.sleep(1); java.searchBook('x', 'y'); java.randomUUID().length === 36 ? 'UI-OK' : 'UI-BAD'`,
+                    // 没实现的算法必须**明确报错**，不能静默给空（签名算错更难查）
+                    coverUrl: `@js:(function(){try{java.digestHex('abc','SHA-512');return 'NO-ERROR'}catch(e){return String(e.message || e)}})()`,
+                },
+            },
+        ]),
+    )
+
+    const book = await getJson(
+        `/api/book?sourceId=${encodeURIComponent(id)}&url=${encodeURIComponent(`${BASE}/fixture/book/1`)}`,
+    )
+    const info = book.json ?? {}
+    check(
+        info.name === '换过的内容',
+        '`java.setContent` 之后 `getString` 在换过的内容上求值',
+        JSON.stringify(info.name),
+    )
+    check(
+        info.author ===
+            '900150983cd24fb0d6963f7d28e17f72|ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
+        '`java.digestHex` 的 MD5 与 SHA-256 都是标准答案',
+        JSON.stringify(info.author),
+    )
+    check(
+        info.intro === 'UI-OK',
+        '一批 UI/App 动作都不是 not a function',
+        JSON.stringify(info.intro),
+    )
+    // `coverUrl` 是**地址字段**，引擎会把值当地址补全并转义，所以这里要先解码再看内容
+    const coverErr = (() => {
+        try {
+            return decodeURIComponent(String(info.coverUrl ?? ''))
+        } catch {
+            return String(info.coverUrl ?? '')
+        }
+    })()
+    check(
+        coverErr.includes('SHA512') && coverErr.includes('不支持'),
+        '`digestHex` 遇到没实现的算法时明确报错（而不是给空值）',
+        JSON.stringify(coverErr.slice(0, 120)),
+    )
+
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+}
+
 console.log('\n=== 16. JS 里的连接符不能被切碎 ===')
 {
     /**

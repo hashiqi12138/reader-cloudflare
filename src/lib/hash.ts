@@ -119,3 +119,23 @@ export function md5Hex(input: string): string {
     for (const byte of digest) out += byte.toString(16).padStart(2, '0')
     return out
 }
+
+/**
+ * SHA-256，返回 64 位小写十六进制
+ *
+ * 给 `java.digestHex(str, 'SHA-256')` 用（线上 5 处，两处在拼 App 接口的签名）。
+ * 与 MD5 不同，**这个不必自己实现** —— WebCrypto 提供 SHA-256，
+ * 而它在 Worker 与 Node 里都有，代价只是它**是异步的**（`crypto.subtle.digest` 只给 Promise）。
+ *
+ * 异步在这里不是问题：沙箱那一侧本来就是 asyncify 的（`java.ajax` 就是
+ * 「脚本里同步、宿主侧 await」），加一条异步桥与加一条同步桥的写法一样。
+ * 反过来，为它在纯 JS 里手抄一份 SHA-256 才是真的贵。
+ *
+ * 输入同样按 **UTF-8** 取字节。
+ */
+export async function sha256Hex(input: string): Promise<string> {
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input))
+    let out = ''
+    for (const byte of new Uint8Array(digest)) out += byte.toString(16).padStart(2, '0')
+    return out
+}
