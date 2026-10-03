@@ -31,6 +31,7 @@ import {
     userForToken,
 } from './data/accounts'
 import type { AccountUser } from './data/accounts'
+import { exportBackup, importBackup } from './data/transfer'
 import { buildHomeSections, readHomeCache, writeHomeCache } from './data/home'
 import { DataError, bookKey } from './data/types'
 import { getOrCreateMediaSecret } from './data/settings'
@@ -57,6 +58,15 @@ const app = new Hono<{ Bindings: Env }>()
  * 「误把整个网站当书源贴进来」这种情况 —— 那种体积在 JSON.parse 阶段就会吃掉大量内存。
  */
 const MAX_IMPORT_BODY_BYTES = 4 * 1024 * 1024
+
+/**
+ * 备份文件的请求体上限，比书源导入宽松
+ *
+ * 书签记录比书源轻得多、但条数可以很多（一条约 300 字节，两万条约 6 MB），
+ * 而 `data/transfer.ts` 里给书签留的上限就是两万条 —— 两边要能对得上，
+ * 否则「允许导出、导不回来」。
+ */
+const MAX_BACKUP_BODY_BYTES = 8 * 1024 * 1024
 
 type ErrorStatus = 400 | 401 | 403 | 404 | 409 | 413 | 422 | 429 | 500 | 502 | 504
 
@@ -616,6 +626,70 @@ app.post('/api/account/password', async (c) => {
             getCookie(c, SESSION_COOKIE) ?? null,
         )
         return c.json({ ok: true, ...result })
+    } catch (err) {
+        return fail(c, err)
+    }
+})
+
+// ---------------------------------------------------------------- 备份（导出 / 导入）
+
+/**
+ * 导出：书架 + 阅读进度 + 书签，一个文件
+ *
+ * 回的是**文件**（`Content-Disposition: attachment`），前端只要一个普通链接 ——
+ * 会话是 HttpOnly cookie，同源链接天然带得上，不必先 fetch 再拼 Blob。
+ */
+app.get('/api/backup', async (c) => {
+    try {
+        const user = await requireUser(c)
+        const backup = await exportBackup(c.env.DB, user)
+        const stamp = new Date(backup.exportedAt).toISOString().slice(0, 10)
+        return c.json(backup, 200, {
+            'Content-Disposition': `attachment; filename="reader-backup-${stamp}.json"`,
+        })
+    } catch (err) {
+        return fail(c, err)
+    }
+})
+
+/**
+ * 导入：把一份备份合并进当前账号
+ *
+ * 请求体就是导出的那份文件原文。合并规则见 `data/transfer.ts`，一句话：
+ * **书架已有的不动、进度按「谁更新」取、书签按 id 去重** —— 于是同一份文件
+ * 导两次是幂等的，而把旧设备的备份导进新设备不会把读到的新章节倒回去。
+ */
+app.post('/api/backup', async (c) => {
+    const declared = Number(c.req.header('content-length') ?? '0')
+    if (Number.isFinite(declared) && declared > MAX_BACKUP_BODY_BYTES) {
+        return c.json(
+            {
+                error: `请求体 ${Math.round(declared / 1024 / 1024)} MB，超过上限 ${MAX_BACKUP_BODY_BYTES / 1024 / 1024} MB`,
+                code: 'body_too_large',
+            },
+            413,
+        )
+    }
+
+    const text = await c.req.text()
+    if (text.trim() === '') {
+        return c.json({ error: '请求体是空的，没有可导入的内容' }, 400)
+    }
+
+    let parsed: unknown
+    try {
+        parsed = JSON.parse(text)
+    } catch {
+        return c.json(
+            { error: '这不是一份 JSON 文件，请选择导出的那份备份', code: 'invalid_json' },
+            400,
+        )
+    }
+
+    try {
+        const user = await requireUser(c)
+        const report = await importBackup(c.env.DB, user, parsed)
+        return c.json({ ok: true, imported: report })
     } catch (err) {
         return fail(c, err)
     }

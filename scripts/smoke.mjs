@@ -996,6 +996,170 @@ console.log('\n=== 7b. 改显示名与改密码 ===')
     check(newLogin.status === 200, '新密码能登进去', `status=${newLogin.status}`)
 }
 
+console.log('\n=== 7c. 导出 / 导入备份 ===')
+{
+    /**
+     * 书架、阅读进度、书签只存在这个部署的 D1 里，之前**没有任何办法**搬走 ——
+     * 换部署、换账号，攒下的东西就留在原地。
+     *
+     * 这一节把「两台设备」演出来：A 攒了三样 → 导出 → B 导入 → B 拿到同样的东西；
+     * 再往下是三件「只测一次导入会漏掉」的事：
+     *   - 同一份文件再导一次必须**幂等**（重试、两台机器各导一次都很常见）；
+     *   - 拿一份**更旧的**进度导进来，不能把 B 读到的新章节倒回去；
+     *   - 导出必须**只含自己账号的东西**（否则就是一次数据泄露）。
+     */
+    const sourceId = 'builtin:fixture-css'
+    const bookUrl = `${BASE}/fixture/book/1`
+    const chapterUrl = `${BASE}/fixture/chapter/1/1`
+
+    const a = await sessionUser('smoketransa')
+    const b = await sessionUser('smoketransb')
+
+    await a.call('POST', '/api/shelf', {
+        sourceId,
+        bookUrl,
+        name: '测试小说·甲',
+        author: '作者甲',
+    })
+    await a.call('PUT', '/api/progress', {
+        sourceId,
+        bookUrl,
+        chapterUrl,
+        chapterName: '第一章 起风了',
+        chapterIndex: 0,
+        pageIndex: 2,
+    })
+    await a.call('POST', '/api/bookmarks', {
+        sourceId,
+        bookUrl,
+        chapterUrl,
+        chapterName: '第一章 起风了',
+        chapterIndex: 0,
+        pageIndex: 1,
+        note: '备份往返测试',
+    })
+
+    const exported = await a.call('GET', '/api/backup')
+    check(
+        exported.status === 200 &&
+            exported.json?.kind === 'reader-cloudflare-backup' &&
+            exported.json?.counts?.shelf === 1 &&
+            exported.json?.counts?.progress === 1 &&
+            exported.json?.counts?.bookmarks === 1,
+        '导出：一份带 kind 与计数的备份',
+        `status=${exported.status} counts=${JSON.stringify(exported.json?.counts)}`,
+    )
+
+    const imported = await b.call('POST', '/api/backup', exported.json)
+    check(
+        imported.status === 200 &&
+            imported.json?.imported?.shelf === 1 &&
+            imported.json?.imported?.progress === 1 &&
+            imported.json?.imported?.bookmarks === 1,
+        '导入：三样都进了另一个账号',
+        `status=${imported.status} imported=${JSON.stringify(imported.json?.imported)}`,
+    )
+
+    const bShelf = await b.call('GET', '/api/shelf')
+    const bProgress = await b.call(
+        'GET',
+        `/api/progress?sourceId=${encodeURIComponent(sourceId)}&bookUrl=${encodeURIComponent(bookUrl)}`,
+    )
+    const bBookmarks = await b.call(
+        'GET',
+        `/api/bookmarks?sourceId=${encodeURIComponent(sourceId)}&bookUrl=${encodeURIComponent(bookUrl)}`,
+    )
+    check(
+        bShelf.json?.count === 1 && bShelf.json?.entries?.[0]?.name === '测试小说·甲',
+        '导入之后 B 的书架里就有了这本书',
+        `count=${bShelf.json?.count} name=${bShelf.json?.entries?.[0]?.name ?? ''}`,
+    )
+    check(
+        bProgress.json?.progress?.pageIndex === 2 &&
+            bProgress.json?.progress?.chapterName === '第一章 起风了',
+        '导进来的阅读位置带上了「停在第几页」',
+        `pageIndex=${bProgress.json?.progress?.pageIndex}`,
+    )
+    check(
+        bBookmarks.json?.count === 1 && bBookmarks.json?.bookmarks?.[0]?.note === '备份往返测试',
+        '导进来的书签连备注一起',
+        `count=${bBookmarks.json?.count}`,
+    )
+
+    const again = await b.call('POST', '/api/backup', exported.json)
+    check(
+        again.json?.imported?.shelf === 0 &&
+            again.json?.imported?.bookmarks === 0 &&
+            again.json?.imported?.progress === 0 &&
+            again.json?.imported?.progressKept === 1,
+        '同一份文件再导一次是幂等的（不新增、不变两倍）',
+        `imported=${JSON.stringify(again.json?.imported)}`,
+    )
+    const stillOne = await b.call('GET', '/api/shelf')
+    check(
+        stillOne.json?.count === 1,
+        '书架仍然只有一本（没被导成两本）',
+        `count=${stillOne.json?.count}`,
+    )
+
+    // B 往后读，再导一份**更旧的**进度：不能倒回去
+    await b.call('PUT', '/api/progress', {
+        sourceId,
+        bookUrl,
+        chapterUrl: `${BASE}/fixture/chapter/1/3`,
+        chapterName: '第三章 天晴了',
+        chapterIndex: 2,
+        pageIndex: 5,
+    })
+    const stale = {
+        ...exported.json,
+        progress: [{ ...exported.json.progress[0], chapterIndex: 0, pageIndex: 2, updatedAt: 1 }],
+    }
+    const staleImport = await b.call('POST', '/api/backup', stale)
+    const afterStale = await b.call(
+        'GET',
+        `/api/progress?sourceId=${encodeURIComponent(sourceId)}&bookUrl=${encodeURIComponent(bookUrl)}`,
+    )
+    check(
+        staleImport.json?.imported?.progress === 0 &&
+            staleImport.json?.imported?.progressKept === 1 &&
+            afterStale.json?.progress?.chapterIndex === 2 &&
+            afterStale.json?.progress?.pageIndex === 5,
+        '导一份更旧的备份：读到的新章节没被倒回去（更新者胜）',
+        `kept=${staleImport.json?.imported?.progressKept} chapterIndex=${afterStale.json?.progress?.chapterIndex}`,
+    )
+
+    const fresh = await sessionUser('smoketransc')
+    const freshBackup = await fresh.call('GET', '/api/backup')
+    check(
+        freshBackup.json?.counts?.shelf === 0 &&
+            freshBackup.json?.counts?.progress === 0 &&
+            freshBackup.json?.counts?.bookmarks === 0,
+        '导出只含自己账号的数据（新账号导出来是空的）',
+        `counts=${JSON.stringify(freshBackup.json?.counts)}`,
+    )
+
+    const notBackup = await b.call('POST', '/api/backup', [{ bookSourceName: '某源' }])
+    check(
+        notBackup.status === 400 && notBackup.json?.code === 'invalid_backup',
+        '把书源合集当备份导入被拒（400 invalid_backup）',
+        `status=${notBackup.status} code=${notBackup.json?.code}`,
+    )
+    const brokenJson = await b.call('POST', '/api/backup', '{ 这不是 JSON')
+    check(brokenJson.status === 400, '不是 JSON 被拒（400）', `status=${brokenJson.status}`)
+    const badRecord = await b.call('POST', '/api/backup', {
+        ...exported.json,
+        shelf: [{ sourceId: 'a', name: '缺地址' }],
+    })
+    check(
+        badRecord.status === 400 && /bookUrl/.test(String(badRecord.json?.error ?? '')),
+        '记录缺字段时明确指出是哪个字段',
+        `status=${badRecord.status} error=${badRecord.json?.error}`,
+    )
+    const anon = await fetch(`${BASE}/api/backup`)
+    check(anon.status === 401, '未登录不能导出（401）', `status=${anon.status}`)
+}
+
 console.log('\n=== 8. 相对地址以书源地址为基准 ===')
 {
     // 这条是真实书源逼出来的：精华书阁、圣武书库这类书源的 searchUrl 写的是

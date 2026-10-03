@@ -396,6 +396,25 @@ export async function savePassword(currentPassword, newPassword) {
     return postJson('/api/account/password', { currentPassword, newPassword })
 }
 
+/**
+ * 导入一份备份文件
+ *
+ * 在浏览器里读成文本再 POST：导出的就是一个 JSON 文件，中间不必包一层 multipart ——
+ * 多一层编码就多一处能出错的地方，而这里没有任何需要流式处理的理由。
+ * 解析放前端做一次，是为了让「选错文件」当场就能说清楚，而不是等服务器回一句
+ * 「请求体不是合法 JSON」。
+ */
+export async function importBackupFile(file) {
+    const text = await file.text()
+    let parsed = null
+    try {
+        parsed = JSON.parse(text)
+    } catch {
+        throw new Error('这不是一份 JSON 文件，请选择之前导出的那份备份')
+    }
+    return postJson('/api/backup', parsed)
+}
+
 /** 把本机匿名身份名下的书架与进度并入当前账号 */
 export async function claimAnonymous() {
     const result = await postJson('/api/auth/claim', { token: anonToken() })

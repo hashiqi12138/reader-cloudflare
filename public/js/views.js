@@ -14,6 +14,7 @@ import {
     currentUser,
     el,
     go,
+    importBackupFile,
     loadSession,
     login as doLogin,
     logout,
@@ -344,10 +345,74 @@ export async function viewAccount(host) {
         ],
     )
 
+    // ---- 数据：导出 / 导入备份 ----
+    const backupFile = el('input', { type: 'file', accept: '.json,application/json' })
+    const backupStatus = el('div')
+    const backupSubmit = el('button', { class: 'btn', type: 'button', text: '导入这份备份' })
+    backupSubmit.onclick = async () => {
+        const file = backupFile.files?.[0]
+        backupStatus.replaceChildren()
+        if (!file) {
+            backupStatus.replaceChildren(alertBox('error', '先选一份备份文件'))
+            return
+        }
+        backupSubmit.disabled = true
+        backupSubmit.textContent = '导入中…'
+        try {
+            const result = await importBackupFile(file)
+            const imported = result?.imported ?? {}
+            invalidateShelf()
+            backupFile.value = ''
+            backupStatus.replaceChildren(
+                alertBox(
+                    'ok',
+                    '导入完成',
+                    [
+                        `书架新增 ${imported.shelf ?? 0} 本`,
+                        `进度写入 ${imported.progress ?? 0} 条（本地更新的 ${imported.progressKept ?? 0} 条保留）`,
+                        `书签新增 ${imported.bookmarks ?? 0} 条（已在库里的 ${imported.bookmarksKept ?? 0} 条跳过）`,
+                    ].join('；'),
+                ),
+            )
+        } catch (err) {
+            backupStatus.replaceChildren(alertBox('error', '没能导入备份', err.message))
+        } finally {
+            backupSubmit.disabled = false
+            backupSubmit.textContent = '导入这份备份'
+        }
+    }
+
+    const backupCard = card(
+        '数据（导出 / 导入）',
+        el('p', {
+            class: 'muted tiny',
+            text: '一份备份包含书架、阅读进度与书签。换设备、换部署，或者从别的账号搬过来，都用它。',
+        }),
+        el('div', { class: 'row' }, [
+            el('a', {
+                class: 'btn primary',
+                href: '/api/backup',
+                text: '导出备份',
+                title: '下载一个 JSON 文件（文件名带日期）',
+            }),
+        ]),
+        el('label', { class: 'field' }, [
+            el('span', { class: 'field-label', text: '导入' }),
+            backupFile,
+        ]),
+        el('p', {
+            class: 'muted tiny',
+            text: '导入是「只增不改」：书架里已有的不动；阅读进度按谁更新取，所以旧备份不会把读到的新章节倒回去；同一份文件导两次也不会变两倍。',
+        }),
+        backupSubmit,
+        backupStatus,
+    )
+
     setChildren(host, [
         el('h1', { text: '账号' }),
         card('显示名', nameForm),
         card('密码', passwordForm),
+        backupCard,
         card(
             '账号信息',
             el('p', { class: 'muted tiny', text: `用户名：${user.username}` }),
