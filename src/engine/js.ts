@@ -578,9 +578,20 @@ JsoupElements.prototype.copy = function () { return this.clone() }
  */
 function __htmlApi(html) {
   var cached = null
-  function doc() {
-    if (cached === null) cached = org.jsoup.Jsoup.parse(html)
+  function docHandle() {
+    if (cached === null) cached = __jsoupCall('parse', null, [html]).handle
     return cached
+  }
+  /**
+   * 返回句柄的那些方法（select / first / get / not …）给的是**数组形态**，
+   * 于是 links[i] 与 links.length 都能用（🔞紫云宫 的目录规则正是这么写的）。
+   * 以前这里返回裸的 JsoupElements：它既不能下标也没有 length，
+   * links[i] 恒为 undefined，于是整条目录悄悄变成 0 条。
+   */
+  function run(name) {
+    var reply = __jsoupCall(name, docHandle(), Array.prototype.slice.call(arguments, 1))
+    if (reply.kind !== 'handle') return reply.value
+    return reply.handle === null ? [] : __listOf(reply.handle)
   }
   var api = {}
   var methods = [
@@ -594,7 +605,9 @@ function __htmlApi(html) {
   for (var i = 0; i < methods.length; i++) {
     (function (name) {
       api[name] = function () {
-        return doc()[name].apply(doc(), arguments)
+        var args = [name]
+        for (var a = 0; a < arguments.length; a++) args.push(arguments[a])
+        return run.apply(null, args)
       }
     })(methods[i])
   }
@@ -608,6 +621,105 @@ function __boxHtml(value) {
   var api = __htmlApi(text)
   for (var k in api) boxed[k] = api[k]
   return boxed
+}
+
+/**
+ * 把「宿主侧命中到的 N 段 HTML」包成**数组形态的 Elements**
+ *
+ * 与 __boxHtml 的区别在**形态**。__boxHtml 给的是「字符串 + 几个 jsoup 方法」，
+ * 适合把 result 当**一份文档**用的写法（result.select('h3').text()）。
+ * 这里给的是一个**真的数组**：能下标、能 forEach / map、有 length，
+ * 逐个元素是「字符串 + 作用在它自己身上的 jsoup 方法」，
+ * 集合级方法（size() / select() / attr() …）挂在数组上。
+ *
+ * 为什么要两种：Legado 里 result 是 jsoup 的 Elements（一个 List），
+ * 于是脚本既会 result.size()、又会 result.forEach(e => e.attr('href'))、
+ * 还会 result.select('a') 之后 links[i] —— 这些在字符串上**一个都没有**。
+ * 线上三处正是这么写的（⚡📂八一中文网、🔞西瓜书屋、🔞紫云宫），
+ * 而它们原来都会在多命中时报 result.size is not a function。
+ *
+ * 为什么元素也是「字符串 + 方法」而不是裸的 JsoupElements：脚本常常把整个
+ * result（或某个元素）直接 return 回去，而宿主侧拿到的值要能**串化**成文本。
+ * 盒装字符串能，只带一个内部句柄号的对象不能 —— 那会串成 {"__id":5}。
+ *
+ * 集合级方法挂在**数组实例**上而不是 JsoupElements.prototype 上，是因为
+ * 那样会改动所有 jsoup 调用的返回值形态（线上两千多处），
+ * 而这一轮要动的只是「result 绑成什么」。挂的属性名都避开了
+ * Array.prototype 上已有的那些（尤其 filter / map / forEach / join）。
+ */
+function __attachList(handle, out) {
+  var methods = [
+    'select', 'get', 'first', 'last', 'eq', 'children', 'child', 'childNodeSize',
+    'parent', 'parents', 'nextElementSibling', 'prevElementSibling', 'nextAll', 'prevAll',
+    'siblingElements', 'not', 'has', 'is',
+    'size', 'isEmpty', 'text', 'ownText', 'textNodes', 'eachText',
+    'html', 'outerHtml', 'attr', 'hasAttr', 'val', 'className', 'hasClass',
+    'tagName', 'id', 'index', 'matches', 'matchesOwn',
+  ]
+  for (var i = 0; i < methods.length; i++) {
+    (function (name) {
+      out[name] = function () {
+        var reply = __jsoupCall(name, handle, Array.prototype.slice.call(arguments))
+        // 返回句柄的集合级方法（select / first / get / not …）继续给「数组形态」，
+        // 否则 result.select('a')[0] 这种写法又会退回到不能下标的 JsoupElements
+        if (reply.kind !== 'handle') return reply.value
+        return reply.handle === null ? [] : __listOf(reply.handle)
+      }
+    })(methods[i])
+  }
+  out.toString = function () { return String(__jsoupCall('toString', handle, []).value) }
+  return out
+}
+
+/**
+ * 单个元素句柄 → 「盒装字符串 + 作用在它自己身上的 jsoup 方法」
+ *
+ * 复用 __htmlApi 那套方法名，但把它们指到**这个元素**的句柄上：
+ * 指向文档的话 e.attr('href') 会问到文档根节点，永远返回空串。
+ */
+function __wrapElement(handle) {
+  var html = String(__jsoupCall('outerHtml', handle, []).value)
+  var boxed = new String(html)
+  var methods = [
+    'select', 'get', 'first', 'last', 'eq', 'children', 'child', 'childNodeSize',
+    'parent', 'parents', 'nextElementSibling', 'prevElementSibling', 'nextAll', 'prevAll',
+    'siblingElements', 'not', 'has', 'is',
+    'size', 'isEmpty', 'text', 'ownText', 'textNodes', 'eachText',
+    'html', 'outerHtml', 'attr', 'hasAttr', 'val', 'className', 'hasClass',
+    'tagName', 'id', 'index', 'matches', 'matchesOwn',
+  ]
+  for (var i = 0; i < methods.length; i++) {
+    (function (name) {
+      boxed[name] = function () {
+        var reply = __jsoupCall(name, handle, Array.prototype.slice.call(arguments))
+        if (reply.kind !== 'handle') return reply.value
+        if (reply.handle === null) return []
+        return __listOf(reply.handle)
+      }
+    })(methods[i])
+  }
+  return boxed
+}
+
+/** 把一个集合句柄变成「数组 + 集合级 jsoup 方法」 */
+function __listOf(handle) {
+  // 逐个元素都直接走桥拿**裸句柄号**：JsoupElements 那层的 get(i) 返回的是包装对象，
+  // 把它当句柄号传回去会变成「jsoup 对象已失效」
+  var n = Number(__jsoupCall('size', handle, []).value)
+  var out = []
+  for (var i = 0; i < n; i++) {
+    var reply = __jsoupCall('get', handle, [i])
+    if (reply.handle === null || reply.handle === undefined) continue
+    out.push(__wrapElement(reply.handle))
+  }
+  return __attachList(handle, out)
+}
+
+/** N 段 HTML → 数组形态的 Elements（宿主侧按规则命中了 N 个节点） */
+function __elemsFrom(htmls) {
+  var reply = __jsoupCall('parseFragments', null, [htmls])
+  if (reply.handle === null || reply.handle === undefined) return []
+  return __listOf(reply.handle)
 }
 
 var org = {
@@ -753,10 +865,18 @@ var Packages = (function () {
 
 // ---------------------------------------------------------------- result 的两种语义
 //
-// 只有脚本真的把 result 当 jsoup 对象用（result.select(...)）时，
+// 只有脚本真的把 result 当 jsoup 对象用（result.select(...) / result.size()）时，
 // analyze.ts 才会把 __resultAsJsoup 置为 true。放在最后，因为要用到上面的 org.jsoup。
-if (globalThis.__resultAsJsoup && typeof globalThis.result === 'string') {
-  globalThis.result = __boxHtml(globalThis.result)
+//
+// 包成什么**看绑进来的类型**：
+//   - 字符串（命中 1 个、或脚本按字符串用）→ __boxHtml，一份文档 + jsoup 方法
+//   - 数组（多命中、脚本按 jsoup 用）      → __elemsFrom，N 个元素 + 集合级方法
+if (globalThis.__resultAsJsoup) {
+  if (Array.isArray(globalThis.result)) {
+    globalThis.result = __elemsFrom(globalThis.result)
+  } else if (typeof globalThis.result === 'string') {
+    globalThis.result = __boxHtml(globalThis.result)
+  }
 }
 `
 

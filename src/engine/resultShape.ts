@@ -105,10 +105,22 @@ function returnsResultBare(code: string): boolean {
     return /(^|[;}\n])\s*(?:return\s+)?result$/.test(trimmed)
 }
 
+/**
+ * 脚本是不是**按字符串**在用 `result`
+ *
+ * `resultWantsArray` 用它来给「数组 / 字符串」定序；`analyze.ts` 的 `resultGlobals`
+ * 另有一处要用：脚本同时写了 jsoup 方法与字符串方法时**字符串优先** ——
+ * `__boxHtml` 给的那份「字符串 + jsoup 方法」两种都能用，而数组给不起 `split`。
+ */
+export function resultWantsString(code: string): boolean {
+    const text = stripJsLiterals(code)
+    return STRING_METHOD.test(text) || STRING_CONTEXT.test(text)
+}
+
 /** `result` 是不是要绑成数组（否则绑「换行拼成的字符串」） */
 export function resultWantsArray(code: string): boolean {
     const text = stripJsLiterals(code)
     if (INDEX_ACCESS.test(text) || ARRAY_METHOD.test(text) || TO_ARRAY.test(text)) return true
-    if (STRING_METHOD.test(text) || STRING_CONTEXT.test(text)) return false
+    if (resultWantsString(code)) return false
     return returnsResultBare(code)
 }

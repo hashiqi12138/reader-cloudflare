@@ -30,7 +30,7 @@ import {
 } from './template'
 import { splitJsTail, splitRuleText } from './ruleText'
 import { matchDirective, ruleHasJs } from './directives'
-import { resultWantsArray } from './resultShape'
+import { resultWantsArray, resultWantsString } from './resultShape'
 import { isAttributeView, normalizeXPathFunctions, runXPath, splitXPathExtract } from './xpath'
 
 /** 一次规则求值所面对的上下文：一个可继续筛选的节点集 */
@@ -411,6 +411,74 @@ export async function analyzeStrings(
 }
 
 /**
+ * 这条规则的**取值方式是不是默认的** —— 即它如今给的是文本 / 属性值，而不是节点自带的 HTML
+ *
+ * 用来判断「脚本按 jsoup 用 `result` 时该不该改绑节点」：默认取值下，`result`
+ * 拿到的是**文本**（JSOUP 简写的默认取值就是 `text`）或**名为空串的属性**
+ * （裸 CSS 没有 `@` 时的那条路径恒为空串），拿它当 HTML 解析自然什么都选不出来。
+ *
+ * 三种方言各有一个「没写取值」的形态，实现里都落成 `text`（XPath 是 `null`）：
+ *   - `@css:`    → `splitCssExtract` 没有 `@` 后缀时返回 `text`
+ *   - XPath      → `toRunnableXPath` 没有后缀时返回 `null`
+ *   - JSOUP 简写 → `parseJsoupRule` 的默认值就是 `text`
+ *
+ * 显式写 `@text` 与不写在这里**不做区分**：`text` 是默认取值，而「显式要文本、
+ * 又要 `result.select(…)`」本身就是自相矛盾的写法。
+ *
+ * 反过来，规则自己写了 `@html` / `@outerHtml` / `@all` 时返回 `false`：
+ * 那已经是一份 HTML 了，脚本在那上面 `select` 是说得通的，**不动它**。
+ */
+function hasDefaultExtract(rule: string): boolean {
+    const { selector } = splitRegexChain(rule)
+    const head = selector.trim()
+    if (head === '') return false
+    const directive = matchDirective(head)
+    if (directive) {
+        if (directive.name === 'css') return splitCssExtract(directive.body).extract === 'text'
+        if (directive.name === 'xpath') return toRunnableXPath(directive.body).extract === null
+        // json / js / allinone 都给不出节点
+        return false
+    }
+    if (head.startsWith('//') || head.startsWith('(/')) {
+        return toRunnableXPath(head).extract === null
+    }
+    if (head.startsWith('$.') || head.startsWith(':')) return false
+    if (/<js[\s>]/i.test(head)) return false
+    return parseJsoupRule(head).extract === 'text'
+}
+
+/**
+ * 脚本按 jsoup 用 `result` 时，把**命中到的节点本身的 HTML**交给它
+ *
+ * 不能拿「按取值方式抠出来的字符串」当输入：裸 CSS 的默认取值是
+ * 「名为空串的属性」（恒为空串）、JSOUP 简写的默认取值是 `text`。于是
+ * `⚡📂八一中文网` 的 `#sitebox dl@js:result.size()` 会算出 0 个元素、
+ * `🔞西瓜书屋` 的 `.BCsectionTwo-top li a@js:result.forEach(e => e.attr('href'))`
+ * 里每个 `e` 都是纯文本（`attr` 恒为空串）、`🔞紫云宫` 的
+ * `ol li@js:result.select('a')` 一个 `a` 都选不出来。
+ *
+ * Legado 那边 `result` 绑的本来就是 `Elements`（节点集合），所以绑节点是
+ * **语义对齐**，不是权宜之计。命中数不同、下游形态也不同（见 `resultGlobals`）：
+ * 命中 1 个绑成一份 HTML 字符串、命中多个绑成数组。
+ */
+async function nodeHtmlOrValues(
+    sel: Selection,
+    rule: string,
+    skeleton: string | null,
+    ctx: RuleContext,
+): Promise<string[]> {
+    const items = await analyzeSelections(sel, rule, ctx)
+    const htmls = items.map((item) =>
+        item.nodes[0] ? (item.$.html(item.nodes[0]) ?? '') : item.source,
+    )
+    // 一个节点都没命中时回到既有那条路（它给的是空数组，与这里的空结果一致）
+    if (htmls.length === 0) {
+        return evalRule(sel, rule, skeleton === null ? null : skeletonOf(rule), ctx)
+    }
+    return htmls
+}
+
+/**
  * 连接符、`@js:` 尾巴与正则链的解析；`skeleton` 与 `rule` 结构对应
  *
  * 拆分顺序是**连接符 → `@js:` → `##` 链**，这个顺序本身有语义：
@@ -473,12 +541,14 @@ async function evalRule(
         // 递归进来时 `@js:` 已经被切走了（`splitJsTail` 取的是**第一个**标记），不会转圈
         const values = bareJs
             ? []
-            : await evalRule(
-                  sel,
-                  jsTail.before,
-                  skeleton === null ? null : skeletonOf(jsTail.before),
-                  ctx,
-              )
+            : hasDefaultExtract(jsTail.before) && wantsJsoupResult(jsTail.code)
+              ? await nodeHtmlOrValues(sel, jsTail.before, skeleton, ctx)
+              : await evalRule(
+                    sel,
+                    jsTail.before,
+                    skeleton === null ? null : skeletonOf(jsTail.before),
+                    ctx,
+                )
 
         const produced = await runInSandbox(
             jsTail.code,
@@ -728,6 +798,30 @@ const RESULT_AS_JSOUP =
     /\bresult\s*\.\s*(select|attr|first|last|get|eq|size|isEmpty|textNodes|eachText|html|outerHtml|hasClass|children|not|filter|matches|matchesOwn|tagName|ownText)\s*\(/
 
 /**
+ * 脚本是不是「**按节点用** `result`」
+ *
+ * 认的是**集合级方法**：`result.size()` / `result.select(…)` / `result.first()` …
+ * 这些在字符串与字符串数组上都**不存在**，出现了就说明脚本要的是 jsoup 的 `Elements`。
+ *
+ * 与 `resultShape.ts` 的优先级保持一致：**按字符串用优先**。
+ * 两种写法写在同一条规则里时（`📂就去看网` 那种），只有「字符串 + jsoup 方法」
+ * 那一份形态给得起，所以这时候按字符串算，`result` 的内容也不去换绑节点。
+ *
+ * 抽成函数是为了让 `evalRule`（决定**交给脚本什么内容**）与 `resultGlobals`
+ * （决定**绑成数组还是字符串**）用的是同一个判据 —— 两处各写一遍必然跑偏。
+ *
+ * **已知缺口：`result.forEach(e => e.attr('href'))` 这种「只迭代、不调集合级方法」的写法
+ * 认不出来**（🔞西瓜书屋 的目录规则就是这一种）。判据本来想再加一条「回调参数上调了
+ * 元素级方法」，但那一版**没能端到端跑通** —— 冒烟里同样的规则返回 0 条，
+ * 而同一套逻辑在 Node 的替身沙箱里是通过的，没能定位到差异出在哪。
+ * 没有定位清楚就不放进正式路径：判宽了会把本该按字符串处理的规则改成给节点
+ * （静默换成另一种内容），比现在这样留个缺口更难查。缺口记在 README 的「后续计划」里。
+ */
+function wantsJsoupResult(code: string): boolean {
+    return RESULT_AS_JSOUP.test(code) && !resultWantsString(code)
+}
+
+/**
  * 传给沙箱的 `result`（前面选择器取到的值）与「要不要包成 jsoup 对象」
  *
  * 绑数组还是拼成字符串由 `resultWantsArray` 按**脚本自己的写法**决定，
@@ -737,12 +831,39 @@ const RESULT_AS_JSOUP =
  *
  * 注意这里**不看 `values.length`**：`result[0]` 写在只命中 1 个值的页面上时
  * 也必须拿到那 1 个值，而不是这个字符串的第 1 个**字符**。
+ *
+ * **脚本按 jsoup 用 `result` 时（`result.size()` / `result.select(…)` / `result[i]`），
+ * 绑的东西是 Elements。** 这里按命中数分两种形态，因为窄的那一种只能这么给：
+ *
+ *   - 命中 **1** 个 → 绑字符串，沙箱的 `__boxHtml` 包成「字符串 + jsoup 方法」。
+ *     这份形态给得起两种写法（`result.split` 与 `result.select` 同时可用），
+ *     所以**既有的单值路径一点没动**
+ *   - 命中 **多个** → 绑数组，沙箱的 `__elemsFrom` 包成「数组形态的 Elements」：
+ *     能下标、能 `forEach`、有 `length`，集合级方法（`size()` / `select()` / `attr()`…）
+ *     挂在数组上；逐个元素是普通的 jsoup 元素（`e.attr()` / `e.text()`）
+ *
+ * 多命中在旧实现里绑的是**字符串数组**，`result.size is not a function` 直接报错
+ * （线上三处：⚡📂八一中文网 的 `if(!!result.size())`、🔞西瓜书屋 的
+ * `result.forEach(e => e.attr('href'))`、🔞紫云宫 的 `result.select("a")` + `result[i]`），
+ * 所以这条路上没有「本来就对」的行为可破坏。
+ *
+ * **脚本按字符串用（`result.split` / `String(result)` / `+ result`）时字符串优先**：
+ * 与 jsoup 方法写在一起的规则（`📂就去看网` 那种）两种都要，只有 `__boxHtml` 给得起。
  */
 function resultGlobals(code: string, values: string[]): Record<string, unknown> {
-    const value: unknown = resultWantsArray(code) ? values : values.join('\n')
+    const asJsoup = RESULT_AS_JSOUP.test(code)
+    const wantsJsoup = wantsJsoupResult(code)
+    // 按节点用时**一律绑数组**（哪怕只命中一个）：`forEach` / `[i]` / `length`
+    // 这些只有数组给得起，而命中数随页面浮动，绑两种形态就等于把「单页能跑、
+    // 多页崩」换成了「多页能跑、单页崩」。沙箱侧会把它包成「数组形态的 Elements」。
+    const value: unknown = wantsJsoup ? values : resultWantsArray(code) ? values : values.join('\n')
     return {
         result: value,
-        __resultAsJsoup: typeof value === 'string' && RESULT_AS_JSOUP.test(code),
+        // 上面两条分支里 `result` 要么是字符串、要么是要多命中的数组，两种都得包成
+        // jsoup 对象；「按字符串用、但脚本里也有 jsoup 方法」那一种（`__boxHtml`
+        // 给的是「字符串 + jsoup 方法」）同样要包。
+        // 所以判据是两者的并：要节点，或者脚本里出现过集合级方法名。
+        __resultAsJsoup: wantsJsoup || asJsoup,
     }
 }
 

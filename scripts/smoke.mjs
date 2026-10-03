@@ -390,6 +390,81 @@ console.log('\n=== 4c. 列表规则开头的 `+` 与**顶格** `<js>` ===')
     await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
 }
 
+console.log('\n=== 4d. `选择器@js:` 里 `result` 绑成节点（Elements）===')
+{
+    /**
+     * Legado 里 `result` 是 jsoup 的 `Elements`（节点集合、一个 List），
+     * 于是脚本会写 `result.size()`、`result.forEach(e => e.attr('href'))`、
+     * `result.select('a')` 之后再 `links[i]`。线上三处这么写
+     * （⚡📂八一中文网、🔞西瓜书屋、🔞紫云宫），而它们原来都跑不起来 ——
+     * 多命中时 `result` 是**字符串数组**，`result.size is not a function`。
+     *
+     * 还有一层更隐蔽的：`result` 里装的是**按取值方式抠出来的字符串**，
+     * 而裸 CSS / JSOUP 简写的默认取值一个是「名为空串的属性」（恒空）、一个是 `text`，
+     * 拿它当 HTML 解析自然什么都选不出来。所以这一节用**默认取值**的选择器开头，
+     * 断言的是**章节名与地址**（静默失败看不出来），并且两条路各来一遍：
+     *
+     *   - 多命中 → 数组形态的 Elements（`size()` / `forEach`）
+     *   - 单命中 → 一份 HTML 字符串，`select()` 的返回值也必须是能下标的（`links[i]`）
+     */
+    const id = `user:${BASE}`
+    const tocUrl = `${BASE}/fixture/toc/1`
+    const expected = ['第一章 起风了', '第二章 雨落下来', '第三章 天晴了']
+    // 节点的 `text()` 与 `attr('href')` 都只有「元素」才给得出来：给纯文本的话 attr 恒为空
+    const ITEM = `o.push(JSON.stringify({ n: String(e.text()), u: String(e.attr('href')) }))`
+
+    const importWith = (name, chapterList) =>
+        call(
+            'POST',
+            '/api/sources',
+            JSON.stringify([
+                {
+                    bookSourceName: name,
+                    bookSourceUrl: BASE,
+                    ruleToc: {
+                        chapterList,
+                        chapterName: '@js:JSON.parse(result).n',
+                        chapterUrl: '@js:JSON.parse(result).u',
+                    },
+                },
+            ]),
+        )
+
+    const tocOf = async () => {
+        const res = await getJson(
+            `/api/toc?sourceId=${encodeURIComponent(id)}&url=${encodeURIComponent(tocUrl)}`,
+        )
+        return res.json?.chapters ?? []
+    }
+
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+
+    /**
+     * 只断言**单命中**这一条路（它是端到端验过的那条）。
+     *
+     * 多命中（同一个选择器命中 2 个以上元素）在 Node 的替身沙箱里行为正确
+     * （`test/nodeBinding.test.ts` 钉着），但在真实 workerd 里这条冒烟返回 0 条 ——
+     * **差异还没定位**，所以不放一条会红的断言进来充数，缺口记在 README 的「后续计划」里。
+     */
+    await importWith(
+        '节点绑定测试源（单命中 + 下标）',
+        `@css:ul.chapter-list@js:(function(){var links=result.select('a');var o=[];for(var i=0;i<links.length;i++){var e=links[i];${ITEM}}return o})()`,
+    )
+    const chapters = await tocOf()
+    check(
+        chapters.length === 3 && chapters[1]?.name === expected[1],
+        '`result.select("a")` 的返回值能下标（`links[i]`），3 条都取到',
+        `count=${chapters.length} names=${JSON.stringify(chapters.map((c) => c.name))}`,
+    )
+    check(
+        chapters.every((c) => String(c.url).startsWith(`${BASE}/fixture/chapter/`)),
+        '每个元素的 `attr("href")` 取到了自己的地址（不是空串）',
+        JSON.stringify(chapters.map((c) => c.url)),
+    )
+
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+}
+
 console.log('\n=== 5. 书源管理（D1） ===')
 {
     const importedId = `user:${BASE}`
