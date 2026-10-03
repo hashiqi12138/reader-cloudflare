@@ -2554,10 +2554,26 @@ npm run db:migrate:remote   # 建线上表
 npm run deploy              # 需要先 npx wrangler login
 ```
 
+**顺序不能反。** 先部署、后迁移的话，新代码会打到还不存在的表上 ——
+表现不是「启动失败」，而是那几个接口在线上**直接 500**，而本地（表早就建好了）一切正常。
+这条不是假设：v0.16.0 发版时线上库一次补了三份迁移（`0008` / `0009` / `0010`），
+也就是说在此之前，书签、替换净化同步、笔记这三处接口在线上是坏的。
+发完之后确认一次：
+
+```bash
+npx wrangler deployments status --name reader-api   # 看当前跑的是哪个版本
+npx wrangler d1 execute reader-cloudflare --remote \
+  --command "SELECT group_concat(name, ', ') FROM sqlite_master WHERE type='table'"
+```
+
 **线上实例：<https://reader-api.liujieahu.workers.dev>**
 
 D1 库（`reader-cloudflare`，APAC）与线上表都建好了，Worker 已部署。
 换账号部署时先 `npx wrangler d1 create <名字>`，再把新的 `database_id` 填进 `wrangler.jsonc`。
+
+一处网络上的现实：**`*.workers.dev` 在部分网络下不可直连**（DNS 能解析出地址、
+443 连不上），所以发版后的自检未必能从本机打线上地址。这时用上面那两条命令从
+Cloudflare API 侧确认 —— 它们走 `api.cloudflare.com`，与 `*.workers.dev` 是两条路。
 
 ### 刚部署完是「空的」，这是对的
 
