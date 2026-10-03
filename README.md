@@ -2571,9 +2571,33 @@ npx wrangler d1 execute reader-cloudflare --remote \
 D1 库（`reader-cloudflare`，APAC）与线上表都建好了，Worker 已部署。
 换账号部署时先 `npx wrangler d1 create <名字>`，再把新的 `database_id` 填进 `wrangler.jsonc`。
 
-一处网络上的现实：**`*.workers.dev` 在部分网络下不可直连**（DNS 能解析出地址、
-443 连不上），所以发版后的自检未必能从本机打线上地址。这时用上面那两条命令从
-Cloudflare API 侧确认 —— 它们走 `api.cloudflare.com`，与 `*.workers.dev` 是两条路。
+一处网络上的现实：**`*.workers.dev` 在部分网络下不可直连**，而它拦的是**域名**、不是地址 ——
+所以「线上打不开」时先分清是网络还是部署，别急着改代码。
+
+三条判据，一条比一条确定：
+
+```powershell
+# 1) DNS 被污染：同一个域名在不同公共 DNS 上给出完全不同的地址，而且都是无关站点的段
+#    （实测拿到过 69.63.176.59 / 199.16.156.71 / 104.244.46.93 —— 都是 Twitter 的老段）
+Resolve-DnsName reader-api.liujieahu.workers.dev -Server 8.8.8.8 -Type A
+Resolve-DnsName reader-api.liujieahu.workers.dev -Server 223.5.5.5 -Type A
+
+# 2) TCP 能握手、TLS 立刻被 RST；换 IP、换 IPv4/IPv6 都一样
+curl.exe -sS -o NUL -w "%{http_code}" --resolve reader-api.liujieahu.workers.dev:443:104.16.132.229 https://reader-api.liujieahu.workers.dev/api/health
+
+# 3) 同一个网络里换成 api.cloudflare.com 就通 —— 说明拦的是域名，不是 Cloudflare 的地址
+curl.exe -sS -o NUL -w "%{http_code}" https://api.cloudflare.com/client/v4/user/tokens/verify
+```
+
+第 3 条是最关键的对照：本机到 Cloudflare 边缘本来是通的（`wrangler` 能部署、能查 D1 就是旁证），
+被拦下来的只是 `*.workers.dev` 这个域名。`hosts` 改地址、换 DNS 都救不了它 ——
+阻断发生在 TLS 的 SNI 上。三条出路：
+
+1. **绑自定义域名**（长期推荐）：域名托管在 Cloudflare 时，在 `wrangler.jsonc` 里加一行
+   `"routes": [{ "pattern": "read.你的域名", "custom_domain": true }]` 再 `npm run deploy`，
+   之后走自己的域名（国内可直连，除非那个域名本身被墙过）
+2. **走代理**：把流量包起来，阻断设备就看不到 SNI，代价是每次都要开
+3. **本地跑**：`npm run dev`，数据落在本地 D1 里，只在这台机器上用
 
 ### 刚部署完是「空的」，这是对的
 
