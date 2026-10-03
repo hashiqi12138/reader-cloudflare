@@ -1335,6 +1335,36 @@ body[data-reader='1'] main#view {
     overflow: auto;
     padding: var(--sp-3) var(--sp-3) var(--sp-4);
     -webkit-overflow-scrolling: touch;
+    /*
+     * 只留竖向滚动，把浏览器自己的双指缩放与双击缩放让出来 —— 阅读界面的字号由
+     * 双指捏合接管（见 public/js/zoom.js）。两层同时生效的话字会被放大两次，
+     * 而且页面本身也被缩放糊掉。
+     * 横向滑动不受影响：翻页是我们自己的 touch 监听在做，与原生手势无关。
+     */
+    touch-action: pan-y;
+}
+
+/*
+ * 字号提示
+ *
+ * 捏合与 Ctrl/⌘+滚轮都不经过设置面板，得有个自己的反馈：用户要知道「现在几号字」，
+ * 也要知道「是不是已经到上限了」。颜色跟着主题反转（浅色主题是深底浅字），
+ * 所以四种纸色 + 深色主题下都读得清。
+ */
+.reader-zoom-hud {
+    position: fixed;
+    left: 50%;
+    top: calc(14px + env(safe-area-inset-top));
+    transform: translateX(-50%);
+    z-index: 45;
+    padding: 5px 14px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--ink) 80%, transparent);
+    color: var(--paper);
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+    backdrop-filter: blur(6px);
+    pointer-events: none;
 }
 
 /* 翻页模式：正文用多列排版，一列就是一页 */

@@ -34,6 +34,14 @@ import {
 import { applyRules, loadRules, PRESET_RULES, saveRules, makeRule } from './replace.js'
 import { excerptAround, normalizeQuery, splitByQuery } from './search.js'
 import { addBook, inShelf, loadShelf } from './views.js'
+import {
+    DEFAULT_FONT_SIZE,
+    clampFontSize,
+    fontSizeFromPinch,
+    fontSizeFromWheel,
+    stepFontSize,
+    touchDistance,
+} from './zoom.js'
 
 /** 一章的目录缓存：翻页时不该重新拉目录 */
 let bookCache = null
@@ -195,6 +203,15 @@ export async function viewRead(host) {
         }),
     ])
 
+    /**
+     * 字号提示
+     *
+     * 捏合与 Ctrl+滚轮都不经过设置面板，所以要有一个自己的反馈 ——
+     * 否则用户只知道「字变了」，不知道变到了几号、也不知道到底到没到上下限。
+     * 固定在上方居中，900ms 后自己消失（不挡住正在读的那一屏）。
+     */
+    const zoomHud = el('div', { class: 'reader-zoom-hud', hidden: true })
+
     const shell = el('div', { class: 'reader-shell' }, [
         topBar,
         body,
@@ -214,6 +231,7 @@ export async function viewRead(host) {
                 onclick: () => openChapter(index + 1, 'first'),
             }),
         ]),
+        zoomHud,
     ])
 
     host.replaceChildren(shell)
@@ -421,9 +439,52 @@ export async function viewRead(host) {
         applyPage(true, step < 0 ? 'prev' : 'next')
     }
 
+    // ---- 字号缩放 ----
+
+    /** 设置面板里那个「19px」。面板没开时为 null，改字号时顺手让它跟上 */
+    let fontLabel = null
+    let zoomHudTimer = 0
+
+    function showZoomHud(size) {
+        zoomHud.textContent = `${size}px`
+        zoomHud.hidden = false
+        clearTimeout(zoomHudTimer)
+        zoomHudTimer = setTimeout(() => {
+            zoomHud.hidden = true
+        }, 900)
+    }
+
+    /**
+     * 改字号 —— 四个入口共用这里
+     *
+     * 设置面板的 A- / A+、双指捏合、Ctrl/⌘ + 滚轮、键盘 `+` / `-` / `0`。
+     * 「写偏好 + 重新分页 + 面板上的数字跟上 + 弹一下提示」只写一遍，
+     * 否则四条路各漏一样，表现还各不相同。
+     *
+     * 尺寸没变（捏到上下限）时**也给提示**：不给的话用户会以为手势没生效，
+     * 反复捏几次然后来提 bug。
+     */
+    function setFontSize(next, options = {}) {
+        const size = clampFontSize(next)
+        if (size !== clampFontSize(prefs.get('fontSize'))) {
+            prefs.set('fontSize', size)
+            relayout()
+            if (fontLabel) fontLabel.textContent = `${size}px`
+        }
+        if (options.notify) showZoomHud(size)
+    }
+
     // ---- 手势与快捷键 ----
 
     let touchStart = null
+
+    /** 双指捏合的状态：手势开始时的字号与两指距离（见 zoom.js 的说明） */
+    let pinch = null
+    let pinchFrame = 0
+    let pinchPending = 0
+
+    /** Ctrl/⌘+滚轮里「还没用掉的累积量」，触控板的小增量靠它攒（见 zoom.js） */
+    let wheelCarry = 0
 
     body.addEventListener(
         'click',
@@ -442,14 +503,54 @@ export async function viewRead(host) {
     body.addEventListener(
         'touchstart',
         (event) => {
+            // 两根手指 = 捏合缩放。单指才是滑动翻页，所以捏合期间要把 touchStart 清掉，
+            // 否则「捏一下」会顺带翻一页
+            if (event.touches.length === 2) {
+                pinch = {
+                    startSize: clampFontSize(prefs.get('fontSize')),
+                    startDistance: touchDistance(event.touches),
+                }
+                touchStart = null
+                return
+            }
             const touch = event.changedTouches[0]
             touchStart = { x: touch.clientX, y: touch.clientY, at: Date.now() }
         },
         { passive: true },
     )
+
+    /**
+     * 捏合过程中的重排按帧节流
+     *
+     * `touchmove` 一帧能来十几个，每次都 `measure()` + 重新分页会明显卡顿；
+     * 而字号已经取整，多数帧算出来的值是一样的，本来也不必重排。
+     */
+    body.addEventListener(
+        'touchmove',
+        (event) => {
+            if (!pinch || event.touches.length !== 2) return
+            pinchPending = fontSizeFromPinch(
+                pinch.startSize,
+                pinch.startDistance,
+                touchDistance(event.touches),
+            )
+            if (pinchFrame) return
+            pinchFrame = requestAnimationFrame(() => {
+                pinchFrame = 0
+                setFontSize(pinchPending, { notify: true })
+            })
+        },
+        { passive: true },
+    )
+
+    const endPinch = () => {
+        pinch = null
+        wheelCarry = 0
+    }
     body.addEventListener(
         'touchend',
         (event) => {
+            if (event.touches.length === 0) endPinch()
             if (!touchStart) return
             const touch = event.changedTouches[0]
             const dx = touch.clientX - touchStart.x
@@ -461,6 +562,33 @@ export async function viewRead(host) {
             touchStart = null
         },
         { passive: true },
+    )
+    body.addEventListener('touchcancel', endPinch, { passive: true })
+
+    /**
+     * Ctrl/⌘ + 滚轮缩放字号
+     *
+     * 必须 `preventDefault`，否则浏览器的整页缩放会同时生效（字大了、界面也糊了）。
+     * 桌面端触控板的「捏合」在浏览器里就是这条路径 —— 带着 `ctrlKey` 的 wheel 事件 ——
+     * 所以两种手势在这一段汇合。
+     *
+     * 监听挂在 `shell` 上而不是 `window`：只接管阅读界面里的滚轮，出了这一屏不该拦。
+     */
+    shell.addEventListener(
+        'wheel',
+        (event) => {
+            if (!event.ctrlKey && !event.metaKey) return
+            event.preventDefault()
+            const result = fontSizeFromWheel(
+                clampFontSize(prefs.get('fontSize')),
+                event.deltaY,
+                wheelCarry,
+                event.deltaMode,
+            )
+            wheelCarry = result.carry
+            setFontSize(result.size, { notify: true })
+        },
+        { passive: false },
     )
 
     const onKey = (event) => {
@@ -478,6 +606,17 @@ export async function viewRead(host) {
         } else if (event.key === 'ArrowUp' && mode === 'page') {
             event.preventDefault()
             turn(-1)
+        } else if (event.key === '=' || event.key === '+') {
+            // `+` 在多数键盘上是 Shift+`=`，所以两种情况都要认
+            event.preventDefault()
+            setFontSize(stepFontSize(prefs.get('fontSize'), 1), { notify: true })
+        } else if (event.key === '-' || event.key === '_') {
+            event.preventDefault()
+            setFontSize(stepFontSize(prefs.get('fontSize'), -1), { notify: true })
+        } else if (event.key === '0') {
+            // 恢复默认字号。不占用带修饰键的组合：读书时手上没有别的事
+            event.preventDefault()
+            setFontSize(DEFAULT_FONT_SIZE, { notify: true })
         } else if (event.key === 'Escape') {
             // 面板开着就关面板，没开就什么也不做（不要顺手退出阅读）
             activeSheetClose?.()
@@ -1063,21 +1202,25 @@ export async function viewRead(host) {
             ]),
         )
 
+        /**
+         * 字号
+         *
+         * 这里的按钮不再自己写偏好、也不再重开面板：走 `setFontSize` 那条共用的路，
+         * 它会顺手把这个数字刷新掉（`fontLabel`）。早先是「改偏好 → openSettings() 重建面板」，
+         * 那个写法在捏合那类高频改动下会一直重建 DOM。
+         */
+        fontLabel = el('span', { class: 'muted', text: `${prefs.get('fontSize')}px` })
         rows.push(
             el('div', { class: 'setting-row' }, [
                 el('span', { text: '字号' }),
                 el('div', { class: 'segmented' }, [
-                    segmented('A-', false, () => {
-                        prefs.set('fontSize', Number(prefs.get('fontSize')) - 1)
-                        openSettings()
-                        relayout()
-                    }),
-                    el('span', { class: 'muted', text: `${prefs.get('fontSize')}px` }),
-                    segmented('A+', false, () => {
-                        prefs.set('fontSize', Number(prefs.get('fontSize')) + 1)
-                        openSettings()
-                        relayout()
-                    }),
+                    segmented('A-', false, () =>
+                        setFontSize(stepFontSize(prefs.get('fontSize'), -1), { notify: true }),
+                    ),
+                    fontLabel,
+                    segmented('A+', false, () =>
+                        setFontSize(stepFontSize(prefs.get('fontSize'), 1), { notify: true }),
+                    ),
                 ]),
             ]),
         )
