@@ -14,10 +14,20 @@
  */
 
 /** 每片默认放几个书源。拿不准就取小一点：多劈一次比整片超时便宜 */
-export const SEARCH_SLICE_SIZE = 6
+export const SEARCH_SLICE_SIZE = 4
 
-/** 同时最多几个片在飞。免费计划有每日请求上限，别开大 */
-export const SEARCH_CONCURRENCY = 3
+/** 同时最多几个片在飞。线上实测并发高了会把 CPU 的弹性额度很快吃光 */
+export const SEARCH_CONCURRENCY = 2
+
+/**
+ * 每片之间歇一下（毫秒）
+ *
+ * 线上实测的形态很清楚：连着发请求时，**前几片连 226 ms CPU 都能过**，
+ * 之后连 10 ms 都被掐。也就是说 Cloudflare 对偶发超限是有弹性的，
+ * 但「持续超」会被直接终止 —— 弹性额度会被连续请求吃光。
+ * 所以宁可慢一点，也要把请求频率压下来。
+ */
+export const SEARCH_GAP_MS = 250
 
 /** 把 id 列表切成片；空列表得到空数组 */
 export function planSlices(ids, size = SEARCH_SLICE_SIZE) {
@@ -48,6 +58,12 @@ export function isCpuLimitError(err) {
     return text.includes('exceeded') || text.includes('CPU')
 }
 
+/** 歇一下；0 就直接往下走，不留一个多余的微任务 */
+function pause(ms) {
+    if (ms <= 0) return Promise.resolve()
+    return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
 /**
  * 并发池
  *
@@ -61,6 +77,7 @@ export async function runPool(tasks, worker, options = {}) {
     if (queue.length === 0) return results
 
     const concurrency = Math.max(1, Math.floor(options.concurrency ?? SEARCH_CONCURRENCY) || 1)
+    const gapMs = Math.max(0, Math.floor(options.gapMs ?? SEARCH_GAP_MS) || 0)
 
     const takeOne = async () => {
         for (;;) {
@@ -73,12 +90,14 @@ export async function runPool(tasks, worker, options = {}) {
                 const retry = options.onError ? options.onError(err, task) : null
                 if (Array.isArray(retry) && retry.length > 0) {
                     queue.push(...retry)
+                    await pause(gapMs)
                     continue
                 }
                 entry = { task, ok: false, error: err }
             }
             results.push(entry)
             if (options.onSettled) options.onSettled(entry, results)
+            await pause(gapMs)
         }
     }
 

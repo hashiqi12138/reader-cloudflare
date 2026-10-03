@@ -1249,124 +1249,145 @@ export async function viewSearch(host) {
             return
         }
 
-        const settled = await runPool(
+        const entries = await loadShelf()
+        const perSource = []
+
+        /**
+         * 边搜边画
+         *
+         * 分片之后一次搜索是几十个请求，等全部跑完再画的话界面要空着几十秒
+         * （而且线上有一部分片注定会被 CPU 限额掐掉，全等完等于白等）。
+         * 每片回来就重画一次，用户看到的是结果在往下长；重画本身有成本
+         * （要重新合并、重建卡片），所以按 200 ms 节流，最后再补一次强制渲染。
+         */
+        let lastPaint = 0
+        const paint = (force) => {
+            const now = Date.now()
+            if (!force && now - lastPaint < 200) return
+            lastPaint = now
+
+            const data = {
+                keyword,
+                sourceCount: enabled.length,
+                totalBooks: perSource.reduce((sum, per) => sum + (per.count ?? 0), 0),
+                sources: perSource,
+            }
+
+            /**
+             * **按书合并**，而不是按书源分块列出来
+             *
+             * 按源分块的话，同一本书在十几个源上出现十几次（真实安装里搜一个热词就是一整页
+             * 重复）；而且源越多越严重 —— 加源本来是为了「多几条路能读到书」，
+             * 结果反而让搜索结果更难用。合并之后一条卡片代表一本书，
+             * 主源进详情页、那里再换源（见下方 rememberMerged）。
+             */
+            const succeeded = (data.sources ?? []).filter(
+                (per) => per.ok && (per.books ?? []).length > 0,
+            )
+            const merged = mergeBooks(succeeded, {
+                // 已经在书架里的那一源优先 —— 从搜索点进去就是上次读的那个源
+                prefer: (sourceId, book) => inShelf(entries, sourceId, book.bookUrl),
+            })
+            rememberMerged(merged)
+
+            const blocks = [
+                el('p', {
+                    class: 'muted',
+                    text:
+                        `已搜 ${data.sources.length}/${data.sourceCount} 个书源，` +
+                        `命中 ${data.totalBooks} 本；按书合并后是 ${merged.length} 本`,
+                }),
+            ]
+            const failed = []
+
+            for (const per of data.sources ?? []) {
+                if (!per.ok) failed.push(`${per.sourceName}：${per.error ?? '未知错误'}`)
+            }
+
+            if (merged.length > 0) {
+                const grid = el('div', { class: 'grid' })
+                for (const item of merged) {
+                    const preferred = item.preferred
+                    grid.append(
+                        bookCard({ ...item, bookUrl: preferred.book.bookUrl }, preferred.sourceId, {
+                            entries,
+                            // 一条卡片背后可能有很多源，任一源加过就算已在书架
+                            savedAny: item.sources.map((source) => ({
+                                sourceId: source.sourceId,
+                                bookUrl: source.book.bookUrl,
+                            })),
+                            sourceLabel:
+                                item.sources.length > 1
+                                    ? `${item.sources.length} 个书源`
+                                    : preferred.sourceName,
+                            onRead: () =>
+                                go(
+                                    readUrl(
+                                        preferred.sourceId,
+                                        preferred.book.bookUrl,
+                                        item.name,
+                                        item.author,
+                                        0,
+                                    ),
+                                ),
+                        }),
+                    )
+                }
+                blocks.push(grid)
+            } else if (data.sources.length < data.sourceCount) {
+                // 还在搜：这时候说「没搜到」是错的 —— 后面的片可能带着结果回来
+                blocks.push(skeletonList(2, 'grid'))
+            } else {
+                blocks.push(
+                    emptyState(
+                        '没搜到',
+                        '换个关键词试试；也可以到「书源」里看看启用的源是不是都被停用了。',
+                    ),
+                )
+            }
+
+            if (failed.length > 0) {
+                blocks.push(
+                    el('details', { class: 'failures' }, [
+                        el('summary', { text: `${failed.length} 个书源搜索失败` }),
+                        el(
+                            'ul',
+                            {},
+                            failed.map((line) => el('li', { text: line })),
+                        ),
+                    ]),
+                )
+            }
+            resultHost.replaceChildren(...blocks)
+        }
+
+        await runPool(
             planSlices(enabled, SEARCH_SLICE_SIZE),
             (slice) => postJson('/api/search', { keyword, sourceIds: slice }),
             {
                 concurrency: SEARCH_CONCURRENCY,
                 onError: (err, slice) => (isCpuLimitError(err) ? halveSlice(slice) : null),
+                onSettled: (entry) => {
+                    if (entry.ok) {
+                        perSource.push(...(entry.value.sources ?? []))
+                    } else {
+                        perSource.push({
+                            sourceId: entry.task[0] ?? '',
+                            sourceName:
+                                entry.task.length === 1
+                                    ? String(entry.task[0] ?? '未知书源')
+                                    : `${entry.task.length} 个书源（同批）`,
+                            ok: false,
+                            count: 0,
+                            error: entry.error?.message ?? String(entry.error),
+                        })
+                    }
+                    paint(false)
+                },
             },
         )
-
-        // 摊平成原来那种「一个源一条」的形状，下面的渲染逻辑一行都不用改
-        const perSource = []
-        for (const entry of settled) {
-            if (entry.ok) {
-                perSource.push(...(entry.value.sources ?? []))
-                continue
-            }
-            perSource.push({
-                sourceId: entry.task[0] ?? '',
-                sourceName:
-                    entry.task.length === 1
-                        ? String(entry.task[0] ?? '未知书源')
-                        : `${entry.task.length} 个书源（同批）`,
-                ok: false,
-                count: 0,
-                error: entry.error?.message ?? String(entry.error),
-            })
-        }
-
-        const data = {
-            keyword,
-            sourceCount: enabled.length,
-            totalBooks: perSource.reduce((sum, per) => sum + (per.count ?? 0), 0),
-            sources: perSource,
-        }
-
-        const entries = await loadShelf()
-
-        /**
-         * **按书合并**，而不是按书源分块列出来
-         *
-         * 按源分块的话，同一本书在十几个源上出现十几次（真实安装里搜一个热词就是一整页
-         * 重复）；而且源越多越严重 —— 加源本来是为了「多几条路能读到书」，
-         * 结果反而让搜索结果更难用。合并之后一条卡片代表一本书，
-         * 主源进详情页、那里再换源（见下方 rememberMerged）。
-         */
-        const succeeded = (data.sources ?? []).filter(
-            (per) => per.ok && (per.books ?? []).length > 0,
-        )
-        const merged = mergeBooks(succeeded, {
-            // 已经在书架里的那一源优先 —— 从搜索点进去就是上次读的那个源
-            prefer: (sourceId, book) => inShelf(entries, sourceId, book.bookUrl),
-        })
-        rememberMerged(merged)
-
-        const blocks = [
-            el('p', {
-                class: 'muted',
-                text: `命中 ${data.totalBooks} 本，来自 ${data.sourceCount} 个书源；按书合并后是 ${merged.length} 本`,
-            }),
-        ]
-        const failed = []
-
-        for (const per of data.sources ?? []) {
-            if (!per.ok) failed.push(`${per.sourceName}：${per.error ?? '未知错误'}`)
-        }
-
-        if (merged.length > 0) {
-            const grid = el('div', { class: 'grid' })
-            for (const item of merged) {
-                const preferred = item.preferred
-                grid.append(
-                    bookCard({ ...item, bookUrl: preferred.book.bookUrl }, preferred.sourceId, {
-                        entries,
-                        // 一条卡片背后可能有很多源，任一源加过就算已在书架
-                        savedAny: item.sources.map((source) => ({
-                            sourceId: source.sourceId,
-                            bookUrl: source.book.bookUrl,
-                        })),
-                        sourceLabel:
-                            item.sources.length > 1
-                                ? `${item.sources.length} 个书源`
-                                : preferred.sourceName,
-                        onRead: () =>
-                            go(
-                                readUrl(
-                                    preferred.sourceId,
-                                    preferred.book.bookUrl,
-                                    item.name,
-                                    item.author,
-                                    0,
-                                ),
-                            ),
-                    }),
-                )
-            }
-            blocks.push(grid)
-        } else {
-            blocks.push(
-                emptyState(
-                    '没搜到',
-                    '换个关键词试试；也可以到「书源」里看看启用的源是不是都被停用了。',
-                ),
-            )
-        }
-
-        if (failed.length > 0) {
-            blocks.push(
-                el('details', { class: 'failures' }, [
-                    el('summary', { text: `${failed.length} 个书源搜索失败` }),
-                    el(
-                        'ul',
-                        {},
-                        failed.map((line) => el('li', { text: line })),
-                    ),
-                ]),
-            )
-        }
-        resultHost.replaceChildren(...blocks)
+        // 最后一片多半会被上面的节流吞掉，这里补一次强制的
+        paint(true)
     }
 
     if (lastKeyword !== '') await run()

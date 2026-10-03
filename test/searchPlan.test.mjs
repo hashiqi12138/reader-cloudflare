@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest'
-import { halveSlice, isCpuLimitError, planSlices, runPool } from '../public/js/searchPlan.js'
+import {
+    SEARCH_CONCURRENCY,
+    SEARCH_GAP_MS,
+    SEARCH_SLICE_SIZE,
+    halveSlice,
+    isCpuLimitError,
+    planSlices,
+    runPool,
+} from '../public/js/searchPlan.js'
 
 describe('planSlices', () => {
     it('按片大小切开，最后一片可以更短', () => {
@@ -58,6 +66,25 @@ describe('isCpuLimitError', () => {
     })
 })
 
+/**
+ * 默认值本身也要钉住
+ *
+ * 线上实测：连着发请求时前几片连 226 ms CPU 都能过，之后连 10 ms 都被掐。
+ * 所以这三个默认值是「宁可慢」的取向，调大它们之前先回看「第二十六轮」。
+ */
+describe('默认参数', () => {
+    it('片大小与并发都在保守区间里', () => {
+        expect(SEARCH_SLICE_SIZE).toBeGreaterThan(0)
+        expect(SEARCH_SLICE_SIZE).toBeLessThanOrEqual(8)
+        expect(SEARCH_CONCURRENCY).toBeGreaterThanOrEqual(1)
+        expect(SEARCH_CONCURRENCY).toBeLessThanOrEqual(3)
+    })
+
+    it('片之间默认要歇一下（靠它把请求频率压下来）', () => {
+        expect(SEARCH_GAP_MS).toBeGreaterThan(0)
+    })
+})
+
 describe('runPool', () => {
     it('并发不超过 concurrency', async () => {
         let flying = 0
@@ -70,7 +97,7 @@ describe('runPool', () => {
                 await new Promise((resolve) => setTimeout(resolve, 5))
                 flying -= 1
             },
-            { concurrency: 2 },
+            { concurrency: 2, gapMs: 0 },
         )
         expect(peak).toBe(2)
     })
@@ -90,6 +117,7 @@ describe('runPool', () => {
             },
             {
                 concurrency: 1,
+                gapMs: 0,
                 onError: (err, slice) => (isCpuLimitError(err) ? halveSlice(slice) : null),
             },
         )
@@ -102,13 +130,14 @@ describe('runPool', () => {
     it('劈到单片还是失败就收手，不会无限重试', async () => {
         const results = await runPool(
             [[1, 2]],
-            async (slice) => {
+            async () => {
                 throw Object.assign(new Error('Worker exceeded CPU time limit.'), {
                     status: 503,
                 })
             },
             {
                 concurrency: 1,
+                gapMs: 0,
                 onError: (err, slice) => (isCpuLimitError(err) ? halveSlice(slice) : null),
             },
         )
@@ -121,6 +150,7 @@ describe('runPool', () => {
         let settled = 0
         const results = await runPool(['a', 'b', 'c'], async (task) => task, {
             concurrency: 2,
+            gapMs: 0,
             onSettled: () => (settled += 1),
         })
         expect(settled).toBe(3)
@@ -129,5 +159,12 @@ describe('runPool', () => {
 
     it('空任务列表直接返回空结果', async () => {
         expect(await runPool([], async () => {})).toEqual([])
+    })
+
+    it('gapMs 真的让每片之间歇一下', async () => {
+        const started = Date.now()
+        await runPool(['a', 'b', 'c'], async (task) => task, { concurrency: 1, gapMs: 40 })
+        // 三片两次间隔，留足容差（CI 上定时器不精确）
+        expect(Date.now() - started).toBeGreaterThanOrEqual(60)
     })
 })
