@@ -2574,7 +2574,7 @@ D1 库（`reader-cloudflare`，APAC）与线上表都建好了，Worker 已部�
 一处网络上的现实：**`*.workers.dev` 在部分网络下不可直连**，而它拦的是**域名**、不是地址 ——
 所以「线上打不开」时先分清是网络还是部署，别急着改代码。
 
-三条判据，一条比一条确定：
+四处判据，一条比一条确定：
 
 ```powershell
 # 1) DNS 被污染：同一个域名在不同公共 DNS 上给出完全不同的地址，而且都是无关站点的段
@@ -2587,17 +2587,31 @@ curl.exe -sS -o NUL -w "%{http_code}" --resolve reader-api.liujieahu.workers.dev
 
 # 3) 同一个网络里换成 api.cloudflare.com 就通 —— 说明拦的是域名，不是 Cloudflare 的地址
 curl.exe -sS -o NUL -w "%{http_code}" https://api.cloudflare.com/client/v4/user/tokens/verify
+
+# 4) 反过来，拿 Cloudflare 上别的站点做对照（digitalocean / shopify 都实测 200）
+curl.exe -sS -o NUL -w "%{http_code}" https://www.digitalocean.com/
 ```
 
-第 3 条是最关键的对照：本机到 Cloudflare 边缘本来是通的（`wrangler` 能部署、能查 D1 就是旁证），
-被拦下来的只是 `*.workers.dev` 这个域名。`hosts` 改地址、换 DNS 都救不了它 ——
-阻断发生在 TLS 的 SNI 上。三条出路：
+第 3、4 条是最关键的对照：本机到 Cloudflare 边缘本来是通的（`wrangler` 能部署、能查 D1 也是旁证），
+被拦下来的只是**那几个域名**。`hosts` 改地址、换 DNS 都救不了它 —— 阻断发生在 TLS 的 SNI 上。
+
+**换上自家域名之前先测一测**：域名一旦被拉黑过（哪怕只是曾经用作别的用途），
+绑上去照样是 RST —— 实测过一个 active 的 Cloudflare 域名，橙云解析正常、
+`--resolve` 到 Cloudflare 边界 IP 也照样被 RST，而同一时刻 `www.digitalocean.com` 是 200。
+判据很简单：`curl.exe -sS -o NUL -w "%{http_code}" https://你的域名/`，
+要的是「TLS 能完成」，返回 403 / 404 都算通，000 加 `Connection was reset` 就是被拉黑了。
+
+四条出路：
 
 1. **绑自定义域名**（长期推荐）：域名托管在 Cloudflare 时，在 `wrangler.jsonc` 里加一行
-   `"routes": [{ "pattern": "read.你的域名", "custom_domain": true }]` 再 `npm run deploy`，
-   之后走自己的域名（国内可直连，除非那个域名本身被墙过）
+   `"routes": [{ "pattern": "read.你的域名", "custom_domain": true }]` 再 `npm run deploy`；
+   前提是那域名**没被拉黑过**（见上一条）
 2. **走代理**：把流量包起来，阻断设备就看不到 SNI，代价是每次都要开
 3. **本地跑**：`npm run dev`，数据落在本地 D1 里，只在这台机器上用
+4. **局域网**：`npx wrangler dev --ip 0.0.0.0 --port 8787`，手机连同一个 WiFi 打开
+   `http://<本机局域网 IP>:8787` —— 公网一时打不通时最快能继续用的办法。
+   一个坑：网络被 Windows 识别成「公用」时，程序级入站规则里的 Block 会盖过 Allow
+   （`Get-NetFirewallRule` 里的 `action=Block` 那两条），表现是电脑自己能开、手机连不上
 
 ### 刚部署完是「空的」，这是对的
 
