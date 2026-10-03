@@ -422,6 +422,10 @@ export async function viewAccount(host) {
             class: 'muted tiny',
             text: '导入是「只增不改」：书架里已有的不动；阅读进度按谁更新取，所以旧备份不会把读到的新章节倒回去；同一份文件导两次也不会变两倍。',
         }),
+        el('p', {
+            class: 'muted tiny',
+            text: '替换净化规则不在备份里（它整份存在本机，改一条要立刻重排正文）。要把它带到别的设备，去阅读界面的「显示设置 → 替换净化 → 账号同步」上传 / 取回。',
+        }),
         backupSubmit,
         backupStatus,
     )

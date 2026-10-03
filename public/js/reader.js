@@ -21,6 +21,7 @@ import {
     alertBox,
     api,
     append,
+    currentUser,
     el,
     go,
     PAPERS,
@@ -32,6 +33,14 @@ import {
     toast,
 } from './core.js'
 import { applyRules, loadRules, PRESET_RULES, saveRules, makeRule } from './replace.js'
+import {
+    describeRules,
+    fetchRemoteRules,
+    loadSyncBase,
+    pushRemoteRules,
+    saveSyncBase,
+    syncState,
+} from './replaceSync.js'
 import { excerptAround, normalizeQuery, splitByQuery } from './search.js'
 import { addBook, inShelf, loadShelf } from './views.js'
 import {
@@ -1597,6 +1606,7 @@ export async function viewRead(host) {
                     text: editing >= 0 ? '编辑规则' : '新增规则',
                 }),
                 form,
+                buildSyncBlock(),
                 el('button', {
                     class: 'btn ghost sm',
                     text: '返回显示设置',
@@ -1604,6 +1614,222 @@ export async function viewRead(host) {
                 }),
             ]),
         )
+    }
+
+    /**
+     * 「账号同步」这一块
+     *
+     * 两个动作，都要用户按下才动：上传 / 取回。**不自动同步**，也不「最后写入者胜」——
+     * 自动同步意味着某个时刻要决定谁覆盖谁，而那个时刻用户看不见；
+     * 规则是几十条手写正则，安静地丢掉另一次编辑是最贵的错（理由见 `src/data/replaceRules.ts`）。
+     *
+     * 所以撞版本时（服务端 409 会把现在那份附在响应体里）这里停下来，
+     * 把两边各有多少条摊开，让用户选「取回」还是「我就是要覆盖」。
+     *
+     * 未登录时不发请求：`/api/replace` 的 401 会被全局当成「会话失效」，
+     * 一路把用户推到登录页。这条分支现在**走不到** —— 整个应用（阅读界面在内）
+     * 只在登录之后才渲染（见 `app.js` 的路由），走查时确认过。
+     * 留着是因为它只花几行，而一旦以后放开匿名阅读，缺了它的表现是
+     * 「一打开显示设置就被踢走」，与「读得好好的」差得很远。
+     */
+    function buildSyncBlock() {
+        const statusHost = el('div', { class: 'rule-sync-status' })
+        const actions = el('div', { class: 'row' })
+
+        if (!currentUser()) {
+            statusHost.replaceChildren(
+                el('p', {
+                    class: 'muted tiny',
+                    text: '规则现在只存在这台设备上。登录之后可以上传到账号，别的设备就能取回。',
+                }),
+            )
+            actions.replaceChildren(
+                el('button', {
+                    class: 'btn ghost sm',
+                    text: '去登录',
+                    onclick: () => go('#/login'),
+                }),
+            )
+            return el('div', { class: 'rule-sync' }, [
+                el('div', { class: 'rule-add-title', text: '账号同步' }),
+                statusHost,
+                actions,
+            ])
+        }
+
+        const pushBtn = el('button', {
+            class: 'btn ghost sm',
+            text: '上传到账号',
+            onclick: () => void push(loadSyncBase()),
+        })
+        const pullBtn = el('button', {
+            class: 'btn ghost sm',
+            text: '从账号取回',
+            onclick: () => void pull(),
+        })
+        actions.replaceChildren(pushBtn, pullBtn)
+        statusHost.replaceChildren(el('p', { class: 'muted tiny', text: '正在读取账号上的规则…' }))
+
+        /** 账号上那一份。null = 还没读到 */
+        let remote = null
+
+        function busy(on, label) {
+            pushBtn.disabled = on
+            pullBtn.disabled = on
+            pushBtn.textContent = label === 'push' && on ? '上传中…' : '上传到账号'
+            pullBtn.textContent = label === 'pull' && on ? '取回中…' : '从账号取回'
+        }
+
+        function render() {
+            if (remote === null) return
+            const local = loadRules()
+            const state = syncState(remote, loadSyncBase())
+            if (state === 'remote-empty') {
+                statusHost.replaceChildren(
+                    el('p', {
+                        class: 'muted tiny',
+                        text: `账号上还没有这份规则。本机 ${describeRules(local)}，点「上传到账号」存过去。`,
+                    }),
+                )
+                return
+            }
+            const when = relativeTime(remote.updatedAt)
+            if (local.length === 0) {
+                // 新设备上最常见的一步：本机是空的，账号上有，取回就完事
+                statusHost.replaceChildren(
+                    el('p', {
+                        class: 'muted tiny',
+                        text: `本机还没有规则，账号上有 ${describeRules(remote.rules)}（更新于${when}）。点「从账号取回」。`,
+                    }),
+                )
+                return
+            }
+            statusHost.replaceChildren(
+                el('p', {
+                    class: 'muted tiny',
+                    text:
+                        `本机 ${describeRules(local)}，账号 ${describeRules(remote.rules)}（更新于${when}）。` +
+                        (state === 'moved'
+                            ? '账号上那份之后又变过，上传前会先让你确认。'
+                            : '两边是同一个版本，可以放心上传。'),
+                }),
+            )
+        }
+
+        async function refresh() {
+            try {
+                remote = await fetchRemoteRules()
+                render()
+            } catch (err) {
+                statusHost.replaceChildren(alertBox('error', '没能读取账号上的规则', err.message))
+            }
+        }
+
+        /** 用账号那一份替换本机。调用方必须先确认过 */
+        function takeRemote(server) {
+            saveRules(server.rules)
+            saveSyncBase(server.updatedAt)
+            relayoutAfterPurify()
+            // 本机那份换了，这个面板整个重建（列表、预览、按钮状态都跟着变）
+            openReplaceRules()
+            toast(`已取回 ${server.rules.length} 条规则`)
+        }
+
+        async function push(baseUpdatedAt) {
+            busy(true, 'push')
+            statusHost.replaceChildren()
+            try {
+                const result = await pushRemoteRules(loadRules(), baseUpdatedAt)
+                saveSyncBase(result.updatedAt)
+                remote = { rules: loadRules(), updatedAt: Number(result.updatedAt ?? 0) }
+                toast(`已上传 ${remote.rules.length} 条规则到账号`)
+                render()
+            } catch (err) {
+                if (err.code === 'replace_rules_conflict' && err.body?.server) {
+                    showConflict(err.body.server)
+                } else {
+                    statusHost.replaceChildren(alertBox('error', '没能上传', err.message))
+                }
+            } finally {
+                busy(false)
+            }
+        }
+
+        async function pull() {
+            busy(true, 'pull')
+            statusHost.replaceChildren()
+            try {
+                const server = await fetchRemoteRules()
+                remote = server
+                if (server.updatedAt === 0) {
+                    render()
+                    return
+                }
+                const local = loadRules()
+                if (
+                    local.length > 0 &&
+                    !confirm(
+                        `用账号上那份（${describeRules(server.rules)}）替换本机这份（${describeRules(local)}）？` +
+                            '本机的规则会被覆盖。',
+                    )
+                ) {
+                    render()
+                    return
+                }
+                takeRemote(server)
+            } catch (err) {
+                statusHost.replaceChildren(alertBox('error', '没能取回', err.message))
+            } finally {
+                busy(false)
+            }
+        }
+
+        /** 撞版本：不替用户决定，把两边摆出来 */
+        function showConflict(server) {
+            const when = relativeTime(server.updatedAt)
+            statusHost.replaceChildren(
+                alertBox(
+                    'error',
+                    '账号上那份更新过',
+                    `账号上现在有 ${describeRules(server.rules)}（更新于${when}）。直接上传会把它覆盖掉，所以先停下问你一句。`,
+                ),
+                el('div', { class: 'row' }, [
+                    el('button', {
+                        class: 'btn primary sm',
+                        text: '改用账号那份',
+                        title: '本机规则换成账号上那一份',
+                        onclick: () => {
+                            if (!confirm(`本机这${describeRules(loadRules())}会被替换掉，继续？`))
+                                return
+                            takeRemote(server)
+                        },
+                    }),
+                    el('button', {
+                        class: 'btn ghost sm',
+                        text: '仍用本机这份覆盖',
+                        title: '账号上那一份会被本机规则替换',
+                        onclick: () => {
+                            if (
+                                !confirm(
+                                    `账号上那${describeRules(server.rules)}会被本机规则覆盖，确定？`,
+                                )
+                            )
+                                return
+                            // 带着刚看到的版本当基准，这一次服务端会认（不是「强制」标志，是真的看过）
+                            void push(server.updatedAt)
+                        },
+                    }),
+                ]),
+            )
+        }
+
+        void refresh()
+
+        return el('div', { class: 'rule-sync' }, [
+            el('div', { class: 'rule-add-title', text: '账号同步' }),
+            statusHost,
+            actions,
+        ])
     }
 
     /** 净化规则改完之后重排当前章节，让效果立刻可见 */

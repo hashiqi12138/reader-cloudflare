@@ -1720,6 +1720,17 @@ body[data-reader='1'] main#view {
     border-color: var(--accent);
 }
 
+/* 账号同步：两个按钮 + 一行状态。与上面的规则编辑之间用 .rule-add-title 隔开，
+   这里只负责内部间距 —— 插进 .settings 后它自己也是一个有节奏的块 */
+.rule-sync {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-2);
+}
+.rule-sync-status > p {
+    margin: 0;
+}
+
 /* ---------------------------------------------------------------- 章内搜索 */
 
 /* 命中高亮：用半透明底色而不是纯色块，正文本身的墨色不变，

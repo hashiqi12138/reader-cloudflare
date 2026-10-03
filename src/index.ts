@@ -33,6 +33,7 @@ import {
 import type { AccountUser } from './data/accounts'
 import { exportBackup, importBackup } from './data/transfer'
 import { bookmarkFileName, loadBookmarkRows, renderCsv, renderMarkdown } from './data/bookmarkList'
+import { parseReplaceRules, readReplaceRules, writeReplaceRules } from './data/replaceRules'
 import { buildHomeSections, readHomeCache, writeHomeCache } from './data/home'
 import { DataError, bookKey } from './data/types'
 import { getOrCreateMediaSecret } from './data/settings'
@@ -68,6 +69,16 @@ const MAX_IMPORT_BODY_BYTES = 4 * 1024 * 1024
  * 否则「允许导出、导不回来」。
  */
 const MAX_BACKUP_BODY_BYTES = 8 * 1024 * 1024
+
+/**
+ * 替换净化规则的请求体上限
+ *
+ * 规则条数上限 200、单字段上限 2000 字符（见 `data/replaceRules.ts`），
+ * 最坏情况约 1.6 MB，留一倍余量。**与书源导入的 4 MiB 分开写**是有意的：
+ * 两个上限服务于两件事（书源是整批导入，规则是私人配置），
+ * 合成一个常量的话，改其中一个的人不会知道自己动了另一个的边界。
+ */
+const MAX_REPLACE_BODY_BYTES = 2 * 1024 * 1024
 
 type ErrorStatus = 400 | 401 | 403 | 404 | 409 | 413 | 422 | 429 | 500 | 502 | 504
 
@@ -679,6 +690,80 @@ app.get('/api/export/bookmarks', async (c) => {
                 format === 'csv' ? 'text/csv; charset=utf-8' : 'text/markdown; charset=utf-8',
             'Content-Disposition': contentDisposition(bookmarkFileName(rows, format, at)),
         })
+    } catch (err) {
+        return fail(c, err)
+    }
+})
+
+// ---------------------------------------------------------------- 替换净化（跟着账号走）
+
+/**
+ * 读一份替换净化规则
+ *
+ * 没同步过的账号回 `{rules: [], updatedAt: 0}`，而不是 404 ——
+ * 「还没同步过」是一个正常状态，不是「资源不存在」。
+ */
+app.get('/api/replace', async (c) => {
+    try {
+        const user = await requireUser(c)
+        return c.json(await readReplaceRules(c.env.DB, user))
+    } catch (err) {
+        return fail(c, err)
+    }
+})
+
+/**
+ * 写一份替换净化规则（带冲突检测）
+ *
+ * 客户端必须带 `baseUpdatedAt`（它这份规则是基于服务端哪个版本改的）。
+ * 对不上就回 409 + 服务端现在那份，由用户决定「取回」还是「覆盖」——
+ * 而不是安静地把另一台设备上的编辑抹掉。理由见 `data/replaceRules.ts`。
+ */
+app.put('/api/replace', async (c) => {
+    try {
+        const user = await requireUser(c)
+        const declared = Number(c.req.header('content-length') ?? '0')
+        if (Number.isFinite(declared) && declared > MAX_REPLACE_BODY_BYTES) {
+            return c.json(
+                {
+                    error: `请求体 ${Math.round(declared / 1024)} KB，超过上限 ${MAX_REPLACE_BODY_BYTES / 1024} KB`,
+                    code: 'body_too_large',
+                },
+                413,
+            )
+        }
+
+        let body: { rules?: unknown; baseUpdatedAt?: unknown }
+        try {
+            body = await c.req.json()
+        } catch {
+            return c.json(
+                {
+                    error: '请求体必须是 JSON，形如 {"rules":[…],"baseUpdatedAt":0}',
+                    code: 'invalid_json',
+                },
+                400,
+            )
+        }
+
+        const rules = parseReplaceRules(body.rules)
+        const outcome = await writeReplaceRules(
+            c.env.DB,
+            user,
+            rules,
+            Number(body.baseUpdatedAt ?? 0),
+        )
+        if (outcome.kind === 'conflict') {
+            return c.json(
+                {
+                    error: '服务端有一份更新的替换规则（可能来自另一台设备）。先取回看看，确认要覆盖再传一次。',
+                    code: 'replace_rules_conflict',
+                    server: outcome.server,
+                },
+                409,
+            )
+        }
+        return c.json({ updatedAt: outcome.updatedAt })
     } catch (err) {
         return fail(c, err)
     }

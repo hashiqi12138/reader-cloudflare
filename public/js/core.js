@@ -311,6 +311,14 @@ export async function api(path, options = {}) {
         const error = new Error(json?.error ?? fallback)
         error.code = json?.code ?? 'http_error'
         error.status = response.status
+        /**
+         * 带上解析好的响应体（解析不出来就是 `null`）
+         *
+         * 有些错误**本身就是一次数据交换**：替换净化同步撞版本时，服务端回 409
+         * 并把现在那份规则放在响应体里，调用方要拿它把选择权交给用户
+         * （见 `replaceSync.js`）。只给一句错误消息的话，用户能做的只有再试一次。
+         */
+        error.body = json
         if (response.status === 401 && !authAttempt) onUnauthorized?.(error)
         throw error
     }

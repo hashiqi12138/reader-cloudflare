@@ -677,8 +677,11 @@ console.log('\n=== 6. 前端静态资源 ===')
         '/js/core.js',
         '/js/views.js',
         '/js/reader.js',
+        '/js/merge.js',
         '/js/replace.js',
+        '/js/replaceSync.js',
         '/js/search.js',
+        '/js/zoom.js',
     ]) {
         const response = await fetch(BASE + asset)
         check(response.status === 200, `${asset} 返回 200`, `status=${response.status}`)
@@ -1467,6 +1470,151 @@ console.log('\n=== 7d. 书签清单导出（Markdown / CSV）===')
         half.body.includes('- 共 2 条，来自 2 本书'),
         '只给一半参数时按「全部」处理（不猜）',
         JSON.stringify(half.body.split('\n').slice(0, 5)),
+    )
+}
+
+console.log('\n=== 7e. 替换净化规则跟着账号走 ===')
+{
+    // 规则本身在浏览器 localStorage（改一条立刻重排正文），这一层只负责把它搬上账号。
+    // 冒烟要验的是**搬的过程**：整份往返、冲突不覆盖、账号之间互相看不见。
+    // 那三条单测都碰不到 —— 它们的价值全在于和 D1 里那一行真的对上。
+
+    const user = await sessionUser('repl')
+    check(user.status === 201 && user.cookie !== '', '临时账号注册成功', `HTTP ${user.status}`)
+
+    const fresh = await user.call('GET', '/api/replace')
+    check(
+        fresh.status === 200 &&
+            fresh.json?.updatedAt === 0 &&
+            (fresh.json?.rules ?? []).length === 0,
+        '从没同步过的账号得到空的一份，而不是 404',
+        `HTTP ${fresh.status} ${fresh.text.slice(0, 80)}`,
+    )
+
+    // 没登录的人不该能读也不能写（规则是私人格式偏好，但接口一样要挡住）
+    const anonGet = await getJson('/api/replace')
+    const anonPut = await call('PUT', '/api/replace', { rules: [], baseUpdatedAt: 0 })
+    check(
+        anonGet.status === 401 && anonPut.status === 401,
+        '未登录时读/写都是 401',
+        `GET ${anonGet.status} PUT ${anonPut.status}`,
+    )
+
+    const local = [
+        { name: '去广告', group: '通用', pattern: '广告', replacement: '', enabled: true },
+        { name: '去掉空行', group: '排版', pattern: '\\n{2,}', replacement: '\n', enabled: false },
+    ]
+    const first = await user.call('PUT', '/api/replace', { rules: local, baseUpdatedAt: 0 })
+    const firstAt = Number(first.json?.updatedAt ?? 0)
+    check(
+        first.status === 200 && firstAt > 0,
+        '上传一份规则，拿到一个新的版本时间戳',
+        `HTTP ${first.status} ${first.text.slice(0, 80)}`,
+    )
+
+    const back = await user.call('GET', '/api/replace')
+    const got = back.json?.rules ?? []
+    check(
+        got.length === 2 &&
+            got[0].pattern === '广告' &&
+            got[1].name === '去掉空行' &&
+            got[1].enabled === false &&
+            got[1].replacement === '\n',
+        '整份往返：条数、顺序、停用状态、替换串（真的换行）都没变',
+        JSON.stringify(got.slice(0, 2)),
+    )
+
+    // 字段归一：少写 group、name 写成数字，都不该让整份传不上去
+    const loose = await user.call('PUT', '/api/replace', {
+        rules: [{ name: 123, pattern: '广告' }],
+        baseUpdatedAt: firstAt,
+    })
+    const looseBack = await user.call('GET', '/api/replace')
+    check(
+        loose.status === 200 &&
+            looseBack.json.rules.length === 1 &&
+            looseBack.json.rules[0].name === '123' &&
+            looseBack.json.rules[0].group === '默认' &&
+            looseBack.json.rules[0].enabled === true,
+        '缺字段/写数字都收敛成能用的值（不是拒绝整份）',
+        JSON.stringify(looseBack.json?.rules ?? []),
+    )
+    const secondAt = Number(looseBack.json?.updatedAt ?? 0)
+    check(secondAt > firstAt, '每次写入的时间戳都往前走', `${firstAt} → ${secondAt}`)
+
+    // 冲突：拿一个过期的基准再传一次，服务端**不许写**，而是把现在那份回给客户端
+    const stale = await user.call('PUT', '/api/replace', { rules: local, baseUpdatedAt: firstAt })
+    check(
+        stale.status === 409 &&
+            stale.json?.code === 'replace_rules_conflict' &&
+            (stale.json?.server?.rules ?? []).length === 1 &&
+            Number(stale.json?.server?.updatedAt ?? 0) === secondAt,
+        '基准过期时回 409 并附上服务端现在那份（不做「最后写入者胜」）',
+        `HTTP ${stale.status} ${stale.json?.code} server=${(stale.json?.server?.rules ?? []).length} 条`,
+    )
+    const afterConflict = await user.call('GET', '/api/replace')
+    check(
+        (afterConflict.json?.rules ?? []).length === 1,
+        '被拒绝的那一次**没有**写进去（库里还是 1 条）',
+        `${(afterConflict.json?.rules ?? []).length} 条`,
+    )
+
+    // 用户看过服务端那份之后，拿它的版本当基准再传一次 —— 这就是「确认覆盖」的口子
+    const forced = await user.call('PUT', '/api/replace', { rules: local, baseUpdatedAt: secondAt })
+    const afterForce = await user.call('GET', '/api/replace')
+    check(
+        forced.status === 200 && (afterForce.json?.rules ?? []).length === 2,
+        '带上刚看到的版本号重传即覆盖（不需要额外的「强制」标志）',
+        `HTTP ${forced.status} ${(afterForce.json?.rules ?? []).length} 条`,
+    )
+
+    // 另一个账号看不见：这份规则挂在 owner 上，不是全局表
+    const other = await sessionUser('repl2')
+    const otherGet = await other.call('GET', '/api/replace')
+    check(
+        otherGet.status === 200 && (otherGet.json?.rules ?? []).length === 0,
+        '另一个账号读到的是空的一份（规则跟着账号走）',
+        JSON.stringify(otherGet.json?.rules ?? []),
+    )
+
+    // 坏数据要说得清坏在哪，而不是「格式不对」
+    const notArray = await user.call('PUT', '/api/replace', { rules: { a: 1 }, baseUpdatedAt: 0 })
+    const badItem = await user.call('PUT', '/api/replace', {
+        rules: [local[0], '这不是对象'],
+        baseUpdatedAt: 0,
+    })
+    check(
+        notArray.status === 400 &&
+            notArray.json?.code === 'invalid_replace_rules' &&
+            /数组/.test(notArray.json?.error ?? ''),
+        'rules 不是数组 → 400，并说清应该是数组',
+        `HTTP ${notArray.status} ${notArray.json?.error}`,
+    )
+    check(
+        badItem.status === 400 && /第 2 条/.test(badItem.json?.error ?? ''),
+        '坏在第 2 条就报到第 2 条',
+        `HTTP ${badItem.status} ${badItem.json?.error}`,
+    )
+
+    const tooMany = await user.call('PUT', '/api/replace', {
+        rules: Array.from({ length: 201 }, () => local[0]),
+        baseUpdatedAt: secondAt,
+    })
+    check(
+        tooMany.status === 400 && tooMany.json?.code === 'too_many_replace_rules',
+        '超过 200 条 → 400 too_many_replace_rules',
+        `HTTP ${tooMany.status} ${tooMany.json?.error}`,
+    )
+
+    const huge = await user.call('PUT', '/api/replace', {
+        rules: [],
+        baseUpdatedAt: secondAt,
+        padding: 'x'.repeat(2 * 1024 * 1024 + 4096),
+    })
+    check(
+        huge.status === 413 && huge.json?.code === 'body_too_large',
+        '请求体超过 2 MiB → 413（先看 content-length，不先解析）',
+        `HTTP ${huge.status} ${huge.json?.error}`,
     )
 }
 
