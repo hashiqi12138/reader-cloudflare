@@ -76,6 +76,7 @@ import {
 } from './legado/ops'
 import { fetchChapterContent } from './legado/media'
 import { loginAddressOf, loginInvocation, normalizeLoginScript } from './legado/loginScript'
+import { EMPTY_LOGIN_FORM, normalizeLoginForm, parseLoginUiJson } from './legado/loginUi'
 import { mediaRequestHeaders, sandboxHttp } from './legado/source'
 import { baseGlobals, sourceLimits } from './engine/globals'
 import { splitUrlAndOptions } from './legado/urlOptions'
@@ -385,6 +386,12 @@ app.get('/api/sources', async (c) => {
             hasSearch: Boolean(s.searchUrl && s.ruleSearch?.bookList),
             // 「发现」页要按这个字段筛出能探索的书源，否则前端得逐个试一遍
             hasExplore: Boolean(s.exploreUrl && s.ruleExplore?.bookList),
+            // 书源页据此显示「登录」入口。注意地址型 loginUrl（76/116 条，
+            // App 里用 WebView 打开的那种）也算有 —— 点进去会看到那句明白话
+            hasLogin: Boolean(s.loginUrl && s.loginUrl.trim() !== ''),
+            // 「现在是不是已登录」—— 两列只要有一列非空就算（与 /api/sources/login
+            // 里那个 `loggedIn` 同一个判据，只是这里直接看库里那份）
+            loggedIn: (s.loginHeader ?? '') !== '' || (s.loginInfo ?? '') !== '',
         })),
     })
 })
@@ -507,7 +514,7 @@ app.post('/api/sources/login', async (c) => {
     }
     // `loginUrl` 在语料里有三种形态：裸脚本、被作者加了 `@js:` / `<js>` 标记的脚本
     // （那两个标记是**规则字段**的语法），以及**一条登录页地址** ——
-    // 最后那种（116 条里 65 条）在 App 里是用 WebView 打开让人手登的，见下
+    // 最后那种（116 条里 76 条）在 App 里是用 WebView 打开让人手登的，见下
     const loginAddress = loginAddressOf(source.loginUrl)
     if (loginAddress !== undefined) {
         return c.json(
@@ -525,42 +532,15 @@ app.post('/api/sources/login', async (c) => {
         return c.json({ error: '这个书源的登录脚本是空的（只有标记）' }, 400)
     }
 
-    const fields =
-        body.fields && typeof body.fields === 'object' && !Array.isArray(body.fields)
-            ? (body.fields as Record<string, unknown>)
-            : {}
-    /**
-     * 表单字段要先**放进这次求值的内存 `loginInfo`**，`login` 函数才读得到
-     *
-     * 官方文档「认证与登录」写得很明确：用户输入在**登录按钮函数**里从
-     * `result.get("账号")` 取，在 **`login` 函数**里从 `source.getLoginInfoMap()` 取。
-     * 两条路都要铺：`fields` 既注成 `result`，也先塞进 `loginInfo`
-     * （语料里读 `getLoginInfoMap` 的绝大多数就在 `loginUrl` 里）。
-     *
-     * **只放内存、不落库** —— 脚本自己决定要不要 `putLoginInfo` 保存。不直接落库
-     * 有两个原因：一是那会把密码明文存进 D1；二是「登录成功没有」这个信号会失真。
-     */
+    const fields = loginFieldsOf(body.fields)
     // 铺表单之前先把**库里那份**记下来：下面算 `loggedIn` 时要用（表单不算登录态）
-    const storedLogin = { header: source.loginHeader ?? '', info: source.loginInfo ?? '' }
-    if (Object.keys(fields).length > 0) source.loginInfo = JSON.stringify(fields)
+    const storedLogin = loginStoredOf(source)
+    seedLoginFields(source, fields)
 
     const session = createSandboxSession()
-    // `source` 必须显式带上：`evalContext` 只给 baseUrl / sandbox / 落库路径，
-    // 而登录脚本要读 `source.getVariable()`、`source.bookSourceUrl` 这些
-    const ctx: RuleContext = { ...evalContext(c.env.DB, source, session), source }
-
-    // 补上「调用 `login()`」那一步 —— 见 legado/loginScript.ts 的说明
-    const code = loginInvocation(loginScript)
-
     try {
-        await runInSandbox(
-            code,
-            {
-                ...baseGlobals(ctx),
-                __loginFields: JSON.stringify(fields),
-            },
-            { http: sandboxHttp(source, source.bookSourceUrl), ...sourceLimits(ctx) },
-        )
+        // 补上「调用 `login()`」那一步 —— 见 legado/loginScript.ts 的说明
+        await runLoginCode(c.env.DB, source, session, loginInvocation(loginScript), fields)
     } catch (err) {
         return c.json(
             {
@@ -576,14 +556,189 @@ app.post('/api/sources/login', async (c) => {
         ok: true,
         // 书源自己那句提示（toast）—— 登录成功与否，书源比我们清楚
         message: toastTextOf(session),
-        // 「这次写出去的登录态」非空才算登录成功；这次没写过（「切换线路」那类脚本、
-        // 或者密码不对早早 return）就看**库里原来那份** —— 注意不是 `source.loginInfo`，
-        // 那一份上面被表单铺过，拿它当判据会把「刚填了表单但没登上」当成已登录
-        loggedIn: session.loginOut
-            ? (session.loginOut.header ?? '') !== '' || (session.loginOut.info ?? '') !== ''
-            : storedLogin.header !== '' || storedLogin.info !== '',
+        loggedIn: loggedInOf(session, storedLogin),
     })
 })
+
+/**
+ * 读一个书源的**登录界面**（`loginUi`），归一成前端能渲染的表单
+ *
+ * 官方文档把它叫「登录 UI」：一段 JSON/JS 数组，描述「有哪些输入框、哪些按钮」。
+ * 语料 35 条源写了它，**其中只有 18 条是严格 JSON**，另外 17 条得求值
+ * （8 条前缀 `@js:`、8 条是键没加引号的 JS 字面量、1 条包在 `<js>` 里）。
+ * 所以这里**先试 `JSON.parse`，失败再进沙箱** —— 严格 JSON 的那些源连沙箱都不用碰。
+ *
+ * 沙箱那条路有个坑：有的源不靠「最后一句表达式的值」，而是**把结果挂到 `result` 上**
+ * （`@js: var all=[]; …; result=JSON.stringify(all)`）。所以第二趟补一句读 `result`。
+ * 第二趟只在「第一趟一个控件都没解出来」时才发生。
+ */
+app.get('/api/sources/login-ui', async (c) => {
+    const id = c.req.query('id') ?? ''
+    const origin = new URL(c.req.url).origin
+    const source = await findSource(c.env.DB, origin, id, registryOf(c.env))
+    if (!source) return c.json({ error: `找不到书源：${id}` }, 404)
+
+    const uiText = source.loginUi ?? ''
+    if (uiText.trim() === '') {
+        // 没写 `loginUi` 不等于不能登录：脚本型 `loginUrl` 直接跑就行。
+        // （语料里只有 1 条源「读表单却没写 loginUi」—— 那种我们也没法知道字段名）
+        return c.json({ ...EMPTY_LOGIN_FORM, sourceId: source.id, hasUi: false })
+    }
+
+    // ① 严格 JSON 的快路
+    const quick = parseLoginUiJson(uiText)
+    if (quick) return c.json({ ...quick, sourceId: source.id, hasUi: true })
+
+    // ② 进沙箱求值（`@js:` / `<js>` / 键没加引号的 JS 字面量都走这里）
+    const session = createSandboxSession()
+    const code = normalizeLoginScript(uiText)
+    try {
+        let form = normalizeLoginForm(await runLoginCode(c.env.DB, source, session, code, {}))
+        if (form.fields.length === 0 && form.buttons.length === 0) {
+            // 值可能挂在 `result` 上，而不是最后一句的值
+            form = normalizeLoginForm(
+                await runLoginCode(
+                    c.env.DB,
+                    source,
+                    session,
+                    `${code}\n;JSON.stringify(typeof result === "undefined" ? null : result)`,
+                    {},
+                ),
+            )
+        }
+        return c.json({ ...form, sourceId: source.id, hasUi: true, message: toastTextOf(session) })
+    } catch (err) {
+        return c.json(
+            {
+                error: err instanceof Error ? err.message : String(err),
+                message: toastTextOf(session),
+            },
+            502,
+        )
+    }
+})
+
+/**
+ * 调一个**登录界面上的按钮**（`loginUi` 里 `action` 是函数名的那些）
+ *
+ * 按钮和 `login()` 是两回事：语料里 163 个按钮动作是源自己的函数
+ * （`jmDoLogin()` / `checkSite()` / `saveCommentSetting(…)`），只有 2 个正好写着
+ * `login()`。也就是说「获取验证码」「切换线路」「检测登录态」这些**都挂在按钮上**，
+ * 不点它，那半边功能就用不了（🏷书旗小说 那个界面 20 多个控件里只有一个是登录）。
+ *
+ * 做法就是 App 的做法：**同一次求值里先跑 `loginUrl`（把函数定义出来）再跑这句动作** ——
+ * 沙箱每次求值都是新上下文，分两趟跑是看不到那些函数的。而这里**不**顺带调 `login()`：
+ * 点「获取验证码」不该把登录也跑一遍。
+ *
+ * `action` 只接受**出现在这个书源 `loginUi` 文本里**的那些（文本级核对，不进沙箱）——
+ * 是白名单，不是「客户端说跑什么就跑什么」。
+ */
+app.post('/api/sources/login-action', async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as {
+        id?: unknown
+        action?: unknown
+        fields?: unknown
+    }
+    const id = typeof body.id === 'string' ? body.id : ''
+    const action = typeof body.action === 'string' ? body.action.trim() : ''
+    const origin = new URL(c.req.url).origin
+    const source = await findSource(c.env.DB, origin, id, registryOf(c.env))
+    if (!source) return c.json({ error: `找不到书源：${id}` }, 404)
+    if (action === '') return c.json({ error: '没给动作（action）' }, 400)
+    if (!String(source.loginUi ?? '').includes(action)) {
+        return c.json({ error: `这个动作不在书源的登录界面里：${action.slice(0, 80)}` }, 400)
+    }
+    if (
+        typeof source.loginUrl !== 'string' ||
+        source.loginUrl.trim() === '' ||
+        loginAddressOf(source.loginUrl) !== undefined
+    ) {
+        return c.json({ error: '这个书源没有可执行的登录脚本（loginUrl）' }, 400)
+    }
+
+    const fields = loginFieldsOf(body.fields)
+    const storedLogin = loginStoredOf(source)
+    seedLoginFields(source, fields)
+
+    const session = createSandboxSession()
+    try {
+        // 先定义，再执行动作 —— 两段写在同一份脚本里
+        const loginScript = normalizeLoginScript(source.loginUrl)
+        await runLoginCode(c.env.DB, source, session, `${loginScript}\n;${action}`, fields)
+    } catch (err) {
+        return c.json(
+            {
+                error: err instanceof Error ? err.message : String(err),
+                message: toastTextOf(session),
+            },
+            502,
+        )
+    }
+
+    return c.json({
+        sourceId: source.id,
+        ok: true,
+        message: toastTextOf(session),
+        loggedIn: loggedInOf(session, storedLogin),
+    })
+})
+
+/** 请求体里的 `fields`（用户填的表单）—— 两个接口都要过这一道 */
+function loginFieldsOf(raw: unknown): Record<string, unknown> {
+    return raw && typeof raw === 'object' && !Array.isArray(raw)
+        ? (raw as Record<string, unknown>)
+        : {}
+}
+
+/**
+ * 把表单字段**铺进这次求值的内存 `loginInfo`**（`login` 函数与按钮函数都读它）
+ *
+ * 官方文档「认证与登录」把两种读法分得很清：**登录按钮函数**里用
+ * `result.get("账号")`，**`login` 函数**里用 `source.getLoginInfoMap().get("账号")`。
+ * `result` 那一侧由沙箱预置从 `__loginFields` 铺（见 `engine/js.ts`），这里管另一侧。
+ *
+ * **只放内存、不落库** —— 脚本自己决定要不要 `putLoginInfo` 保存。不直接落库有两个
+ * 原因：一是那会把密码明文存进 D1；二是「登录成功没有」这个信号会失真（见 `loggedInOf`）。
+ */
+function seedLoginFields(source: RegisteredSource, fields: Record<string, unknown>): void {
+    if (Object.keys(fields).length > 0) source.loginInfo = JSON.stringify(fields)
+}
+
+/** 库里存着的那份登录态 —— 必须在**铺表单之前**取，否则判据会被表单污染 */
+function loginStoredOf(source: RegisteredSource): { header: string; info: string } {
+    return { header: source.loginHeader ?? '', info: source.loginInfo ?? '' }
+}
+
+/**
+ * 「登录成功没有」
+ *
+ * 这一趟**写出去的登录态非空**才算；这一趟没写过（「切换线路」那类脚本、或者密码不对
+ * 早早 `return`）就看**铺表单之前**库里那份 —— 表单不算登录态。
+ */
+function loggedInOf(session: SandboxSession, stored: { header: string; info: string }): boolean {
+    const out = session.loginOut
+    return out
+        ? (out.header ?? '') !== '' || (out.info ?? '') !== ''
+        : stored.header !== '' || stored.info !== ''
+}
+
+/** 跑一段登录相关的脚本（登录 / 按钮动作 / 读 loginUi 三处共用），返回脚本的值 */
+async function runLoginCode(
+    db: D1Database,
+    source: RegisteredSource,
+    session: SandboxSession,
+    code: string,
+    fields: Record<string, unknown>,
+): Promise<unknown> {
+    // `source` 必须显式带上：`evalContext` 只给 baseUrl / sandbox / 落库路径，
+    // 而登录脚本要读 `source.getVariable()`、`source.bookSourceUrl` 这些
+    const ctx: RuleContext = { ...evalContext(db, source, session), source }
+    return runInSandbox(
+        code,
+        { ...baseGlobals(ctx), __loginFields: JSON.stringify(fields) },
+        { http: sandboxHttp(source, source.bookSourceUrl), ...sourceLimits(ctx) },
+    )
+}
 
 /** 把这次求值里的 toast 文本拼起来（书源写给用户看的那句话就在里面） */
 function toastTextOf(session: SandboxSession): string {

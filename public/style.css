@@ -1003,6 +1003,35 @@ textarea {
     align-items: center;
     gap: var(--sp-3);
 }
+/* 一行书源 + 它下面的登录面板：包一层，面板才会跟着这一行走 */
+.source-item {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-2);
+}
+.login-slot[hidden] {
+    display: none;
+}
+.login-body {
+    padding: var(--sp-3);
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-md);
+}
+/* 输入框按宽度自动铺：语料里的登录界面从 2 个控件到 20 多个都有 */
+.login-fields {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    gap: 0 var(--sp-3);
+}
+.login-actions {
+    flex-wrap: wrap;
+    gap: var(--sp-2);
+    align-items: center;
+}
+.login-status:not(:empty) {
+    margin-top: var(--sp-2);
+}
 
 .chapter-list {
     list-style: none;

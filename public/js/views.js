@@ -1502,74 +1502,84 @@ export async function viewSources(host) {
     const list = el('div', { class: 'source-list' })
 
     for (const source of sources) {
-        list.append(
-            el('article', { class: 'source-row' }, [
-                el('div', { class: 'source-main' }, [
-                    el('h3', { class: 'source-name', text: source.name }),
-                    el('p', { class: 'source-meta' }, [
-                        el('span', { class: 'badge', text: typeLabel(source.type) }),
-                        source.group
-                            ? el('span', { class: 'badge ghost', text: source.group })
-                            : null,
-                        source.hasSearch ? el('span', { class: 'badge ok', text: '可搜索' }) : null,
-                        source.hasExplore
-                            ? el('span', { class: 'badge ok', text: '可发现' })
-                            : null,
-                        source.builtin ? el('span', { class: 'badge ghost', text: '内置' }) : null,
-                    ]),
-                ]),
-                el('div', { class: 'source-actions' }, [
-                    el(
-                        'label',
-                        { class: 'switch', title: source.enabled ? '点击停用' : '点击启用' },
-                        [
-                            el('input', {
-                                type: 'checkbox',
-                                checked: source.enabled,
-                                onchange: async (event) => {
-                                    const enabled = event.target.checked
-                                    try {
-                                        await postJson('/api/sources', { id: source.id, enabled })
-                                        toast(
-                                            enabled
-                                                ? `已启用：${source.name}`
-                                                : `已停用：${source.name}`,
-                                        )
-                                    } catch (err) {
-                                        event.target.checked = !enabled
-                                        toast(`操作失败：${err.message}`, 'error')
-                                    }
-                                },
-                            }),
-                            el('span', { class: 'switch-track' }),
-                        ],
-                    ),
-                    source.builtin
-                        ? null
-                        : el('button', {
-                              class: 'btn sm danger ghost',
-                              text: '删除',
-                              onclick: async (event) => {
-                                  if (!confirm(`删除书源「${source.name}」？`)) return
-                                  event.target.disabled = true
-                                  try {
-                                      await api(
-                                          `/api/sources?id=${encodeURIComponent(source.id)}`,
-                                          {
-                                              method: 'DELETE',
-                                          },
-                                      )
-                                      toast(`已删除：${source.name}`)
-                                      await viewSources(host)
-                                  } catch (err) {
-                                      toast(`删除失败：${err.message}`, 'error')
-                                      event.target.disabled = false
-                                  }
-                              },
-                          }),
+        const panel = el('div', { class: 'login-slot', hidden: true })
+        let panelOpen = false
+        // 「现在是不是已登录」—— 面板里按完按钮会就地更新它，不必整页重渲染
+        //（用户常常要连着按两三个：先「获取验证码」，再「登录」）
+        const stateBadge = source.hasLogin
+            ? el('span', {
+                  class: `badge ${source.loggedIn ? 'ok' : 'ghost'}`,
+                  text: source.loggedIn ? '已登录' : '未登录',
+              })
+            : null
+        const row = el('article', { class: 'source-row' }, [
+            el('div', { class: 'source-main' }, [
+                el('h3', { class: 'source-name', text: source.name }),
+                el('p', { class: 'source-meta' }, [
+                    el('span', { class: 'badge', text: typeLabel(source.type) }),
+                    source.group ? el('span', { class: 'badge ghost', text: source.group }) : null,
+                    source.hasSearch ? el('span', { class: 'badge ok', text: '可搜索' }) : null,
+                    source.hasExplore ? el('span', { class: 'badge ok', text: '可发现' }) : null,
+                    stateBadge,
+                    source.builtin ? el('span', { class: 'badge ghost', text: '内置' }) : null,
                 ]),
             ]),
-        )
+            el('div', { class: 'source-actions' }, [
+                source.hasLogin
+                    ? el('button', {
+                          class: 'btn sm ghost',
+                          text: '登录',
+                          onclick: () => {
+                              panelOpen = !panelOpen
+                              panel.hidden = !panelOpen
+                              // 只在第一次展开时读一次界面：每次点都重读会把已经填好的
+                              // 账号密码清掉
+                              if (panelOpen && panel.childElementCount === 0) {
+                                  void renderLoginPanel(panel, source, stateBadge)
+                              }
+                          },
+                      })
+                    : null,
+                el('label', { class: 'switch', title: source.enabled ? '点击停用' : '点击启用' }, [
+                    el('input', {
+                        type: 'checkbox',
+                        checked: source.enabled,
+                        onchange: async (event) => {
+                            const enabled = event.target.checked
+                            try {
+                                await postJson('/api/sources', { id: source.id, enabled })
+                                toast(enabled ? `已启用：${source.name}` : `已停用：${source.name}`)
+                            } catch (err) {
+                                event.target.checked = !enabled
+                                toast(`操作失败：${err.message}`, 'error')
+                            }
+                        },
+                    }),
+                    el('span', { class: 'switch-track' }),
+                ]),
+                source.builtin
+                    ? null
+                    : el('button', {
+                          class: 'btn sm danger ghost',
+                          text: '删除',
+                          onclick: async (event) => {
+                              if (!confirm(`删除书源「${source.name}」？`)) return
+                              event.target.disabled = true
+                              try {
+                                  await api(`/api/sources?id=${encodeURIComponent(source.id)}`, {
+                                      method: 'DELETE',
+                                  })
+                                  toast(`已删除：${source.name}`)
+                                  await viewSources(host)
+                              } catch (err) {
+                                  toast(`删除失败：${err.message}`, 'error')
+                                  event.target.disabled = false
+                              }
+                          },
+                      }),
+            ]),
+        ])
+        list.append(el('div', { class: 'source-item' }, [row, panel]))
     }
 
     host.replaceChildren(
@@ -1591,6 +1601,164 @@ export async function viewSources(host) {
 
 function typeLabel(type) {
     return { 0: '文本', 1: '音频', 2: '图片', 3: '文件' }[type] ?? '文本'
+}
+
+/**
+ * 书源的**登录面板**
+ *
+ * 界面由书源自己写的 `loginUi` 决定（`GET /api/sources/login-ui`，语料 35 条源有），
+ * 这里如实渲染它说的控件：
+ *
+ *   `text` / `password` → 输入框
+ *   带 `chars` 的（`select` 与 `toggle` 都是）→ 下拉
+ *   `button` 的 `action` 是**函数名** → 调 `/api/sources/login-action`（App 里也是这么做的：
+ *     那些「获取验证码」「切换线路」「检测登录态」都挂在按钮上，不点它就用不了）
+ *   `button` 的 `action` 是 http 地址 → 新开标签页
+ *   `button` 的 `action` 是空串 → 只当一块说明牌
+ *
+ * 主按钮「登录」走 `/api/sources/login`：书源写了 `login()` 的话由服务端补上那次调用
+ * （见 README 第五十七轮）。**地址型 `loginUrl`**（App 里用 WebView 打开的那种）
+ * 会在这一步拿到一句明白话，直接显示出来 —— 不是静默失败。
+ */
+async function renderLoginPanel(host, source, stateBadge) {
+    host.replaceChildren(el('p', { class: 'muted', text: '正在读取登录界面…' }))
+
+    let data
+    try {
+        data = await api(`/api/sources/login-ui?id=${encodeURIComponent(source.id)}`)
+    } catch (err) {
+        host.replaceChildren(alertBox('error', '读取登录界面失败', err.message))
+        return
+    }
+
+    const status = el('div', { class: 'login-status' })
+    const inputs = []
+
+    const fieldNodes = (data.fields ?? []).map((field) => {
+        // 带 chars 的是下拉（select / toggle 在服务端已经归一成同一个 type）
+        const node =
+            field.type === 'select'
+                ? el(
+                      'select',
+                      {},
+                      (field.chars ?? []).map((one) =>
+                          el('option', {
+                              value: one,
+                              text: one,
+                              selected: one === field.default,
+                          }),
+                      ),
+                  )
+                : el('input', {
+                      type: field.type === 'password' ? 'password' : 'text',
+                      autocomplete: 'off',
+                  })
+        inputs.push({ name: field.name, node })
+        return el('label', { class: 'field' }, [
+            el('span', {
+                class: 'field-label',
+                // 未知的 type（语料里有 toggle / input）标出来，别让人以为是我们写错了
+                text:
+                    field.rawType === field.type ? field.name : `${field.name}（${field.rawType}）`,
+            }),
+            node,
+        ])
+    })
+
+    const collect = () => {
+        const out = {}
+        for (const one of inputs) out[one.name] = one.node.value
+        return out
+    }
+
+    const show = (result) => {
+        if (result?.loggedIn !== undefined && stateBadge) {
+            stateBadge.className = `badge ${result.loggedIn ? 'ok' : 'ghost'}`
+            stateBadge.textContent = result.loggedIn ? '已登录' : '未登录'
+        }
+        const message = String(result?.message ?? '').trim()
+        status.replaceChildren(
+            alertBox(
+                result?.loggedIn ? 'ok' : 'warn',
+                // 书源自己那句话优先 —— 它比我们清楚登没登上
+                message || (result?.loggedIn ? '已登录' : '跑完了，但书源没说结果'),
+                result?.loggedIn === undefined
+                    ? ''
+                    : `登录态：${result.loggedIn ? '已登录' : '未登录'}`,
+            ),
+        )
+    }
+
+    const run = async (event, path, body, label) => {
+        const button = event.target
+        button.disabled = true
+        status.replaceChildren(el('p', { class: 'muted', text: `正在执行「${label}」…` }))
+        try {
+            show(await postJson(path, body))
+        } catch (err) {
+            // 这里是「地址型 loginUrl」那句明白话能露出来的地方
+            status.replaceChildren(alertBox('error', `「${label}」没成`, err.message))
+        } finally {
+            button.disabled = false
+        }
+    }
+
+    const actionNodes = (data.buttons ?? []).map((button) => {
+        if (button.url) {
+            return el('button', {
+                class: 'btn sm ghost',
+                text: button.name,
+                onclick: () => window.open(button.url, '_blank', 'noopener'),
+            })
+        }
+        if (button.action === '') {
+            return el('span', { class: 'badge ghost', text: button.name })
+        }
+        return el('button', {
+            class: 'btn sm ghost',
+            text: button.name,
+            onclick: (event) =>
+                run(
+                    event,
+                    '/api/sources/login-action',
+                    { id: source.id, action: button.action, fields: collect() },
+                    button.name,
+                ),
+        })
+    })
+
+    host.replaceChildren(
+        el('div', { class: 'login-body' }, [
+            fieldNodes.length > 0 ? el('div', { class: 'login-fields' }, fieldNodes) : null,
+            data.hasUi === false
+                ? el('p', {
+                      class: 'muted',
+                      text: '这个书源没写登录界面（loginUi）—— 直接点「登录」就行，脚本自己会读它要的东西。',
+                  })
+                : null,
+            data.note
+                ? el('p', {
+                      class: 'muted',
+                      text: `登录界面解析不出控件，原样贴出来：${data.note}`,
+                  })
+                : null,
+            el('div', { class: 'row login-actions' }, [
+                el('button', {
+                    class: 'btn primary sm',
+                    text: '登录',
+                    onclick: (event) =>
+                        run(
+                            event,
+                            '/api/sources/login',
+                            { id: source.id, fields: collect() },
+                            '登录',
+                        ),
+                }),
+                ...actionNodes,
+            ]),
+            status,
+        ]),
+    )
 }
 
 function renderImport(host) {
