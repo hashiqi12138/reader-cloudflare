@@ -31,6 +31,8 @@
 import * as cheerio from 'cheerio'
 import type { CheerioAPI } from 'cheerio'
 
+import { isElement } from './select'
+
 /** 与 select.ts 保持一致：不从传递依赖 domhandler 里 import 类型 */
 type Node = any
 
@@ -69,10 +71,6 @@ function textNodesOf(node: Node): string[] {
     }
     walk(node)
     return out
-}
-
-function isElement(node: Node): boolean {
-    return Boolean(node) && typeof node === 'object' && node.type === 'tag'
 }
 
 export class JsoupBridge {
@@ -232,7 +230,9 @@ export class JsoupBridge {
             case 'tagName': {
                 const node = this.one(handle)
                 if (!node) return this.value('')
-                return this.value(node.type === 'tag' ? String(node.name ?? '') : '#root')
+                // 走同一个 isElement：`<script>` / `<style>` 的 type 不是 'tag'，
+                // 这里若自己判 `type === 'tag'`，脚本的 tagName 会变成 '#root'
+                return this.value(isElement(node) ? String(node.name ?? '') : '#root')
             }
             case 'id':
                 return this.value(this.attrOf(handle, 'id'))

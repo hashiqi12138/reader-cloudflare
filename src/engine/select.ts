@@ -35,8 +35,27 @@ function stepToCss(step: JsoupStep): string | null {
     }
 }
 
-function isElement(node: Node): boolean {
-    return node && typeof node === 'object' && node.type === 'tag'
+/**
+ * 是不是一个「元素」节点
+ *
+ * **`<script>` 与 `<style>` 也是元素** —— domhandler 把它们的 `type` 记成
+ * `'script'` / `'style'`，而不是 `'tag'`。XPath 那一侧早就分开处理了
+ * （见 `xpath.ts` 的 `rawTypeOf`），CSS / JSOUP 这一侧漏了，于是它们被**静默丢掉**：
+ *
+ *   - `java.getElements('script')` 永远 0 条 → `java.getElement('script')` 给 `null`。
+ *     🎨51漫画 的目录规则正是 `Array.from(java.getElement("script"))`，
+ *     拿到 null 直接抛 `cannot read property 'Symbol.iterator' of null`，整本书打不开。
+ *   - `children` / `child` 两步走**直接子节点**时会跳过脚本与样式
+ *     （`find` 走的是后代，一直是对的）。
+ *
+ * 判据与 `xpath.ts` 的 `ELEMENT_NODE` 那几个 case 保持同一份。
+ */
+export function isElement(node: Node): boolean {
+    return (
+        Boolean(node) &&
+        typeof node === 'object' &&
+        (node.type === 'tag' || node.type === 'script' || node.type === 'style')
+    )
 }
 
 function childElements(node: Node): Node[] {

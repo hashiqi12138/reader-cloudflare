@@ -5414,6 +5414,92 @@ console.log('\n=== 36. http 封面在 https 页面是混合内容（浏览器连
     )
 }
 
+console.log('\n=== 37. `<script>` / `<style>` 也是元素（`getElement("script")` 不该给 null） ===')
+{
+    /**
+     * domhandler 把 `<script>` / `<style>` 的 `type` 记成 `'script'` / `'style'`，
+     * 不是 `'tag'`。桥里那个按 `type === 'tag'` 过滤的 `isElement` 把它们整类
+     * **静默丢掉**了：`java.getElements('script')` 永远 0 条、`getElement('script')` 给 `null`。
+     *
+     * 线上 🎨51漫画 的目录正是 `Array.from(java.getElement("script"))` —— 拿到 `null`
+     * 之后抛 `cannot read property 'Symbol.iterator' of null`，**整本书打不开**。
+     *
+     * 用 fixture 里同形状的页面（目录写在 script 的 JSON 里 + 一个 `.btn-read` 兜底入口）：
+     *   ① `java.getElements('script')` 数得出脚本（改前是 0），`getElement` 不再是 null
+     *   ② 51漫画 那条规则**不再抛错**，并走兜底分支拿到那一章
+     *   ③ 对照：`select("script")` 走的是 css-select，**一直是对的**（所以这个 bug 看起来
+     *      像「只有 java.getElement 坏了」）
+     */
+    const idA = `user:${BASE}/script-rule`
+    const idB = `user:${BASE}/script-count`
+    for (const x of [idA, idB]) await call('DELETE', `/api/sources?id=${encodeURIComponent(x)}`)
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: '目录写在 script 里（临时）',
+                bookSourceUrl: `${BASE}/script-rule`,
+                // 🎨51漫画 ruleToc.chapterList 的原样形状
+                ruleToc: {
+                    chapterList:
+                        `<js>\nconst scripts = Array.from(java.getElement("script")).filter(e => String(e).includes('目录'));\n` +
+                        `const c = scripts[0];\n\n` +
+                        `d = c\n  ? JSON.parse(c.html()).itemListElement.map(e => ({ title: e.name, url: e.url }))\n` +
+                        `  : [{ title: book.name, url: java.getString(".btn-read@href", src) }];\n\n` +
+                        `JSON.stringify(d);\n</js>\n$[*]`,
+                    chapterName: '$.title',
+                    chapterUrl: '$.url',
+                },
+            },
+            {
+                bookSourceName: '数脚本（临时）',
+                bookSourceUrl: `${BASE}/script-count`,
+                ruleToc: {
+                    chapterList: 'html',
+                    chapterName:
+                        "@js:'scripts=' + java.getElements('script').size() + ';el=' + (java.getElement('script') === null ? 'NULL' : 'OK')",
+                    chapterUrl: `@js:'${BASE}/fixture/chapter/1/1'`,
+                },
+            },
+        ]),
+    )
+
+    const tocUrl = `${BASE}/fixture/script-toc`
+    const bookParam = encodeURIComponent(JSON.stringify({ name: '测试漫画' }))
+    const tocOf = (id) =>
+        getJson(
+            `/api/toc?sourceId=${encodeURIComponent(id)}&url=${encodeURIComponent(tocUrl)}&book=${bookParam}`,
+        )
+
+    const tocA = await tocOf(idA)
+    check(
+        String(tocA.json?.error ?? '') === '',
+        '51漫画 那条规则不再抛 `Symbol.iterator` 错',
+        String(tocA.json?.error ?? '').slice(0, 120),
+    )
+    check(
+        (tocA.json?.count ?? 0) >= 1 && tocA.json?.chapters?.[0]?.name === '测试漫画',
+        '走兜底分支拿到那一章（`book.name` + `.btn-read@href`）',
+        JSON.stringify(tocA.json?.chapters?.[0] ?? null),
+    )
+
+    const tocB = await tocOf(idB)
+    check(
+        tocB.json?.chapters?.[0]?.name === 'scripts=1;el=OK',
+        '`java.getElements("script")` 数得出脚本、`getElement` 不再是 `null`',
+        String(tocB.json?.chapters?.[0]?.name ?? ''),
+    )
+
+    for (const x of [idA, idB]) await call('DELETE', `/api/sources?id=${encodeURIComponent(x)}`)
+    check(
+        !((await getJson('/api/sources')).json?.sources ?? []).some(
+            (s) => String(s.id).includes('script-rule') || String(s.id).includes('script-count'),
+        ),
+        'script 目录的测试源已清理',
+    )
+}
+
 console.log('\n=== 结果 ===')
 if (failures.length === 0) {
     console.log(

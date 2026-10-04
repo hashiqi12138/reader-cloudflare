@@ -208,6 +208,64 @@ describe('org.jsoup 桥', () => {
     })
 })
 
+/**
+ * **`<script>` / `<style>` 也是元素**
+ *
+ * domhandler 把它们的 `type` 记成 `'script'` / `'style'`，不是 `'tag'`。
+ * 桥里那个 `isElement`（`type === 'tag'`）当初把它们整类**静默丢掉**了：
+ * `java.getElements('script')` 永远 0 条 → `getElement('script')` 给 `null`。
+ * 线上 `🎨51漫画` 的目录正是 `Array.from(java.getElement("script"))`，
+ * 拿到 `null` 之后 `cannot read property 'Symbol.iterator' of null`，
+ * **整本书打不开**（第四十九轮）。
+ *
+ * `children` / `child` / `siblingElements` 这三个 op 走的是同一份判据，
+ * 所以也一起钉在这里。（`find` 那一路从来不受影响 —— 它用的是 css-select。）
+ */
+describe('org.jsoup 桥：script / style 不算「非元素」', () => {
+    const PAGE = '<div id="box"><script>var a=1;</script><style>.x{}</style><p>正文</p></div>'
+
+    /** 把任意一段 HTML 解析成文档句柄 */
+    const docOf = (bridge: JsoupBridge, page: string): number => {
+        const reply = bridge.run('parse', null, [page])
+        if (!reply.ok || reply.kind !== 'handle' || reply.handle === null)
+            throw new Error('parse 失败')
+        return reply.handle
+    }
+
+    it('parseFragments 不再把 `<script>` / `<style>` 丢掉', () => {
+        const bridge = new JsoupBridge()
+        const reply = bridge.run('parseFragments', null, [
+            ['<script>var a=1;</script>', '<style>.x{}</style>', '<div>3</div>'],
+        ])
+        if (!reply.ok || reply.kind !== 'handle' || reply.handle === null)
+            throw new Error('应返回句柄')
+        expect(value(bridge, 'size', reply.handle)).toBe(3)
+    })
+
+    it('`select("script")` 一直是对的（对照：走的是 css-select，不经这个判据）', () => {
+        const bridge = new JsoupBridge()
+        const doc = docOf(bridge, PAGE)
+        expect(value(bridge, 'size', handle(bridge, 'select', doc, ['script']))).toBe(1)
+    })
+
+    it('`children` / `child` 带上脚本与样式', () => {
+        const bridge = new JsoupBridge()
+        const box = handle(bridge, 'select', docOf(bridge, PAGE), ['#box'])
+        const kids = handle(bridge, 'children', box)
+        expect(value(bridge, 'size', kids)).toBe(3)
+        expect(value(bridge, 'tagName', handle(bridge, 'child', box, [0]))).toBe('script')
+        expect(value(bridge, 'tagName', handle(bridge, 'child', box, [1]))).toBe('style')
+    })
+
+    it('脚本的 `tagName` 是 `script`，不是 `#root`', () => {
+        const bridge = new JsoupBridge()
+        const script = handle(bridge, 'select', docOf(bridge, PAGE), ['script'])
+        expect(value(bridge, 'tagName', handle(bridge, 'first', script))).toBe('script')
+        // 内容也取得到（`getElement('script').html()` 那条路要的就是它）
+        expect(value(bridge, 'html', handle(bridge, 'first', script))).toBe('var a=1;')
+    })
+})
+
 /** 小工具：从 Elements 里再取一个元素句柄 */
 function createInner(bridge: JsoupBridge, from: number, index: number): number {
     return handle(bridge, 'get', from, [index])

@@ -159,6 +159,40 @@ export function fixtureGuardedCoverPage(): string {
 }
 
 /**
+ * **目录写在 `<script>` 里**的靶子：照 `🎨51漫画` 的详情页形状写
+ *
+ * 那家的目录规则是 `<js>Array.from(java.getElement("script")).filter(…)` ——
+ * 先选 `<script>`、再读它的 JSON。而 domhandler 把 `<script>` 的 `type` 记成
+ * `'script'`（不是 `'tag'`），桥里按 `type === 'tag'` 过滤的 `isElement`
+ * 把它整类丢掉了 → `getElement("script")` 给 `null` → `Array.from(null)` 抛错
+ * → **整本书打不开**（第四十九轮修的就是这个）。
+ *
+ * 页面里同时给一个 `.btn-read`（那条规则取不到脚本时的**兜底**分支用它），
+ * 于是冒烟 §37 能同时钉住「脚本取得到」与「兜底也在」。
+ */
+export function fixtureScriptTocPage(): string {
+    const json = JSON.stringify({
+        '@context': 'https://schema.org',
+        '@type': 'ItemList',
+        name: '目录',
+        itemListElement: [
+            { '@type': 'ListItem', name: '第一话', url: '/fixture/chapter/1/1' },
+            { '@type': 'ListItem', name: '第二话', url: '/fixture/chapter/1/2' },
+        ],
+    })
+
+    return page(
+        '测试漫画',
+        `<!-- 目录写在 script 里 -->
+<script type="application/ld+json">${json}</script>
+<div class="comic-content">
+    <h1 class="text-primary">测试漫画</h1>
+    <a class="btn-read" href="/fixture/chapter/1/1">开始阅读</a>
+</div>`,
+    )
+}
+
+/**
  * **POST 表单搜索**：专门守住「带请求体必须声明 Content-Type」这一条
  *
  * 真实站点绝大多数是 PHP，而 PHP 只在 `application/x-www-form-urlencoded`（或
@@ -636,6 +670,9 @@ export async function handleFixture(request: Request, url: URL): Promise<Respons
 
     // 防盗链封面的列表页（见 fixtureGuardedCoverPage 的说明）
     if (pathname === '/fixture/guarded-cover-page') return html(fixtureGuardedCoverPage())
+
+    // 目录写在 <script> 里的靶子（见 fixtureScriptTocPage 的说明）
+    if (pathname === '/fixture/script-toc') return html(fixtureScriptTocPage())
 
     /**
      * **防盗链封面**本身：没有 `Referer` 就 403
