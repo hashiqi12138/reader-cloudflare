@@ -36,6 +36,7 @@
 | **cookie 罐**（`enabledCookieJar` 的源：收 `Set-Cookie` / 请求自动带 `Cookie` / 按源落库）          | 已实现（816 条源里 457 条开着这个东西；「搜索那一趟拿到的会话 cookie 能不能带到详情那一趟」就靠它 —— 见「`cookie` 罐」与「第五十四轮」）                                                                                                                                                                                                        |
 | **HTTP 重定向**（自己跟：每一跳的 `Set-Cookie` 都收，第一跳的 `Location` 交回给脚本）               | 已实现（`fetch` 的 `follow` 会把这两样都吃掉 —— 线上 11 个源的 `searchUrl` 正是靠那个 `Location` 找真正的搜索页地址；见「第五十五轮」）                                                                                                                                                                                                         |
 | **目录里的标注**：`isVip` / `isPay` / `isVolume` / `updateTime`                                     | 已实现（45 / 7 / 25 / 74 个源在用；VIP 标记、卷分组、更新时间都会显示在目录里，`chapter.isVip()` 也第一次拿到真值 —— 见「第五十六轮」）                                                                                                                                                                                                         |
+| **书源登录态**（跑一次 `loginUrl` → 落库 → 之后每趟请求都带上）                                     | 已实现（`putLoginHeader` / `putLoginInfo` 写穿落库、取网层三层请求头带上、`POST /api/sources/login`；116 条写了 loginUrl 的源里 76 条是 WebView 的登录页地址，那一档会**说清楚**跑不了 —— 见「第五十七轮」）                                                                                                                                    |
 | 书源自带的 `jsLib` 全局函数库                                                                       | 已实现（35 条源在用；作为沙箱前置脚本执行，失败不中断但会说明原因）                                                                                                                                                                                                                                                                             |
 | 沙箱里的 `book` / `chapter` 上下文与**书的变量**（`book.getVariable` / `putVariable`）              | 已实现（`book.name` 54 处 / 39 源、`chapter.title` 32 处 / 30 源；变量落 `book_variables`，见「第三十五轮」）                                                                                                                                                                                                                                   |
 | `org.jsoup.Jsoup` + Element/Elements API                                                            | 已实现（宿主桥 + cheerio 句柄；写操作是空操作，未实现的方法报出方法名；`<script>` / `<style>` 也是元素 —— 见「第四十九轮」）                                                                                                                                                                                                                    |
@@ -1120,7 +1121,8 @@ HTTP 请求，所以罐子必须落库。
   `m.qidian.com` 上，而 🏷起点 的发现页模板问的是 `qidian.com`（338 处）。前者是
   「这次请求发什么」，后者是「脚本查这个站的 cookie」，宁可宽不可窄的是后者。
 - **`cookie.mapToCookie` 仍然没补**：它要的是 `response.cookies()` 的返回值，
-  那个方法也没有，单独补它不解决问题（登录流程整条没实现，见「第五十三轮」）。
+  那个方法也没有，单独补它不解决问题（登录流程第五十七轮已经实现了，但
+  `response.cookies()` 仍是缺的 —— 见「第五十三 / 五十七轮」）。
 
 `cache` 还是内存对象，求值结束就销毁 —— 它没有「站点下发」这个来源，书源里
 绝大多数用法是「同一段脚本里先存后取」，内存版足够。
@@ -4943,14 +4945,129 @@ VIP / 已购 一个小标记、更新时间右侧一小段灰字。序号按**�
 - 前几轮挂着的那几笔（`parseFragments` 的怪相、选项里 `{{}}` 与 `body` 混用、
   `media.ts` 的两条多行地址路、`java.get(键)`、**WebView 那一族（16 个名字）**）都没动
 
+### 第五十七轮：登录态 —— 写下来的东西，下一趟请求读得到
+
+第五十六轮末了那份「还没做」的单子里有一条 **登录流程没有入口**（第五十二 / 五十三 /
+五十四 / 五十五轮都记着）。这一轮把「书源自己的登录」这条线接起来。
+
+**一、先量：写和读根本不在同一次求值里。** 816 条源里：
+
+| 动作                                          | 处数    | 主要分布在哪儿                                                  |
+| --------------------------------------------- | ------- | --------------------------------------------------------------- |
+| `source.putLoginHeader`                       | 15      | loginUrl 8 / jsLib 5 / exploreUrl 1 / ruleBookInfo.init 1       |
+| `source.putLoginInfo`                         | 8       | loginUrl 4 / ruleContent.callBackJs 3 / ruleBookInfo.init 1     |
+| `source.getLoginHeader` / `getLoginHeaderMap` | 16 / 14 | jsLib 6 / exploreUrl 4 / ruleContent.content 2 / …              |
+| `source.getLoginInfo` / `getLoginInfoMap`     | 2 / 26  | loginUrl 21 / exploreUrl 2 / jsLib 1 / ruleContent.callBackJs 1 |
+
+写下来的是**那一次求值里的一张表**，求值一结束就没了。于是「登录成功了，翻一页
+又要重新登录」；而书源自己写的那句提示（`java.toast`）也没人看得到。
+
+**二、三件事接起来。**
+
+1. **落库**：迁移 `0015` 给 `sources` 加 `login_header` / `login_info` 两列。
+   重导同一条源**只换规则快照、留着登录态**（与 cookie 罐同一个路数）。
+   `putLoginHeader` / `putLoginInfo` / `removeLogin*` 每改一次就写穿
+   （`__loginHeaderOut` / `__loginInfoOut` → `collectLogin`），**要 `await`** ——
+   响应一返回，还在飞的 promise 会被掐掉。
+2. **请求带上**：取网层的三层请求头 —— 登录头 → 默认头 → 书源自己的 `header`，
+   **后面的盖前面的**；页面请求与媒体请求同一套。登录头放最前面是有意的：
+   它只是「补上缺的那几个头」（`Cookie` / `Authorization` / 站点自定义 token），
+   书源写过的 UA / Cookie 不该被登录那一刻的快照盖掉。（顺带说清一处：
+   登录头里的 UA **盖不过**默认 UA —— 它排在最前。语料里 15 处 `putLoginHeader`
+   全是 `Cookie` / `Authorization`，没有一条塞 UA，所以这条取舍没伤到人。）
+3. **能跑 `loginUrl`**：新增 `POST /api/sources/login`（`{ id, fields? }`），
+   回 `{ ok, message, loggedIn }` —— `message` 就是书源自己写的那句 `java.toast`。
+
+**三、`loginUrl` 有三档形态，量出来的分布是 40 / 76。** 116 条写了 `loginUrl` 的源里：
+
+| 档                            | 条数   | 例子                                                    | 本平台                                      |
+| ----------------------------- | ------ | ------------------------------------------------------- | ------------------------------------------- |
+| 脚本（定义了 `login()`）      | **33** | 📂台湾小说网、📂霹雳书屋                                | 能跑                                        |
+| 脚本（没有 `login()` 这一层） | 7      | 🎬🔞黄豆短剧、🌍🎨🔞夜读小说                            | 跑，但没有入口函数                          |
+| **一条登录页地址**            | **76** | `https://m.uaa.com/`、`/login.php`、`{ "url": "null" }` | **跑不了**（App 里是 WebView 打开让人手登） |
+
+这一量逼出两处修正：
+
+- **地址型不能当脚本跑。** 第一版没认这一档，它落到沙箱里报的是
+  `SyntaxError: unexpected token '/'` —— 把「我们打不开登录页」说成了
+  「书源的脚本写错了」。现在 `loginAddressOf()` 认出三种地址写法（裸地址 / 相对路径 /
+  JSON 的 `url` 字段），直接回一句明白话。
+- **脚本要宿主去调 `login()`。** 官方文档「认证与登录」写明 `loginUrl` 要
+  「实现一个 `login` 函数」，而且**用户输入在 `login` 函数里从
+  `source.getLoginInfoMap()` 取**（只有登录按钮函数才用 `result.get(...)`）。
+  语料里 **33 条定义了 `login()`、0 条自己调** —— 只求值不调用，那 33 条什么都不会
+  发生（连 toast 都没有），等于这一轮的主要场景根本没跑起来。`loginInvocation()`
+  补上这一句，两处刻意收窄：没有 `function login(` 的、自己已经在顶层调过的，
+  都原样返回（重复跑一次登录可能真的重复提交一次请求，不值得赌）。
+
+**四、`loggedIn` 的判据被冒烟当场纠了一次。** 表单字段是**先铺进内存 `loginInfo`**
+让 `login` 函数读得到的（见上），第一版拿「`loginInfo` 非空」当判据，于是
+「密码不对」那一趟也报 `loggedIn: true` —— 冒烟第 44 段第 ① 条把它抓出来。
+改成：**这一趟写出去的登录态非空**才算；这一趟没写过，就看**铺表单之前**库里那份。
+
+表单字段**只铺内存、不落库**，脚本自己决定要不要 `putLoginInfo` 保存 ——
+不直接落库有两个原因：那会把密码明文存进 D1；而且会让上面那个信号失真。
+
+**五、顺带量的一笔：沙箱求值的固定代价约 7ms。** 一次 `runInSandbox` 要新建
+runtime + context + 把 50KB 预置重新解析一遍。冒烟第 43 段那组数：
+无沙箱 40ms / 一次 `@js:1` 2303ms / 一次 `@js:{{}}` 2285ms / 三次 6923ms。
+这就是第五十六轮 `MAX_MARKED_CHAPTERS` 的量化依据，也是这一轮「登录只跑一次、
+之后靠落库的头」这个设计的取舍所在。
+
+**六、验证。**
+
+- 单测 **806 → 825**（新增 `test/login.test.ts`：`normalizeLoginScript` 六种形态 /
+  `loginAddressOf` 四种（含「脚本不能误判成地址」的反例）/ `loginInvocation` 五种 /
+  三层请求头的优先级与坏值容错）
+- 顺手把两条请求头解析与三层叠加抽成纯函数 `src/legado/sourceHeaders.ts` ——
+  `./source` 会连带引入带 WASM 的沙箱（Node 里跑不起来），单测没法直接测；
+  与 `./urlOptions` 是同一条路数
+- 冒烟**新增第 44 段**，六件事一起验（前两件是「不该登录成功的别登录成功」，
+  后四件是正向链路）：① 密码不对 → 带回想看提示、`loggedIn:false` ② 对照（没登录）
+  正文被 403 拦下 ③ 登录成功、当场读到 `putLoginInfo` 写进去的值
+  ④ **另一趟请求**带上登录头（页面放行）、沙箱里 `getLoginInfo()` 也读得到
+  ⑤ `removeLogin*` 之后又被拦 ⑥ 地址型 `loginUrl` 说清是 WebView 的登录页地址
+- 冒烟第 44 段的登录脚本按**官方形状**写（定义 `login()` + `getLoginInfoMap()` 读字段），
+  于是这一段同时验「宿主会调 `login()`」与「字段真的铺进了 `loginInfo`」
+- 靶子是测试站点新加的两个端点：`/fixture/login`（收账号密码回 `X-RC-Token`）、
+  `/fixture/need-login`（只在带着那个头时回 200）
+
+**七、线上核验**（`/api/probe` 报 `0.47.0`）。挑语料里写了 `loginUrl` 的真源，看真实站点：
+
+| 源                                            | 档     | 结果                                                                                                                                            |
+| --------------------------------------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| 📂霹雳书屋（`@js:` 标记 + 定义 `login()`）    | 脚本   | `ok:true`、`已切换线路：https://www.pili45.com`、**`loggedIn:true`** —— 真源上把登录跑通了，而且 `@js:` 标记被正确剥掉                          |
+| 📂台湾小说网（定义 `login()` 调 `checkSite`） | 脚本   | `ok:true`，脚本确实被调到（`login()` 跑了）；报 `本引擎不支持 Java 类 Packages.org.*` —— 是第五十二轮那份平台能力清单里的一档，与登录这一步无关 |
+| ⚡📂八月文学（`{ "url": "null" }`）           | 地址型 | 400 + 一句明白话（「用 WebView 打开让人手动登录」）                                                                                             |
+| 🌍🔞UAA小说·言璃版 / ⚡📂企鹅阅读（裸地址）   | 地址型 | 400 + 同一句明白话                                                                                                                              |
+
+还有一条**端到端**的（拿 httpbin 当回声，与第五十四轮验 cookie 同一路数）：临时导入
+一条源，`login()` 里只做 `putLoginHeader({"X-RC-R57":"hello"})`。未登录那一趟 httpbin
+看不到这个头（对照）；跑一次登录 → **另一趟** `/api/content` 请求，httpbin 回声里
+就有 `"X-Rc-R57": "hello"` —— 落库与「之后每趟请求都带上」两件事一次验完，临时源已清理。
+
+**这一轮仍然没做完的**
+
+- **登录没有 UI**：接口 `POST /api/sources/login` 有了，但前端还没有「填账号密码 →
+  点登录」那个界面（`loginUi` 那种表单在 App 里是原生渲染的，语料里 17 条还得先
+  求值才知道形状）
+- **76 条地址型 `loginUrl` 依旧跑不了**：那是 WebView 的活，本平台没有 WebView。
+  知情取舍 —— 现在至少会**说清楚**，而不是报一句 `SyntaxError`
+- **`loginUi` 里的按钮函数调不到**：只调了 `login()`。按钮（获取验证码、切换线路那种）
+  需要 UI 触发，本平台没有那层
+- **表单值不落库**（有意）：需要跨请求读账号的源（语料里极少数）会读不到
+- **`preUpdateJs` 明确不取**（5 源，App 侧「更新目录前跑一段脚本」）
+- 前几轮挂着的那几笔（`parseFragments` 的怪相、选项里 `{{}}` 与 `body` 混用、
+  `media.ts` 的两条多行地址路、`java.get(键)`、**WebView 那一族**）依旧没动
+
 ## 验证
 
 ```bash
 npm install
 npm run db:migrate   # 建本地 D1 表（首次、以及每次新增迁移后）
-npm test             # 单元测试（765 项，Node 里毫秒级跑完；另有十四个默认跳过的全量扫描，见下）
+npm test             # 单元测试（825 项，Node 里毫秒级跑完；另有十八个默认跳过的全量扫描，见下）
 npm run dev          # 起本地服务，浏览器打开首页即可用；另开一个终端跑下面这条
-npm run smoke        # 端到端：链路 + 书源管理 + 静态资源 + 账号/书架/进度/书签 + 改显示名/改密码 + 导出导入备份 + 书签清单 + 替换净化同步 + 笔记 + 媒体 + 字段模板 + 选择器@js: + 空选择器取值 + 列表标记（+ / 顶格 <js>）+ 沙箱助手 + setContent/digestHex/UI 动作 + 节点级助手/加解密 + 连接式取网与 result.toArray() + 书源变量落库 + 书的上下文与书的变量 + JS 尾段列表规则保留节点 + 连接符切分 + 列表规则（末尾那个词 / CSS 首段的位置后缀 / `!` 排除下标）+ 字段规则（CSS 式多段 `@`）+ 变量指令（`@put:` / `@get:` 含**跨请求**那一半）+ `init`（铺变量与**换根**两种）+ `<js>` 段 + JSONPath 尾段（`$[*]` / `$[:n]`）+ 地址尾部的请求选项（`地址,{选项}` / 排成多行的那份选项块）+ URL 选项里 `body` 写对象（`application/json`）+ 展示用字段的容错与 `warnings` + 单斜杠 XPath（`/a/p[1]/text()` 相对当前条目）+ 防盗链封面走 `/api/media` 代取 + http 封面（混合内容）也代取 + `<script>` / `<style>` 也是元素（`java.getElement("script")` 那条路） + JSOUP 简写 `class.A B`（两个类都要有） + `source.getLoginInfoMap()` 的 Map 语义 + URL 字段 JS + 发现/首页
+npm run smoke        # 端到端：链路 + 书源管理 + 静态资源 + 账号/书架/进度/书签 + 改显示名/改密码 + 导出导入备份 + 书签清单 + 替换净化同步 + 笔记 + 媒体 + 字段模板 + 选择器@js: + 空选择器取值 + 列表标记（+ / 顶格 <js>）+ 沙箱助手 + setContent/digestHex/UI 动作 + 节点级助手/加解密 + 连接式取网与 result.toArray() + 书源变量落库 + 书的上下文与书的变量 + JS 尾段列表规则保留节点 + 连接符切分 + 列表规则（末尾那个词 / CSS 首段的位置后缀 / `!` 排除下标）+ 字段规则（CSS 式多段 `@`）+ 变量指令（`@put:` / `@get:` 含**跨请求**那一半）+ `init`（铺变量与**换根**两种）+ `<js>` 段 + JSONPath 尾段（`$[*]` / `$[:n]`）+ 地址尾部的请求选项（`地址,{选项}` / 排成多行的那份选项块）+ URL 选项里 `body` 写对象（`application/json`）+ 展示用字段的容错与 `warnings` + 单斜杠 XPath（`/a/p[1]/text()` 相对当前条目）+ 防盗链封面走 `/api/media` 代取 + http 封面（混合内容）也代取 + `<script>` / `<style>` 也是元素（`java.getElement("script")` 那条路） + JSOUP 简写 `class.A B`（两个类都要有） + `source.getLoginInfoMap()` 的 Map 语义 + URL 字段 JS + 发现/首页 + cookie 罐（收 / 发 / 按源落库）+ 重定向自己跟（302 上的 `Set-Cookie` 与 `Location`）+ 目录里的 `isVip` / `isPay` / `isVolume` / `updateTime` + 登录态（跑一次 `loginUrl` → 落库 → 之后每趟请求都带上）
 ```
 
 另外还有一条**不进 CI 的**体检命令（它要打真实站点，默认打线上那台）：
