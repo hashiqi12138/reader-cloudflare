@@ -13,6 +13,7 @@ import {
     rootSelection,
     type Selection,
 } from '../engine/analyze'
+import { ruleHasJs } from '../engine/directives'
 import type { BookSource, Chapter, RuleContext, SearchBook } from '../engine/types'
 import { SEARCH_TIMEOUT_MS, UpstreamError, fetchText } from '../lib/http'
 import { tocFlag, tocText } from './chapterFields'
@@ -479,10 +480,14 @@ const MAX_TOC_PAGES = 20
 /**
  * 逐条标注（`isVip` / `isPay` / `isVolume` / `updateTime`）最多为多少条求值
  *
- * 量出来的代价：**一次沙箱求值约 4～8ms**（冒烟第 43 段：300 条 × 三条 `@js:` 逐条字段
- * ≈ 900 次求值，实测 7.1 秒）。一本书动辄上千章，这几条字段又**逐条**求值 ——
- * 只要它们写成了 `@js:` / `{{}}`（语料里 17 / 34 / 4 / 2 个源是这样），
- * 一本两千章的书就是上万次求值，整次目录请求必然超时。
+ * 只在这几条规则**真的要走沙箱**时才生效（判据是 `ruleHasJs`）—— 得分为两种情形：
+ *
+ *   - **纯选择器 / 裸字段名**（语料里 45 + 74 + 25 + 7 个源中，各自一半以上是这样）：
+ *     一次求值就是一次 cheerio 查询，便宜得多，**不设上限**（📚企鹅阅读 的
+ *     `.list@.lock@html` 就是这一类：1663 章全都标得出来）
+ *   - **`@js:` / `{{}}`**：每一条都要进一次沙箱。量出来的代价是**一次 4～8ms**
+ *     （冒烟第 43 段：300 条 × 三条 `@js:` 字段 ≈ 900 次求值，实测 7.1 秒）。
+ *     一本书动辄上千章 —— 两千章就是上万次求值，整次目录请求必然超时
  *
  * 而它们都只是**标注**：没有它们目录照样能读，有它们更好。所以给一个上限，
  * 超过就停下、并在 `warning` 里说清楚（**不静默** —— 「少了一截」必须让用户看见）。
@@ -517,7 +522,17 @@ export async function fetchChapters(
     const seenChapterUrls = new Set<string>()
     const visitedTocUrls = new Set<string>()
     const notes: string[] = []
-    /** 已经为多少条求过逐条标注了（跨页累计，上限见 MAX_MARKED_CHAPTERS） */
+    /**
+     * 逐条标注的求值上限
+     *
+     * **只在真的要走沙箱时才设限**：纯选择器 / 裸字段名的规则便宜得多（一次 cheerio 查询），
+     * 给它们也卡上限等于白白丢掉能拿到的标注 —— 📚企鹅阅读 的 1663 章全是这一类。
+     */
+    const markRules = [rule.isVip, rule.isPay, rule.isVolume, rule.updateTime].filter(
+        (r): r is string => typeof r === 'string' && r.trim() !== '',
+    )
+    const markCap = markRules.some((r) => ruleHasJs(r)) ? MAX_MARKED_CHAPTERS : Infinity
+    /** 已经为多少条求过逐条标注了（跨页累计） */
     let markedCount = 0
     let marksTruncated = false
 
@@ -571,8 +586,8 @@ export async function fetchChapters(
              * 超过 `MAX_MARKED_CHAPTERS` 之后不再求值（代价见那个常量的说明），
              * 并在 warning 里说出来。
              */
-            const marked = markedCount < MAX_MARKED_CHAPTERS
-            const hasMarks = Boolean(rule.isVip || rule.isPay || rule.isVolume || rule.updateTime)
+            const marked = markedCount < markCap
+            const hasMarks = markRules.length > 0
             const isVolume =
                 rule.isVolume && marked
                     ? tocFlag(await analyzeString(item, rule.isVolume, tocCtx))
@@ -623,7 +638,7 @@ export async function fetchChapters(
     if (marksTruncated) {
         notes.push(
             `目录超过 ${MAX_MARKED_CHAPTERS} 条，后面那些章节的 isVip / isPay / isVolume / updateTime 没有取` +
-                '（每条都要一次脚本求值，代价太大——不影响阅读，只是目录里没有那些标注）',
+                '（这几条规则要用脚本求值、每条一次，代价太大——不影响阅读，只是目录里没有那些标注）',
         )
     }
 

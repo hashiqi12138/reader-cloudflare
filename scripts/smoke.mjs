@@ -6104,6 +6104,19 @@ console.log('\n=== 43. 目录里的 isVip / isPay / isVolume / updateTime（以�
         `第1条=${JSON.stringify(cappedChapters[0]?.isVip)} 第350条=${JSON.stringify(cappedChapters[350]?.isVip)}`,
     )
 
+    // ⑥ 便宜的那一类（纯 `$.字段`，不走沙箱）**不该被卡上限** —— 线上 📚企鹅阅读 有 1663 章
+    const cheap = await getJson(
+        `/api/toc?sourceId=${encodeURIComponent(id)}&url=${encodeURIComponent(`${BASE}/fixture/api/toc?n=350`)}`,
+    )
+    const cheapChapters = cheap.json?.chapters ?? []
+    check(
+        cheap.json?.count === 350 &&
+            !cheap.json?.warning &&
+            cheapChapters[340]?.isVip !== undefined,
+        '⑥ 纯字段名（不走沙箱）的那一类不卡上限：350 条全带标注、也没有 warning',
+        `count=${cheap.json?.count} 第341条=${JSON.stringify(cheapChapters[340]?.isVip)} warning=${String(cheap.json?.warning ?? '（没有）')}`,
+    )
+
     for (const one of [id, jsId]) {
         const done = await call('DELETE', `/api/sources?id=${encodeURIComponent(one)}`)
         if (done.status !== 200) console.log(`  删 ${one} 时回了 ${done.status}：${done.raw ?? ''}`)
