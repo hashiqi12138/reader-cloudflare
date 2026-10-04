@@ -25,6 +25,11 @@ export interface ReleaseNote {
 
 export const CHANGELOG: ReleaseNote[] = [
     {
+        version: '0.55.0',
+        date: '2026-10-05',
+        note: '平台兼容层：数据库 / 静态资源 / WASM 收敛到 src/platform（只抽接口，还没落第二个适配器）',
+    },
+    {
         version: '0.54.1',
         date: '2026-10-05',
         note: '手机上的页脚回来了：版本号与「关于」入口不再在窄屏里消失',
