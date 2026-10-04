@@ -1,0 +1,106 @@
+/**
+ * 登录态：脚本形态归一（`normalizeLoginScript`）与三层请求头
+ *
+ * 第五十七轮把三件事接起来：**能跑 `loginUrl`**、**落库**、**请求带上**。
+ * 这里钉住其中不用起沙箱、不起网络的两段：
+ *
+ *   ① `loginUrl` 里那段脚本的**形态** —— 语料里既有裸脚本，也有按「规则字段」
+ *      加了 `@js:` / `<js>…</js>` 标记的；标记不剥掉，沙箱会拿它当 JS 解析，
+ *      报出来的是 `SyntaxError: unexpected token '@'`（把人往「书源写错了」方向带）。
+ *   ② 请求头的**三层叠加顺序** —— 登录头 → 默认头 → 书源自己的 `header`，
+ *      后面的盖前面的。写反了会让一次登录的快照把书源写过的 UA / Cookie 闷掉。
+ *
+ * 沙箱内那半（`putLoginHeader` 写穿、`getLoginInfo` 读回来）不走单测 ——
+ * `src/engine/js.ts` 顶层 import 了 `.wasm`，vitest 加载不了（同第五十三轮），
+ * 那部分由冒烟第 44 段在线的站点上验。
+ */
+
+import { describe, expect, it } from 'vitest'
+
+import type { BookSource } from '../src/engine/types'
+import { normalizeLoginScript } from '../src/legado/loginScript'
+import { requestHeadersFor } from '../src/legado/sourceHeaders'
+
+/** 只放受测的那几列：`loginHeader` / `header` */
+function sourceOf(patch: Partial<BookSource>): Pick<BookSource, 'loginHeader' | 'header'> {
+    return { loginHeader: patch.loginHeader, header: patch.header }
+}
+
+describe('normalizeLoginScript：`loginUrl` 里那段脚本的形态', () => {
+    it('裸脚本原样留着（语料里绝大多数就是这个形状）', () => {
+        const src = 'function checkSite(){ try{ var t = Date.now(); } catch(e){} }'
+        expect(normalizeLoginScript(src)).toBe(src)
+    })
+
+    it('开头的 `@js:` 剥掉（📂霹雳书屋 那个形状：标记后面接函数体）', () => {
+        expect(
+            normalizeLoginScript('@js:\nfunction login(){ var m = source.getLoginInfoMap() }'),
+        ).toBe('function login(){ var m = source.getLoginInfoMap() }')
+    })
+
+    it('整段被 `<js>…</js>` 包住时连标签一起去掉，属性也认', () => {
+        expect(normalizeLoginScript('<js>var QQ_GROUP = "1097919737"</js>')).toBe(
+            'var QQ_GROUP = "1097919737"',
+        )
+        expect(normalizeLoginScript('<js type="text/javascript">login()</js>')).toBe('login()')
+    })
+
+    it('散落在**中间**的 `@js:` 不动 —— 那可能是脚本自己的字符串内容', () => {
+        const src = 'var marker = "@js:"; login()'
+        expect(normalizeLoginScript(src)).toBe(src)
+    })
+
+    it('空 / 只有空白 → 空串（调用方据此判「没写登录脚本」）', () => {
+        expect(normalizeLoginScript(undefined)).toBe('')
+        expect(normalizeLoginScript(null)).toBe('')
+        expect(normalizeLoginScript('')).toBe('')
+        expect(normalizeLoginScript('   \n\t ')).toBe('')
+    })
+
+    it('两侧的空白一并剪掉', () => {
+        expect(normalizeLoginScript('  \n  login()  \n  ')).toBe('login()')
+    })
+})
+
+describe('三层请求头：登录头 / 默认头 / 书源自己写的 header', () => {
+    it('书源自己写的头最优先，能盖过登录时的快照', () => {
+        const source = sourceOf({
+            loginHeader: JSON.stringify({ 'User-Agent': 'LoginUA', 'X-Login': '1' }),
+            header: JSON.stringify({ 'User-Agent': 'SourceUA', 'X-Source': '1' }),
+        })
+        const headers = requestHeadersFor('https://a.com/x', source)
+        // 登录头带来的、书源没表态的头保留下来
+        expect(headers['X-Login']).toBe('1')
+        expect(headers['X-Source']).toBe('1')
+        // 书源明确写过的 UA 盖过登录快照
+        expect(headers['User-Agent']).toBe('SourceUA')
+    })
+
+    it('登录头只**补**默认头里没有的那几个；默认的 UA 它盖不过', () => {
+        const source = sourceOf({
+            loginHeader: JSON.stringify({ 'User-Agent': 'LoginUA', Cookie: 'sid=1' }),
+        })
+        const headers = requestHeadersFor('https://a.com/x', source)
+        // 默认头里没有 Cookie，登录头把它补上（这正是登录头的作用）
+        expect(headers['Cookie']).toBe('sid=1')
+        // 默认头里有 UA，且它排在登录头后面 —— 登录那一刻的 UA 快照盖不过它
+        expect(headers['User-Agent']).toContain('Mozilla/5.0')
+        // 默认头的其余几条还在
+        expect(headers['Accept']).toBeDefined()
+    })
+
+    it('登录头坏了当没有，不报错（🎨🔞18色漫画 往这里塞的是配置，还带 `#` 前缀）', () => {
+        for (const raw of ['#{not json}', 'not json at all', '[1,2,3]', '', 'null']) {
+            const source = sourceOf({ loginHeader: raw })
+            const headers = requestHeadersFor('https://a.com/x', source)
+            // 坏掉的登录头不该带出任何自定义头；默认头照常
+            expect(headers['User-Agent']).toContain('Mozilla/5.0')
+        }
+    })
+
+    it('登录头里的值统一成字符串（数字 token 也算）', () => {
+        const source = sourceOf({ loginHeader: JSON.stringify({ 'X-Uid': 12345 }) })
+        const headers = requestHeadersFor('https://a.com/x', source)
+        expect(headers['X-Uid']).toBe('12345')
+    })
+})

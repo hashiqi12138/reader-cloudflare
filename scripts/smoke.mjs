@@ -5621,8 +5621,9 @@ console.log('\n=== 39. `source.getLoginInfoMap()` 给的是 Map（书源写 `inf
         String(book?.name ?? ''),
     )
     check(
-        book?.author === 'wrValue=',
-        '书源那种 `info == null ? null : info.get(…)` 写得通，没有信息时回空串',
+        book?.author === 'wrValue=V1',
+        '书源那种 `info == null ? null : info.get(…)` 写得通（第五十七轮起 putLoginInfo 会**落库**，' +
+            '所以同一个源**后一条**字段规则读得到前一条写进去的值——以前只活在那一次求值里）',
         String(book?.author ?? ''),
     )
 
@@ -6125,6 +6126,141 @@ console.log('\n=== 43. 目录里的 isVip / isPay / isVolume / updateTime（以�
         String(s.id).includes('toc-fields'),
     )
     check(left.length === 0, '目录字段的两个测试源已清理', left.map((s) => s.id).join(' / '))
+}
+
+console.log('\n=== 44. 登录态：跑一次 loginUrl，之后每趟请求都带着 ===')
+{
+    /**
+     * 量（816 条源）：写登录态的有 15 处 `source.putLoginHeader` / 8 处 `putLoginInfo`，
+     * 读的有 30 处 `getLoginHeader*` / 28 处 `getLoginInfo*` —— 两边一直对不上：
+     * 写下来的只活在**那一次求值**里，下一趟请求读到的还是空串。于是
+     * 「登录成功了，翻一页又要重新登录」，而书源自己写的那句提示（toast）也没人看得到。
+     *
+     * 这一轮把三件事接起来：**落库**（sources.login_header / login_info）、
+     * **请求带上**（取网层的三层请求头）、**能跑 loginUrl**（POST /api/sources/login）。
+     *
+     * 靶子是测试站点新加的两个端点：`/fixture/login` 收账号密码回一个 token，
+     * `/fixture/need-login` 只在带着 `X-RC-Token` 时才回 200。
+     * 五件事一起验 —— 前两件是「不该登录成功的别登录成功」，后三件是正向链路。
+     */
+    const id = `user:${BASE}/login-57`
+    const coldId = `user:${BASE}/login-57-cold`
+    for (const one of [id, coldId])
+        await call('DELETE', `/api/sources?id=${encodeURIComponent(one)}`)
+
+    const loginScript =
+        `@js:(function(){` +
+        `var acc=String(result.get('账号'));` +
+        `var pw=String(result.get('密码'));` +
+        `var data=JSON.parse(String(java.post('${BASE}/fixture/login','username='+acc+'&password='+pw,{})));` +
+        `if(!data.token){ java.toast('账号或密码不对'); return; }` +
+        `source.putLoginHeader(JSON.stringify({'X-RC-Token':data.token}));` +
+        `source.putLoginInfo(JSON.stringify({user:acc}));` +
+        `java.toast('登录成功：'+acc+'（'+source.getLoginInfoMap().get('user')+'）');` +
+        `})()`
+
+    const baseRules = {
+        searchUrl: '/fixture/search?q={{key}}',
+        ruleSearch: {
+            bookList: '@css:div.result-item',
+            name: '@css:h3.title@text',
+            bookUrl: '@css:h3.title a@href',
+        },
+        // 正文规则只做一件事：把引擎那侧**读到的登录信息**报出来。
+        // 目标页要求带着登录头才给 200，所以「这一趟能成功」本身就证明头带上了
+        ruleContent: { content: '@js:source.getLoginInfo()' },
+    }
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: '登录（临时）',
+                bookSourceUrl: `${BASE}/login-57`,
+                loginUrl: loginScript,
+                ...baseRules,
+            },
+            {
+                // 对照：同样会读登录信息，但从来没登录过
+                bookSourceName: '登录（对照·没登录）',
+                bookSourceUrl: `${BASE}/login-57-cold`,
+                loginUrl: loginScript,
+                ...baseRules,
+            },
+        ]),
+    )
+
+    const login = (sourceId, fields) =>
+        call('POST', '/api/sources/login', JSON.stringify({ id: sourceId, fields }))
+    const contentOf = (sourceId) =>
+        getJson(
+            `/api/content?sourceId=${encodeURIComponent(sourceId)}&url=${encodeURIComponent(`${BASE}/fixture/need-login`)}`,
+        )
+
+    // ① 密码错的：书源自己那句 toast 要带回来，且**不该**算登录成功
+    const bad = await login(id, { 账号: 'u1', 密码: 'bad' })
+    check(
+        bad.json?.ok === true &&
+            bad.json?.message === '账号或密码不对' &&
+            bad.json?.loggedIn === false,
+        '① 密码不对时：把书源自己那句提示带回来，loggedIn 是 false',
+        JSON.stringify(bad.json ?? bad.raw),
+    )
+
+    // ② 没登录过的源：正文那一趟应当被站点拦下（403）—— 证明 ③ 靠的是登录态
+    const cold = await contentOf(coldId)
+    check(
+        String(cold.json?.error ?? '').includes('403'),
+        '② 对照（没登录）：需要登录的页面被拦下（403）',
+        String(cold.json?.error ?? cold.json?.content ?? '（居然进去了）'),
+    )
+
+    // ③ 密码对的：登录成功、落库
+    const good = await login(id, { 账号: 'u1', 密码: 'p1' })
+    check(
+        good.json?.message === '登录成功：u1（u1）',
+        '③ 登录成功：书源的那句话带回来，而且它当场就读到了 putLoginInfo 写进去的值',
+        JSON.stringify(good.json ?? good.raw),
+    )
+
+    // ④ 另一趟请求（正文）—— 它带着落库的那份登录头，于是站点放行、规则也读得到登录信息
+    const after = await contentOf(id)
+    check(
+        after.json?.content === '{"user":"u1"}',
+        '④ **另一趟请求**带上了登录头（页面放行），沙箱里 source.getLoginInfo() 也读得到',
+        String(after.json?.content ?? after.json?.error ?? ''),
+    )
+
+    // ⑤ 退出登录：清掉之后另一趟请求又该被拦
+    //（重新导入同一条源 = 换掉规则快照，**登录态那两列是留着的** —— 这正是迁移里写的那条）
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                ...baseRules,
+                bookSourceName: '登录（临时）',
+                bookSourceUrl: `${BASE}/login-57`,
+                loginUrl: 'source.removeLoginHeader(); source.removeLoginInfo();',
+            },
+        ]),
+    )
+    await login(id, {})
+    const out = await contentOf(id)
+    check(
+        String(out.json?.error ?? '').includes('403'),
+        '⑤ 退出登录（removeLoginHeader / removeLoginInfo）之后，站点又拦下了',
+        String(out.json?.error ?? out.json?.content ?? '（居然还进得去）'),
+    )
+
+    for (const one of [id, coldId])
+        await call('DELETE', `/api/sources?id=${encodeURIComponent(one)}`)
+    check(
+        !((await getJson('/api/sources')).json?.sources ?? []).some((s) =>
+            String(s.id).includes('login-57'),
+        ),
+        '登录的两个测试源已清理',
+    )
 }
 
 console.log('\n=== 结果 ===')
