@@ -50,3 +50,48 @@ export function isCpuLimitError(err) {
     const text = String(err.message ?? err)
     return text.includes('exceeded') || text.includes('CPU')
 }
+
+// ---------------------------------------------------------------- 搜索范围（指定书源）
+
+/**
+ * 能拿来搜的书源：启用的、且有搜索规则
+ *
+ * `hasSearch` 由服务端算好（`/api/sources` 的摘要，见 `src/data/db.ts`）——
+ * 前端不重新判断「有没有 searchUrl」，那是把同一件事算两遍。
+ * **保持服务端给的顺序**（按导入顺序 / 名字），与「书源」页看到的顺序一致。
+ */
+export function searchableSources(sources) {
+    return (Array.isArray(sources) ? sources : []).filter(
+        (one) => one && one.enabled !== false && one.hasSearch === true,
+    )
+}
+
+/** 在候选里按关键词筛（名字或分组，去空白、不区分大小写）；关键词为空就全给 */
+export function matchSources(list, keyword) {
+    const all = Array.isArray(list) ? list : []
+    const needle = String(keyword ?? '')
+        .trim()
+        .toLowerCase()
+    if (needle === '') return all.slice()
+    return all.filter((one) => {
+        const name = String(one?.name ?? '').toLowerCase()
+        const group = String(one?.group ?? '').toLowerCase()
+        return name.includes(needle) || group.includes(needle)
+    })
+}
+
+/**
+ * 把存下来的选择收敛到「现在还在、还能搜」的源
+ *
+ * 选择存在 localStorage 里，而书源会被删掉或停用。不收敛的话，界面会显示「已选 3 个」
+ * 而实际只搜到 1 个 —— 而且**不会报错**。顺带去重，并保持原来的先后顺序。
+ */
+export function normalizeSelection(ids, sources) {
+    const usable = new Set(searchableSources(sources).map((one) => String(one.id)))
+    const out = []
+    for (const id of Array.isArray(ids) ? ids : []) {
+        const text = String(id)
+        if (usable.has(text) && !out.includes(text)) out.push(text)
+    }
+    return out
+}

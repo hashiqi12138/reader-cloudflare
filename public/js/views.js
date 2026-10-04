@@ -34,7 +34,15 @@ import {
     toast,
 } from './core.js'
 import { mergeBooks, sourceBookKey } from './merge.js'
-import { SEARCH_MIN_PAGE, SEARCH_PAGE_SIZE, isCpuLimitError, nextPageSize } from './searchPlan.js'
+import {
+    SEARCH_MIN_PAGE,
+    SEARCH_PAGE_SIZE,
+    isCpuLimitError,
+    matchSources,
+    nextPageSize,
+    normalizeSelection,
+    searchableSources,
+} from './searchPlan.js'
 import { createSourcesCache } from './sourcesCache.js'
 
 /**
@@ -1286,6 +1294,20 @@ function forgetSearch() {
     mergedIndex.clear()
 }
 
+/**
+ * 搜索范围的读写（`pref.searchScope`，换行分隔的书源 id）
+ *
+ * 放在 localStorage 而不是内存里：用户挑好的那几个源，下次打开应用还该是他挑的那些。
+ * 换行分隔的理由见 `core.js` 里那个收拢函数。
+ */
+const readSearchScope = () =>
+    String(prefs.get('searchScope') ?? '')
+        .split('\n')
+        .map((one) => one.trim())
+        .filter((one) => one !== '')
+
+const writeSearchScope = (ids) => prefs.set('searchScope', ids.join('\n'))
+
 export async function viewSearch(host) {
     const input = el('input', {
         type: 'search',
@@ -1296,21 +1318,8 @@ export async function viewSearch(host) {
         },
     })
     const resultHost = el('div')
-
-    host.replaceChildren(
-        el('h1', { class: 'page-title', text: '搜索' }),
-        el('div', { class: 'card search-bar' }, [
-            el('div', { class: 'row' }, [
-                el('div', { class: 'spacer' }, [input]),
-                el('button', { class: 'btn primary', text: '搜索', onclick: () => run() }),
-            ]),
-            el('p', {
-                class: 'muted tiny',
-                text: '一次搜一批书源（先从最可能出结果的开始），要更多就点下面的「继续加载」。',
-            }),
-        ]),
-        resultHost,
-    )
+    const scopeHost = el('div', { class: 'row search-scope' })
+    const pickerHost = el('div', { class: 'search-picker', hidden: true })
 
     /**
      * 搜索状态放在**视图作用域**（而不再是 `run()` 里）
@@ -1324,6 +1333,168 @@ export async function viewSearch(host) {
     let totalSources = 0
     let pageLimit = SEARCH_PAGE_SIZE
     let busy = false
+
+    /**
+     * 能搜的书源 —— 选范围时的候选
+     *
+     * 用 `loadSources()`（「书源」页那份缓存），切过来不会多打一次请求。
+     * 读不到也不影响「搜全部」那条路，所以只记下错误，不中断整个页面。
+     */
+    let pickable = []
+    let sourcesError = ''
+    try {
+        pickable = searchableSources((await loadSources())?.sources ?? [])
+    } catch (err) {
+        sourcesError = err.message
+    }
+
+    /** 用户指定的搜索范围；空数组 = 不限定，按健康度一页一页来 */
+    let selected = normalizeSelection(readSearchScope(), pickable)
+
+    /** 范围那一行：显示当前范围 + 开合选择面板 + 一键清除 */
+    function paintScope() {
+        // 走 `setChildren` 而不是原生 `replaceChildren`：最后一个占位是 `? … : null`，
+        // 原生的那个会把 null 变成文本 "null" 渲染出来（见 `test/dom.test.mjs`）
+        setChildren(scopeHost, [
+            el('span', { class: 'muted tiny', text: '搜索范围：' }),
+            el('strong', {
+                class: 'scope-value',
+                text: selected.length > 0 ? `指定 ${selected.length} 个书源` : '全部书源',
+            }),
+            el('div', { class: 'spacer' }),
+            el('button', {
+                class: 'btn sm ghost',
+                text: pickerHost.hidden ? '选择书源' : '收起',
+                onclick: () => {
+                    pickerHost.hidden = !pickerHost.hidden
+                    if (pickerHost.hidden) pickerHost.replaceChildren()
+                    else paintPicker()
+                    paintScope()
+                },
+            }),
+            selected.length > 0
+                ? el('button', {
+                      class: 'btn sm ghost',
+                      text: '清除',
+                      onclick: () => applySelection([]),
+                  })
+                : null,
+        ])
+    }
+
+    /**
+     * 书源选择面板
+     *
+     * 面板里改的是**草稿**，点「完成」才生效 —— 勾一个就重搜一次，既费额度，
+     * 也让「勾了三个源结果搜了三遍」这种事发生。
+     */
+    function paintPicker() {
+        // 复用「换源」那套 `.picker-*` 样式（见 style.css）：书源清单的形状完全一样
+        const filter = el('input', {
+            class: 'picker-search',
+            type: 'search',
+            placeholder: '按名字或分组筛',
+        })
+        const listHost = el('div', { class: 'picker-list' })
+        const foot = el('div', { class: 'row picker-foot' })
+        let draft = [...selected]
+        let matched = []
+
+        function paintFoot() {
+            foot.replaceChildren(
+                el('span', { class: 'muted tiny', text: `已选 ${draft.length} 个` }),
+                el('div', { class: 'spacer' }),
+                el('button', {
+                    class: 'btn sm ghost',
+                    text: '清空',
+                    onclick: () => {
+                        draft = []
+                        paintList()
+                    },
+                }),
+                el('button', {
+                    class: 'btn sm primary',
+                    text: '完成',
+                    onclick: () => {
+                        pickerHost.hidden = true
+                        pickerHost.replaceChildren()
+                        applySelection(draft)
+                    },
+                }),
+            )
+        }
+
+        function paintList() {
+            matched = matchSources(pickable, filter.value)
+            listHost.replaceChildren(
+                ...(matched.length === 0
+                    ? [el('p', { class: 'muted tiny', text: '没有匹配的书源。' })]
+                    : matched.map((one) =>
+                          el('label', { class: 'picker-item' }, [
+                              el('input', {
+                                  type: 'checkbox',
+                                  checked: draft.includes(String(one.id)),
+                                  onchange: (event) => {
+                                      const id = String(one.id)
+                                      if (event.target.checked) {
+                                          if (!draft.includes(id)) draft.push(id)
+                                      } else {
+                                          draft = draft.filter((one) => one !== id)
+                                      }
+                                      paintFoot()
+                                  },
+                              }),
+                              el('span', { class: 'picker-item-name', text: one.name }),
+                              one.group
+                                  ? el('span', { class: 'badge ghost', text: one.group })
+                                  : null,
+                          ]),
+                      )),
+            )
+            paintFoot()
+        }
+
+        filter.addEventListener('input', paintList)
+        pickerHost.replaceChildren(
+            ...(sourcesError !== ''
+                ? [alertBox('warn', '读不到书源清单，只能搜全部', sourcesError)]
+                : pickable.length === 0
+                  ? [el('p', { class: 'muted tiny', text: '没有可搜的书源。' })]
+                  : [filter, listHost, foot]),
+        )
+        paintList()
+    }
+
+    /** 定下新的范围：存下来、作废旧结果，并按新范围重搜一次 */
+    function applySelection(next) {
+        const before = selected.join('\n')
+        selected = normalizeSelection(next, pickable)
+        writeSearchScope(selected)
+        paintScope()
+        if (before === selected.join('\n')) return
+
+        searchCache = null
+        if (keyword !== '') void run()
+        else resultHost.replaceChildren()
+    }
+
+    host.replaceChildren(
+        el('h1', { class: 'page-title', text: '搜索' }),
+        el('div', { class: 'card search-bar' }, [
+            el('div', { class: 'row' }, [
+                el('div', { class: 'spacer' }, [input]),
+                el('button', { class: 'btn primary', text: '搜索', onclick: () => run() }),
+            ]),
+            el('p', {
+                class: 'muted tiny',
+                text: '默认一次搜一批书源（先从最可能出结果的开始），要更多就点「继续加载」；也可以指定几个书源，只搜它们。',
+            }),
+            scopeHost,
+            pickerHost,
+        ]),
+        resultHost,
+    )
+    paintScope()
 
     /** 书架状态：卡片上的「已加入」和「优先读哪个源」都看它。读不到不影响搜索 */
     try {
@@ -1339,22 +1510,27 @@ export async function viewSearch(host) {
      * 一次把全部书源读出来再求值必然被掐（见 searchPlan.js 与 README「第二十六轮」）。
      * 被掐时**不换时刻重试** —— 线上实测额度恢复得很慢，紧接着再发照样被掐 ——
      * 而是把这一页**折半**再试，一路折到 1 个源。
+     *
+     * **指定了书源就换一条路**：一次把用户选的那几个发过去（`sourceIds`），
+     * 而且**不折半** —— 范围是用户定的，少搜一个就不是他要的结果了，宁可报错让他重来。
      */
     async function loadPage() {
+        const scoped = selected.length > 0
         for (;;) {
             try {
-                const data = await postJson('/api/search', {
-                    keyword,
-                    offset: searched,
-                    limit: pageLimit,
-                })
+                const data = await postJson(
+                    '/api/search',
+                    scoped
+                        ? { keyword, sourceIds: [...selected] }
+                        : { keyword, offset: searched, limit: pageLimit },
+                )
                 totalSources = data.totalSources ?? searched + (data.searched ?? 0)
                 perSource.push(...(data.sources ?? []))
                 searched += data.searched ?? 0
                 remember()
                 return
             } catch (err) {
-                if (isCpuLimitError(err) && pageLimit > SEARCH_MIN_PAGE) {
+                if (!scoped && isCpuLimitError(err) && pageLimit > SEARCH_MIN_PAGE) {
                     pageLimit = nextPageSize(pageLimit)
                     continue
                 }
@@ -1365,7 +1541,14 @@ export async function viewSearch(host) {
 
     /** 每页回来就记一次缓存：返回搜索页时直接摆出来，一个请求都不发 */
     function remember() {
-        searchCache = { keyword, perSource, searched, totalSources, pageLimit }
+        searchCache = {
+            keyword,
+            perSource,
+            searched,
+            totalSources,
+            pageLimit,
+            selected: [...selected],
+        }
     }
 
     /** 继续加载：用户点一次才花一批额度 */
@@ -1554,6 +1737,11 @@ export async function viewSearch(host) {
         searched = searchCache.searched
         totalSources = searchCache.totalSources
         pageLimit = searchCache.pageLimit
+        // 缓存里的范围优先于偏好里那份：缓存代表的就是「屏幕上这批结果是按哪个范围搜的」
+        if (Array.isArray(searchCache.selected)) {
+            selected = normalizeSelection(searchCache.selected, pickable)
+            paintScope()
+        }
         input.value = keyword
         paint(true)
     } else if (lastKeyword !== '') {

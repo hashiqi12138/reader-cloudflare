@@ -233,6 +233,13 @@ const prefKeys = {
     turnMode: (v) => (['cover', 'slide', 'none'].includes(String(v)) ? String(v) : 'cover'),
     /** 目录里每章标题最多显示多少字（长的目录名会把列表撑烂） */
     chapterTitleLimit: (v) => String(Math.min(60, Math.max(10, Number(v) || 24))),
+    /**
+     * 搜索时只搜哪几个书源（存 id，**换行分隔**；空串 = 不限定，按健康度分批来）
+     *
+     * 用换行而不是逗号：书源 id 形如 `user:https://…#禁漫API`，里面本来就可能带逗号。
+     * 收拢成字符串而不是数组，是为了沿用 `prefKeys` 这套「一个键一个收拢函数」的形状。
+     */
+    searchScope: (v) => String(v ?? '').trim(),
 }
 
 /** 可选的阅读背景。与 style.css 里的 `[data-paper=…]` 一一对应 */

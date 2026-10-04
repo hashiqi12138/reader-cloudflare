@@ -619,6 +619,31 @@ main#view {
     white-space: nowrap;
 }
 
+/*
+ * 搜索范围：那一行字 + 选择面板
+ *
+ * 面板是**内联**在卡片里的，不是浮层（与上面「换源」那个不同）—— 它可以有几十条，
+ * 做成浮层会盖住结果，而用户挑书源时要能同时看结果。
+ */
+.search-scope {
+    align-items: center;
+    gap: var(--sp-2);
+    margin-top: var(--sp-2);
+}
+.search-picker {
+    margin-top: var(--sp-3);
+    padding-top: var(--sp-3);
+    border-top: 1px solid var(--line);
+}
+.search-picker[hidden] {
+    display: none;
+}
+.picker-foot {
+    align-items: center;
+    gap: var(--sp-2);
+    margin-top: var(--sp-2);
+}
+
 .badge {
     display: inline-block;
     padding: 2px 8px;
