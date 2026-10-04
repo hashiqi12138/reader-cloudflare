@@ -101,7 +101,7 @@ export function resolveCoverAddress(value: string, base: string): string {
  * 换行会被 URL 解析器当成非法字符删掉，得到几条地址首尾相接的串：
  * 喜马拉雅的 nextTocUrl 正是这样拼出 9 条地址，然后请求一个必然 404 的怪地址。
  */
-/** 地址类字段：一列候选里取**第一个非空行**，拼错一个字符就整条不可用，不能取整串 */
+/** 地址类字段：一列候选里取**第一条地址**，拼错一个字符就整条不可用，不能取整串 */
 export async function analyzeAddress(
     item: Selection,
     rule: string,
@@ -110,13 +110,79 @@ export async function analyzeAddress(
     if (rule.trim() === '') return ''
     const values = await analyzeStrings(item, rule, ctx)
     for (const value of values) {
-        const line = value
-            .split('\n')
-            .map((part) => part.trim())
-            .find((part) => part !== '')
+        const line = firstAddressOf(value)
         if (line) return line
     }
     return ''
+}
+
+/**
+ * 从 `open` 处的 `{` 找到配对的那个 `}`（跳过 JSON 字符串里的括号）；找不到返回 -1
+ *
+ * 只做括号配平，不解析 JSON —— 这里要的只是「选项块到哪儿结束」，
+ * 合法性仍然只由 `splitUrlAndOptions` 一个地方判。
+ */
+function matchingBrace(text: string, open: number): number {
+    let depth = 0
+    let inString = false
+    let escaped = false
+    for (let i = open; i < text.length; i += 1) {
+        const ch = text[i]!
+        if (inString) {
+            if (escaped) escaped = false
+            else if (ch === '\\') escaped = true
+            else if (ch === '"') inString = false
+            continue
+        }
+        if (ch === '"') inString = true
+        else if (ch === '{') depth += 1
+        else if (ch === '}') {
+            depth -= 1
+            if (depth === 0) return i
+        }
+    }
+    return -1
+}
+
+/**
+ * 一条规则值里的**第一条地址**
+ *
+ * 规则值可能是多行的，而两种多行要区别对待：
+ *
+ *   1. **多个并列候选**：沙箱把数组按 `\n` 拼起来 —— 喜马拉雅的 `nextTocUrl` 一次
+ *      拼出 9 条地址。取第一条。
+ *   2. **一条地址自带请求选项，而选项块是排版过的 JSON**：
+ *
+ *        http://app.1001p.com/api/book/bookDetail,{
+ *          "body": { "bookId": 12345 },
+ *          "method": "POST"
+ *        }
+ *
+ *      （线上 `⚡📂新小书亭` 的 `bookUrl` / `tocUrl` / `chapterUrl`、`⚡📂米读小说`
+ *      的 `bookUrl` 都是这么写的）—— 这是一个整体，按行切只会剩半截 `…getDetail,{`，
+ *      下游报「书源 URL 的请求选项不是合法 JSON」，一个把方向指向书源、其实是我们的错。
+ *
+ * 所以有选项块时按**配平的花括号**取到它结束；没有选项块时维持「第一个非空行」。
+ */
+function firstAddressOf(value: string): string | null {
+    const text = value.replace(/\r\n?/g, '\n').trim()
+    if (text === '') return null
+
+    const match = ADDRESS_OPTIONS_AT.exec(text)
+    if (match) {
+        const open = match.index + match[0].length - 1
+        const close = matchingBrace(text, open)
+        if (close >= 0) {
+            const whole = text.slice(0, close + 1).trim()
+            if (whole !== '') return whole
+        }
+    }
+
+    const line = text
+        .split('\n')
+        .map((part) => part.trim())
+        .find((part) => part !== '')
+    return line ?? null
 }
 
 /** 正文清洗：规整空白、去掉空行，但不动段落本身 */

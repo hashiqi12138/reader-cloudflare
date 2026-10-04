@@ -20,9 +20,12 @@
 
 import { describe, expect, it, vi } from 'vitest'
 
+/** `<js>` / `@js:` 段的输出，用来造多行的规则值 */
+const sandbox = vi.hoisted(() => ({ output: '' }))
+
 vi.mock('../src/engine/js', () => ({
     SandboxError: class SandboxError extends Error {},
-    runInSandbox: async () => '',
+    runInSandbox: async () => sandbox.output,
     sandboxResultToString: (value: unknown) => String(value ?? ''),
     sandboxResultToStrings: (value: unknown) => [String(value ?? '')],
 }))
@@ -110,6 +113,50 @@ describe('模板拼出来的字面地址 + 选项（`⚡📂新小书亭` 的形
         const split = splitUrlAndOptions(raw)
         expect(split.url).toBe('http://app.1001p.com/api/book/bookDetail')
         expect(split.options.body).toBe('{"bookId":7}')
+    })
+})
+
+describe('多行的规则值：取「第一条地址」，但**选项块整体保留**', () => {
+    const item = () => rootSelection('<html><body></body></html>')
+    const rule = '@js:result'
+
+    it('选项块是排版过的 JSON（三行）时不能被按行切开', async () => {
+        // `⚡📂新小书亭` 的 bookUrl / tocUrl / chapterUrl、`⚡📂米读小说` 的 bookUrl
+        // 都是这个形状。按行切只会剩半截 `…getDetail,{`
+        sandbox.output =
+            'http://app.1001p.com/api/book/bookDetail,{\n  "body": { "bookId": 12345 },\n  "method": "POST"\n}'
+        const raw = await analyzeAddress(item(), rule, { baseUrl: 'https://a.com' })
+        expect(raw).toBe(
+            'http://app.1001p.com/api/book/bookDetail,{\n  "body": { "bookId": 12345 },\n  "method": "POST"\n}',
+        )
+        // 下游还要能拆开 —— 这才是「整段保留」的意义
+        const split = splitUrlAndOptions(raw)
+        expect(split.url).toBe('http://app.1001p.com/api/book/bookDetail')
+        // 对象 body 会被序列化（见 urlOptions 的 normalizeBody），空白随之规范化
+        expect(split.options.body).toBe('{"bookId":12345}')
+        expect(split.options.method).toBe('POST')
+    })
+
+    it('多个并列候选（没有选项块）仍旧取第一条', async () => {
+        // 喜马拉雅的 nextTocUrl 一次拼出 9 条地址，就是这个形状
+        sandbox.output = 'https://a.com/1.html\nhttps://a.com/2.html\nhttps://a.com/3.html'
+        expect(await analyzeAddress(item(), rule, { baseUrl: 'https://a.com' })).toBe(
+            'https://a.com/1.html',
+        )
+    })
+
+    it('多行选项块后面还跟着别的候选时，只取带选项的那一段', async () => {
+        sandbox.output = 'https://a.com/x,{\n "method": "POST"\n}\nhttps://b.com/y'
+        expect(await analyzeAddress(item(), rule, { baseUrl: 'https://a.com' })).toBe(
+            'https://a.com/x,{\n "method": "POST"\n}',
+        )
+    })
+
+    it('选项块里的字符串值带括号也不会配错（`{`/`}` 在引号里不算配平）', async () => {
+        sandbox.output = 'https://a.com/x,{"method":"POST","body":"a={b}"}\nhttps://b.com/y'
+        const raw = await analyzeAddress(item(), rule, { baseUrl: 'https://a.com' })
+        expect(raw).toBe('https://a.com/x,{"method":"POST","body":"a={b}"}')
+        expect(splitUrlAndOptions(raw).options.body).toBe('a={b}')
     })
 })
 

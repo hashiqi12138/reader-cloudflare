@@ -4830,6 +4830,54 @@ console.log('\n=== 31. 地址类字段里的请求选项（`地址,{选项}`） 
     )
 
     /**
+     * 选项块**排版成多行**时不能被按行切开
+     *
+     * `⚡📂新小书亭` 的三条地址（`bookUrl` / `tocUrl` / `chapterUrl`）与 `⚡📂米读小说` 的
+     * `bookUrl` 都是这个形状：`…getDetail,{` 换行、`"body": {…},` 再换行、最后 `}`。
+     * 地址类字段取「第一行」的老做法会把它切成半截 `…getDetail,{`，下游报的却是
+     * 「书源 URL 的请求选项不是合法 JSON」—— 一个把方向指向书源、其实是我们的错。
+     */
+    const mid2 = `user:${BASE}/addr-options-multiline`
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(mid2)}`)
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: '地址选项·排版成多行（临时）',
+                bookSourceUrl: `${BASE}/addr-options-multiline`,
+                searchUrl: '/fixture/search?q={{key}}',
+                ruleSearch: {
+                    bookList: 'div.result-item',
+                    name: 'h3.title@text',
+                    bookUrl: `a@href@js:'/fixture/echo-request,\\n  {"headers":{"X-RC-Probe":"multiline"}}\\n'`,
+                },
+                ruleBookInfo: { name: '#probe@text', tocUrl: '#url@text' },
+            },
+        ]),
+    )
+    const mlRes = await fetch(`${BASE}/api/search`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ keyword: '测试', sourceIds: [mid2] }),
+    })
+    const mlBook = (await mlRes.json()).sources?.[0]?.books?.[0]
+    check(
+        String(mlBook?.bookUrl ?? '').includes('"X-RC-Probe":"multiline"'),
+        '多行排版的选项块被整段保留（以前只剩 `…echo-request,{`）',
+        JSON.stringify(String(mlBook?.bookUrl ?? '')),
+    )
+    const mlDetail = await getJson(
+        `/api/book?sourceId=${encodeURIComponent(mid2)}&url=${encodeURIComponent(mlBook?.bookUrl ?? '')}`,
+    )
+    check(
+        mlDetail.json?.name === 'multiline',
+        '多行选项块的地址能正常请求（选项里的请求头发到了上游）',
+        mlDetail.json?.error ?? JSON.stringify(mlDetail.json?.name),
+    )
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(mid2)}`)
+
+    /**
      * 线上最主流的形状其实不是 `@js:` 拼出来的，而是**模板拼出来的字面地址**：
      *
      *   https://api.midureader.com/fiction/book/getDetail,{ "method": "POST",
