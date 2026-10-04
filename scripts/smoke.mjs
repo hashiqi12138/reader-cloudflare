@@ -761,6 +761,64 @@ console.log('\n=== 6. 前端静态资源 ===')
         '未命中的 /api/* 回 JSON 404（没有被 SPA 回退吃掉）',
         `status=${missing.status} type=${missingType}`,
     )
+
+    /**
+     * 装到桌面那几样（PWA）
+     *
+     * 缺一样都不会报错，只是「装不到桌面」或者「离线打不开」——
+     *   - manifest 或图标缺 → 浏览器不给装（Chrome 要求 192 与 512 各一张）
+     *   - `/sw.js` 的类型不对 → 注册直接失败（页面上只留一句 console 警告）
+     */
+    const manifest = await getJson('/manifest.json')
+    check(
+        manifest.status === 200 &&
+            Boolean(manifest.json?.name) &&
+            manifest.json?.start_url === '/' &&
+            manifest.json?.display === 'standalone' &&
+            (manifest.json?.icons ?? []).length >= 3,
+        'manifest.json 能解析，且 name / start_url / display / icons 都在',
+        `status=${manifest.status} icons=${(manifest.json?.icons ?? []).length}`,
+    )
+    for (const icon of [
+        '/icon-192.png',
+        '/icon-512.png',
+        '/icon-maskable-512.png',
+        '/apple-touch-icon.png',
+    ]) {
+        const response = await fetch(BASE + icon)
+        const bytes = new Uint8Array(await response.arrayBuffer())
+        const isPng =
+            bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47
+        check(
+            response.status === 200 && isPng && bytes.length > 500,
+            `${icon} 是一张真 PNG`,
+            `status=${response.status} bytes=${bytes.length}`,
+        )
+    }
+    const sw = await fetch(BASE + '/sw.js')
+    const swType = sw.headers.get('content-type') ?? ''
+    check(
+        sw.status === 200 && swType.includes('javascript'),
+        '/sw.js 以 JS 类型发出（类型不对浏览器会拒绝注册）',
+        `status=${sw.status} type=${swType}`,
+    )
+
+    // Service Worker 是 `type: 'module'`：它 import 的那个策略文件也必须是可取的。
+    // 少一个文件，注册会在 install 之前就失败，而页面上只留一句 console 警告
+    const policy = await fetch(BASE + '/js/swPolicy.js')
+    check(
+        policy.status === 200,
+        '/js/swPolicy.js 可取（sw.js 依赖它，缺了注册直接失败）',
+        `status=${policy.status}`,
+    )
+
+    // head 里那两条 link 少一条都「装不到桌面」，而页面上完全看不出来
+    const home = await fetch(BASE + '/')
+    const homeHtml = await home.text()
+    check(
+        homeHtml.includes('rel="manifest"') && homeHtml.includes('apple-touch-icon'),
+        '首页 head 里挂了 manifest 与 apple-touch-icon',
+    )
 }
 
 console.log('\n=== 7. 账号、书架、阅读进度与书签 ===')
