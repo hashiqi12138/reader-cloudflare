@@ -30,13 +30,14 @@ describe('nextPageSize', () => {
  * 默认值本身也钉住
  *
  * 线上实测：第二次搜索的 76 个分片几乎全灭（第一次把弹性额度用光了）。
- * 所以默认页大小是「一页一个请求、额度按人点一次花一批」的取向，
- * 调大它之前先回看 README「第二十六轮」。
+ * 免费计划的 10 ms 是**整个请求**的预算，一页里多一个要跑脚本的源就多一分被掐的
+ * 概率，而被掐的代价是整页白花 —— 所以默认页大小一路从 10 收到 3。
+ * 调大它之前先回看 README「第二十六轮」与「第二十九轮」。
  */
 describe('默认值', () => {
     it('一页默认在保守区间里', () => {
         expect(SEARCH_PAGE_SIZE).toBeGreaterThan(0)
-        expect(SEARCH_PAGE_SIZE).toBeLessThanOrEqual(20)
+        expect(SEARCH_PAGE_SIZE).toBeLessThanOrEqual(5)
     })
 
     it('下限是 1', () => {

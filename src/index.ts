@@ -1028,8 +1028,8 @@ app.get('/api/home', async (c) => {
     return c.json({ ...payload, continueReading, count: entries.length })
 })
 
-/** 搜索分页：一页默认搜几个书源（界面默认也是这个数） */
-const SEARCH_PAGE_SIZE = 10
+/** 搜索分页：一页默认搜几个书源（界面默认也是这个数，改这里要同步 searchPlan.js） */
+const SEARCH_PAGE_SIZE = 3
 
 /** 一页的上限 —— 兜住「客户端硬要一次搜 500 个」 */
 const SEARCH_MAX_PAGE = 50
@@ -1044,7 +1044,7 @@ function clampPage(value: number): number {
  *
  * 书源之间并发请求，单个源失败只影响它自己那一条结果。
  * **每个请求只搜一页**：免费计划每个请求只有 10 ms CPU，把全部书源（真实安装是
- * 594 个）读出来再求值必然被掐（见 README「第二十六轮」）。界面默认一页 10 个，
+ * 594 个）读出来再求值必然被掐（见 README「第二十六轮」）。界面默认一页 3 个，
  * 用户点「继续加载」再要下一页 —— 额度按人的节奏花，而不是被一次搜索烧光。
  * 顺序由 `listUserSourcePage` 按「健康度」定，先把额度花在还活着的源上。
  */

@@ -223,6 +223,16 @@ console.log('\n=== 搜索分页（免费计划的 10 ms CPU 上限逼出来的�
         '[分页] 第二页换了一批源（offset 真的生效）',
         `p1=${ids1.join(',')} / p2=${ids2.join(',')}`,
     )
+
+    // 不传 limit 时的默认值：界面默认一页几个源，服务端兜底就得是几个，
+    // 两边不是同一个数的话，「继续加载」的步长会和用户预期对不上
+    const defaulted = await call('POST', '/api/search', { keyword: '测试' })
+    const idsDefault = (defaulted.json?.sources ?? []).map((s) => s.sourceId)
+    check(
+        idsDefault.length > 0 && idsDefault.length <= 3,
+        '[分页] 不传 limit 时默认一页不超过 3 个源',
+        `searched=${idsDefault.length}`,
+    )
 }
 // limit 的上限兜底（500 → 50）没写成断言：那会真的去搜 50 个源、每源一次外网请求，
 // 本地跑一轮要等很久 —— 不值这个价。上限逻辑在 index.ts 的 clampPage 里，改动时看一眼即可。

@@ -451,6 +451,8 @@ export async function viewAccount(host) {
                     onclick: async () => {
                         await logout()
                         invalidateShelf()
+                        // 搜索结果与换源索引都是上一个人的数据，同页换账号会串味
+                        forgetSearch()
                         toast('已退出登录')
                         go('#/login')
                     },
@@ -1183,6 +1185,24 @@ function rememberMerged(merged) {
     }
 }
 
+/**
+ * 上一次搜索的**原始结果**（按源分组的那一份），供返回搜索页时复原
+ *
+ * 「搜到一本 → 点进去 → 读完一章 → 返回 → 点下一本」是搜索页最高频的用法，
+ * 而搜索是**按页花 CPU 额度**的（免费计划每请求 10 ms，见 README「第二十六轮」）。
+ * 每次返回都重搜一遍，等于把额度花在重复劳动上，用户还得白等一次。
+ *
+ * 只留一份、只认关键词：搜索页同一时刻只显示一个关键词的结果，多存几份既看不出区别，
+ * 又会让「返回后看到的是不是最新的」变得含糊。重新点「搜索」就会把它换掉。
+ */
+let searchCache = null
+
+/** 丢掉与「当前登录的人」绑定的搜索缓存 —— 退出登录时必须清，否则换个账号会看到上一个人的结果 */
+function forgetSearch() {
+    searchCache = null
+    mergedIndex.clear()
+}
+
 export async function viewSearch(host) {
     const input = el('input', {
         type: 'search',
@@ -1209,193 +1229,220 @@ export async function viewSearch(host) {
         resultHost,
     )
 
+    /**
+     * 搜索状态放在**视图作用域**（而不再是 `run()` 里）
+     *
+     * 因为「返回搜索页」要能复原上一次的结果，就得让 `paint()` 有一份可复用的状态。
+     */
+    let keyword = lastKeyword
+    let entries = []
+    let perSource = []
+    let searched = 0
+    let totalSources = 0
+    let pageLimit = SEARCH_PAGE_SIZE
+    let busy = false
+
+    /** 书架状态：卡片上的「已加入」和「优先读哪个源」都看它。读不到不影响搜索 */
+    try {
+        entries = await loadShelf()
+    } catch {
+        /* 忽略：卡片会一律按未加入显示 */
+    }
+
+    /**
+     * 拉一页
+     *
+     * 一个请求只搜一页（`SEARCH_PAGE_SIZE` 个源）：免费计划每个请求只有 10 ms CPU，
+     * 一次把全部书源读出来再求值必然被掐（见 searchPlan.js 与 README「第二十六轮」）。
+     * 被掐时**不换时刻重试** —— 线上实测额度恢复得很慢，紧接着再发照样被掐 ——
+     * 而是把这一页**折半**再试，一路折到 1 个源。
+     */
+    async function loadPage() {
+        for (;;) {
+            try {
+                const data = await postJson('/api/search', {
+                    keyword,
+                    offset: searched,
+                    limit: pageLimit,
+                })
+                totalSources = data.totalSources ?? searched + (data.searched ?? 0)
+                perSource.push(...(data.sources ?? []))
+                searched += data.searched ?? 0
+                remember()
+                return
+            } catch (err) {
+                if (isCpuLimitError(err) && pageLimit > SEARCH_MIN_PAGE) {
+                    pageLimit = nextPageSize(pageLimit)
+                    continue
+                }
+                throw err
+            }
+        }
+    }
+
+    /** 每页回来就记一次缓存：返回搜索页时直接摆出来，一个请求都不发 */
+    function remember() {
+        searchCache = { keyword, perSource, searched, totalSources, pageLimit }
+    }
+
+    /** 继续加载：用户点一次才花一批额度 */
+    async function loadMore() {
+        if (busy) return
+        busy = true
+        paint(true)
+        try {
+            await loadPage()
+        } catch (err) {
+            toast(`继续加载失败：${err.message}`)
+        } finally {
+            busy = false
+            paint(true)
+        }
+    }
+
+    /**
+     * 边搜边画
+     *
+     * 分片之后一次搜索是几十个请求，等全部跑完再画的话界面要空着几十秒
+     * （而且线上有一部分片注定会被 CPU 限额掐掉，全等完等于白等）。
+     * 每片回来就重画一次，用户看到的是结果在往下长；重画本身有成本
+     * （要重新合并、重建卡片），所以按 200 ms 节流，最后再补一次强制渲染。
+     */
+    let lastPaint = 0
+    const paint = (force) => {
+        const now = Date.now()
+        if (!force && now - lastPaint < 200) return
+        lastPaint = now
+
+        const data = {
+            keyword,
+            sourceCount: totalSources,
+            totalBooks: perSource.reduce((sum, per) => sum + (per.count ?? 0), 0),
+            sources: perSource,
+        }
+
+        /**
+         * **按书合并**，而不是按书源分块列出来
+         *
+         * 按源分块的话，同一本书在十几个源上出现十几次（真实安装里搜一个热词就是一整页
+         * 重复）；而且源越多越严重 —— 加源本来是为了「多几条路能读到书」，
+         * 结果反而让搜索结果更难用。合并之后一条卡片代表一本书，
+         * 主源进详情页、那里再换源（见下方 rememberMerged）。
+         */
+        const succeeded = (data.sources ?? []).filter(
+            (per) => per.ok && (per.books ?? []).length > 0,
+        )
+        const merged = mergeBooks(succeeded, {
+            // 已经在书架里的那一源优先 —— 从搜索点进去就是上次读的那个源
+            prefer: (sourceId, book) => inShelf(entries, sourceId, book.bookUrl),
+        })
+        rememberMerged(merged)
+
+        const blocks = [
+            el('p', {
+                class: 'muted',
+                text:
+                    `已搜 ${data.sources.length}/${data.sourceCount} 个书源，` +
+                    `命中 ${data.totalBooks} 本；按书合并后是 ${merged.length} 本`,
+            }),
+        ]
+        const failed = []
+
+        for (const per of data.sources ?? []) {
+            if (!per.ok) failed.push(`${per.sourceName}：${per.error ?? '未知错误'}`)
+        }
+
+        if (merged.length > 0) {
+            const grid = el('div', { class: 'grid' })
+            for (const item of merged) {
+                const preferred = item.preferred
+                grid.append(
+                    bookCard({ ...item, bookUrl: preferred.book.bookUrl }, preferred.sourceId, {
+                        entries,
+                        // 一条卡片背后可能有很多源，任一源加过就算已在书架
+                        savedAny: item.sources.map((source) => ({
+                            sourceId: source.sourceId,
+                            bookUrl: source.book.bookUrl,
+                        })),
+                        sourceLabel:
+                            item.sources.length > 1
+                                ? `${item.sources.length} 个书源`
+                                : preferred.sourceName,
+                        onRead: () =>
+                            go(
+                                readUrl(
+                                    preferred.sourceId,
+                                    preferred.book.bookUrl,
+                                    item.name,
+                                    item.author,
+                                    0,
+                                ),
+                            ),
+                    }),
+                )
+            }
+            blocks.push(grid)
+        } else {
+            // 这一页没搜到。还有源没搜时不说死「没搜到」——
+            // 下一步该做的是点下面的「继续加载」
+            const more = searched < totalSources
+            blocks.push(
+                emptyState(
+                    more ? '这一批没有结果' : '没搜到',
+                    more
+                        ? '换个关键词试试；也可以点下面的「继续加载」搜后面的书源。'
+                        : '换个关键词试试；也可以到「书源」里看看启用的源是不是都被停用了。',
+                ),
+            )
+        }
+
+        if (failed.length > 0) {
+            blocks.push(
+                el('details', { class: 'failures' }, [
+                    el('summary', { text: `${failed.length} 个书源搜索失败` }),
+                    el(
+                        'ul',
+                        {},
+                        failed.map((line) => el('li', { text: line })),
+                    ),
+                ]),
+            )
+        }
+
+        // 还有源没搜就摆一个「继续加载」—— 额度由用户点一次花一批
+        if (searched < totalSources) {
+            blocks.push(
+                el('div', { class: 'load-more' }, [
+                    el('button', {
+                        class: 'btn',
+                        text: busy
+                            ? '加载中…'
+                            : `继续加载（还有 ${totalSources - searched} 个书源）`,
+                        onclick: () => void loadMore(),
+                    }),
+                ]),
+            )
+        }
+
+        resultHost.replaceChildren(...blocks)
+    }
+
     async function run() {
-        const keyword = input.value.trim()
-        if (keyword === '') {
+        const next = input.value.trim()
+        if (next === '') {
             resultHost.replaceChildren(alertBox('warn', '先输入关键词'))
             return
         }
-        lastKeyword = keyword
+        lastKeyword = next
+        keyword = next
+        // 换关键词 = 上一次的结果作废；第一批回来后 `remember()` 会把缓存重新填上
+        searchCache = null
+        perSource = []
+        searched = 0
+        totalSources = 0
+        pageLimit = SEARCH_PAGE_SIZE
+        busy = false
         resultHost.replaceChildren(skeletonList(4, 'grid'))
-
-        const entries = await loadShelf()
-        const perSource = []
-        let searched = 0
-        let totalSources = 0
-        let pageLimit = SEARCH_PAGE_SIZE
-        let busy = false
-
-        /**
-         * 拉一页
-         *
-         * 一个请求只搜一页（默认 10 个源）：免费计划每个请求只有 10 ms CPU，
-         * 一次把全部书源读出来再求值必然被掐（见 searchPlan.js 与 README「第二十六轮」）。
-         * 被掐时**不换时刻重试** —— 线上实测额度恢复得很慢，紧接着再发照样被掐 ——
-         * 而是把这一页**折半**再试，一路折到 1 个源。
-         */
-        async function loadPage() {
-            for (;;) {
-                try {
-                    const data = await postJson('/api/search', {
-                        keyword,
-                        offset: searched,
-                        limit: pageLimit,
-                    })
-                    totalSources = data.totalSources ?? searched + (data.searched ?? 0)
-                    perSource.push(...(data.sources ?? []))
-                    searched += data.searched ?? 0
-                    return
-                } catch (err) {
-                    if (isCpuLimitError(err) && pageLimit > SEARCH_MIN_PAGE) {
-                        pageLimit = nextPageSize(pageLimit)
-                        continue
-                    }
-                    throw err
-                }
-            }
-        }
-
-        /** 继续加载：用户点一次才花一批额度 */
-        async function loadMore() {
-            if (busy) return
-            busy = true
-            paint(true)
-            try {
-                await loadPage()
-            } catch (err) {
-                toast(`继续加载失败：${err.message}`)
-            } finally {
-                busy = false
-                paint(true)
-            }
-        }
-
-        /**
-         * 边搜边画
-         *
-         * 分片之后一次搜索是几十个请求，等全部跑完再画的话界面要空着几十秒
-         * （而且线上有一部分片注定会被 CPU 限额掐掉，全等完等于白等）。
-         * 每片回来就重画一次，用户看到的是结果在往下长；重画本身有成本
-         * （要重新合并、重建卡片），所以按 200 ms 节流，最后再补一次强制渲染。
-         */
-        let lastPaint = 0
-        const paint = (force) => {
-            const now = Date.now()
-            if (!force && now - lastPaint < 200) return
-            lastPaint = now
-
-            const data = {
-                keyword,
-                sourceCount: totalSources,
-                totalBooks: perSource.reduce((sum, per) => sum + (per.count ?? 0), 0),
-                sources: perSource,
-            }
-
-            /**
-             * **按书合并**，而不是按书源分块列出来
-             *
-             * 按源分块的话，同一本书在十几个源上出现十几次（真实安装里搜一个热词就是一整页
-             * 重复）；而且源越多越严重 —— 加源本来是为了「多几条路能读到书」，
-             * 结果反而让搜索结果更难用。合并之后一条卡片代表一本书，
-             * 主源进详情页、那里再换源（见下方 rememberMerged）。
-             */
-            const succeeded = (data.sources ?? []).filter(
-                (per) => per.ok && (per.books ?? []).length > 0,
-            )
-            const merged = mergeBooks(succeeded, {
-                // 已经在书架里的那一源优先 —— 从搜索点进去就是上次读的那个源
-                prefer: (sourceId, book) => inShelf(entries, sourceId, book.bookUrl),
-            })
-            rememberMerged(merged)
-
-            const blocks = [
-                el('p', {
-                    class: 'muted',
-                    text:
-                        `已搜 ${data.sources.length}/${data.sourceCount} 个书源，` +
-                        `命中 ${data.totalBooks} 本；按书合并后是 ${merged.length} 本`,
-                }),
-            ]
-            const failed = []
-
-            for (const per of data.sources ?? []) {
-                if (!per.ok) failed.push(`${per.sourceName}：${per.error ?? '未知错误'}`)
-            }
-
-            if (merged.length > 0) {
-                const grid = el('div', { class: 'grid' })
-                for (const item of merged) {
-                    const preferred = item.preferred
-                    grid.append(
-                        bookCard({ ...item, bookUrl: preferred.book.bookUrl }, preferred.sourceId, {
-                            entries,
-                            // 一条卡片背后可能有很多源，任一源加过就算已在书架
-                            savedAny: item.sources.map((source) => ({
-                                sourceId: source.sourceId,
-                                bookUrl: source.book.bookUrl,
-                            })),
-                            sourceLabel:
-                                item.sources.length > 1
-                                    ? `${item.sources.length} 个书源`
-                                    : preferred.sourceName,
-                            onRead: () =>
-                                go(
-                                    readUrl(
-                                        preferred.sourceId,
-                                        preferred.book.bookUrl,
-                                        item.name,
-                                        item.author,
-                                        0,
-                                    ),
-                                ),
-                        }),
-                    )
-                }
-                blocks.push(grid)
-            } else {
-                // 这一页没搜到。还有源没搜时不说死「没搜到」——
-                // 下一步该做的是点下面的「继续加载」
-                const more = searched < totalSources
-                blocks.push(
-                    emptyState(
-                        more ? '这一批没有结果' : '没搜到',
-                        more
-                            ? '换个关键词试试；也可以点下面的「继续加载」搜后面的书源。'
-                            : '换个关键词试试；也可以到「书源」里看看启用的源是不是都被停用了。',
-                    ),
-                )
-            }
-
-            if (failed.length > 0) {
-                blocks.push(
-                    el('details', { class: 'failures' }, [
-                        el('summary', { text: `${failed.length} 个书源搜索失败` }),
-                        el(
-                            'ul',
-                            {},
-                            failed.map((line) => el('li', { text: line })),
-                        ),
-                    ]),
-                )
-            }
-
-            // 还有源没搜就摆一个「继续加载」—— 额度由用户点一次花一批
-            if (searched < totalSources) {
-                blocks.push(
-                    el('div', { class: 'load-more' }, [
-                        el('button', {
-                            class: 'btn',
-                            text: busy
-                                ? '加载中…'
-                                : `继续加载（还有 ${totalSources - searched} 个书源）`,
-                            onclick: () => void loadMore(),
-                        }),
-                    ]),
-                )
-            }
-
-            resultHost.replaceChildren(...blocks)
-        }
 
         try {
             await loadPage()
@@ -1412,7 +1459,23 @@ export async function viewSearch(host) {
         paint(true)
     }
 
-    if (lastKeyword !== '') await run()
+    /**
+     * 进来先把上一次的结果摆出来
+     *
+     * 这一步是**不发请求**的：结果、页码、`继续加载` 的进度全在上次的缓存里。
+     * 想重新搜一遍，点上面的「搜索」或者回车就行。
+     */
+    if (searchCache) {
+        keyword = searchCache.keyword
+        perSource = searchCache.perSource
+        searched = searchCache.searched
+        totalSources = searchCache.totalSources
+        pageLimit = searchCache.pageLimit
+        input.value = keyword
+        paint(true)
+    } else if (lastKeyword !== '') {
+        await run()
+    }
     input.focus()
 }
 
