@@ -159,10 +159,12 @@ function parseSegment(seg: string): JsoupStep | null {
 /**
  * HTML 的标签名
  *
- * 用途只有一个：判断**列表规则**末尾那个裸词是「标签」还是「取值」
- * （见 `analyze.ts` 的 `selectNodesByKind`）——`class.chapters@li@a` 的 `a`、
- * `.book-list@li` 的 `li` 是标签，而字段规则里 `@title`（线上 95 处）/
- * `@data-src` 确实是属性名，不能一概而论。
+ * 两个用途，都是「判断一个裸词是标签还是别的什么」：
+ *   1. **列表规则**末尾那个裸词（`class.chapters@li@a` 的 `a`、`.book-list@li` 的 `li`）
+ *      —— 见 `analyze.ts` 的 `selectNodesByKind`；字段规则里 `@title`（线上 95 处）/
+ *      `@data-src` 确实是属性名，不能一概而论
+ *   2. **列表规则与字段规则**里 `@` 之后那些段的裸词（`.xsm.0@a@text` 的 `a`、
+ *      `p.x@tag.span.0@text`）—— 见 `dispatchCssSegments`
  *
  * 不全靠推断是有意的：`data` / `title` / `option` / `span` 这些**既是标签又可能是属性名**，
  * 所以只认这张表里明确写下的名字 —— 表外的一律维持「取值」语义。
@@ -186,6 +188,10 @@ const HTML_TAG_NAMES = new Set([
     'button',
     'canvas',
     'caption',
+    // `center` / `font` 这类是**过时但真实存在**的标签。表里只收语料要用的：
+    // `center` 是 📥爱去小说 的 `#mainDownInfo@center.0@html`（字段规则的中间段），
+    // 不收它就走到「兜底当 CSS 片段」，`center.0` 里那个下标就白写了。
+    'center',
     'cite',
     'code',
     'col',

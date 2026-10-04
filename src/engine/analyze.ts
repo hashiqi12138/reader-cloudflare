@@ -302,6 +302,51 @@ function xpathValueWithExtract($: Selection['$'], node: any, extract: string): s
     return extractValues($, [node], extract)[0] ?? ''
 }
 
+/**
+ * 字段规则里的 **CSS 式规则**：`首段@步骤…@取值`
+ *
+ * 以前这里只切**最后一个** `@`（`splitCssExtract`），把剩下的整段当 CSS 交给 cheerio。
+ * 于是 `.xsm.0@a@text` 会变成 `selectByCss('.xsm.0@a')` —— cheerio 对非法选择器
+ * **不报错、只是返回空**，症状是「书名 / 作者 / 分类整列空着，而搜索本身是成功的」。
+ * 线上字段规则里这类「中间还有段」的共 **746 处 / 221 个源**：
+ * `.xsm.0@a@text`、`.datainfobox@p.-2@a@text`、`.catalog@.clearfix@li.-1@a@text` …
+ *
+ * 末段是不是「取值」沿用 `splitCssExtract` 的判据（`属性名` 形状的裸词才算）：
+ * `text` / `href` / `textNodes` / `data-id` 都还是取值 —— `.one@data-id` 这类一个字没动。
+ * 中间那些段与列表规则**共用** `dispatchCssSegments`（能当步骤的当步骤、能当 CSS 片段的
+ * 拼回首段），所以 `.cover@.line`、`#chapterlist@li a` 在两条路上是同一套语义。
+ */
+function evalCssField(sel: Selection, body: string): string[] {
+    let rest = body.trim()
+    // 前导 `-`（倒置）与列表规则同一套语义：`-` 后面不是数字才算倒置标记
+    let reversed = false
+    if (rest.startsWith('-') && !/^-\d/.test(rest)) {
+        reversed = true
+        rest = rest.slice(1)
+    }
+
+    const segs = rest.split('@').map((s) => s.trim())
+    let extract = 'text'
+    const last = segs[segs.length - 1] ?? ''
+    if (segs.length >= 2 && /^[A-Za-z_][\w-]*$/.test(last)) {
+        extract = last
+        segs.pop()
+    }
+
+    const headRaw = segs.shift() ?? ''
+    const { headParts, steps } = dispatchCssSegments(segs)
+
+    let head = splitCssIndex(headRaw)
+    if (headParts.length > 0) head = splitCssIndex([head.css, ...headParts].join(' '))
+
+    let nodes = selectByCss(sel, head.css)
+    if (head.index) nodes = applyIndex(nodes, head.index)
+    if (steps.length > 0) nodes = selectNodes(sel.$, nodes, steps)
+
+    const values = extractValues(sel.$, nodes, extract)
+    return reversed ? values.reverse() : values
+}
+
 /** 在给定节点集上跑一条「纯选择器」规则，返回字符串列表 */
 function evalSelector(sel: Selection, body: string, kind: string): string[] {
     if (kind === 'json') {
@@ -334,10 +379,7 @@ function evalSelector(sel: Selection, body: string, kind: string): string[] {
         return values
     }
 
-    if (kind === 'css') {
-        const { css, extract } = splitCssExtract(body)
-        return extractValues(sel.$, selectByCss(sel, css), extract)
-    }
+    if (kind === 'css') return evalCssField(sel, body)
 
     const plan = parseJsoupRule(body)
     const nodes = selectNodes(sel.$, sel.nodes, plan.steps)
@@ -938,6 +980,35 @@ function isCssFragment(part: string): boolean {
 }
 
 /**
+ * 把 `@` 后面的那些段分成「CSS 片段」与「JSOUP 步骤」
+ *
+ * 列表规则与字段规则**共用这一套分派**（两处的书源写法完全一样）：
+ *
+ *   `.box@ul@li`            → 头部片段 `ul` 落空、步骤 [ul, li]
+ *   `.book-img-text@tag.li` → 步骤 [tag li]
+ *   `#chapterlist@li a`     → 头部片段 `li a`（这一段本身就是 CSS 写法）
+ *   `.cover@.line`          → 头部片段 `.line`（`.line` 是 CSS 类，不是「children」）
+ *
+ * 注意对每一段都套 `withTailStep`：段里的裸词（`a` / `li` / `dd`）在书源本意里是**标签**，
+ * 而 `parseJsoupRule` 会把末尾裸词读成取值名 —— 不补回来就会少选一层。
+ */
+function dispatchCssSegments(parts: string[]): { headParts: string[]; steps: JsoupStep[] } {
+    const steps: JsoupStep[] = []
+    const headParts: string[] = []
+    for (const part of parts) {
+        if (part === '') continue
+        if (isCssFragment(part)) {
+            headParts.push(part)
+            continue
+        }
+        const segSteps = withTailStep(parseJsoupRule(part))
+        if (segSteps.length > 0) steps.push(...segSteps)
+        else headParts.push(part)
+    }
+    return { headParts, steps }
+}
+
+/**
  * 按规则的「种类」在节点集上选出**节点**
  *
  * 与字段规则那条路（`evalSelector`）的区别：这里给的是节点本身，不是按取值方式抠出来的
@@ -997,28 +1068,14 @@ function selectNodesByKind(
         if (!withSteps) return { nodes: headNodes, reversed }
 
         /**
-         * `@` 后面**能当步骤的当步骤、剩下的当 CSS 片段**：
-         *   `.box@ul@li`            → 头 `.box`、步骤 [ul, li]
-         *   `.book-img-text@tag.li` → 头 `.book-img-text`、步骤 [tag li]
-         *   `#chapterlist@li a`     → 头 `#chapterlist li a`（这一段本身就是 CSS 写法）
-         *   `.cover@.line`          → 头 `.cover .line`（`.line` 是 CSS 类，不是「children」）
-         * 书源就是这两种混着写的，`parseJsoupRule` 只认前一种，所以按段分派。
+         * `@` 后面**能当步骤的当步骤、剩下的当 CSS 片段**（分派规则见 `dispatchCssSegments`）
          */
-        const steps: JsoupStep[] = []
-        const headParts: string[] = []
-        for (const part of rest
-            .split('@')
-            .map((p) => p.trim())
-            .slice(1)) {
-            if (part === '') continue
-            if (isCssFragment(part)) {
-                headParts.push(part)
-                continue
-            }
-            const segSteps = withTailStep(parseJsoupRule(part))
-            if (segSteps.length > 0) steps.push(...segSteps)
-            else headParts.push(part)
-        }
+        const { headParts, steps } = dispatchCssSegments(
+            rest
+                .split('@')
+                .map((p) => p.trim())
+                .slice(1),
+        )
         if (headParts.length > 0) {
             const merged = splitCssIndex([headSplit.css, ...headParts].join(' '))
             headNodes = selectByCss(sel, merged.css)

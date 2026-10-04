@@ -4321,6 +4321,67 @@ console.log('\n=== 25. 列表规则的末尾那个词：标签 vs 取值 ===')
     )
 }
 
+console.log('\n=== 26. 字段规则里的 CSS 式「首段 + `@` 步骤」 ===')
+{
+    /**
+     * 字段规则那条路（`evalSelector` 的 css 分支）以前只切**最后一个** `@`，把剩下的整段
+     * 当 CSS 交给 cheerio —— `.book-info@div@text` 于是变成 `selectByCss('.book-info@div')`，
+     * cheerio 对非法选择器**不报错、只返回空**：症状是「搜索成功，但书名 / 作者 / 分类整列空着」。
+     * 线上字段规则里这类「中间还有段」的共 **746 处 / 221 个源**。
+     *
+     * 这里在**详情页**上验：`name` / `author` / `intro` / `tocUrl` 全是「首段 + 中间段 + 取值」。
+     * 另外用 `coverUrl: '.book-info@h1@class'` 钉住「**末段仍是取值**」—— 字段规则的末段
+     * 比列表规则多一条规矩：`@class` 读的是**属性**，不是标签（若当标签就会取到空）。
+     */
+    const idField = `user:${BASE}/field-css`
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(idField)}`)
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: '字段规则·CSS 式多段 @（临时）',
+                bookSourceUrl: `${BASE}/field-css`,
+                ruleBookInfo: {
+                    name: '.book-info@h1@text',
+                    author: '.book-info@span@text',
+                    intro: '.book-info@div@text',
+                    tocUrl: '.book-info@a@href',
+                    coverUrl: '.book-info@h1@class',
+                },
+            },
+        ]),
+    )
+    const bookField = await getJson(
+        `/api/book?sourceId=${encodeURIComponent(idField)}&url=${encodeURIComponent(`${BASE}/fixture/book/1`)}`,
+    )
+    const got = bookField.json ?? {}
+    check(
+        got.name === '测试小说·甲' &&
+            got.author === '作者甲' &&
+            got.intro === '这是一本用于验证链路的小说。',
+        '`.book-info@h1@text` / `@span@text` / `@div@text`：详情页三个字段都取到了',
+        bookField.json?.error ??
+            JSON.stringify({ name: got.name, author: got.author, intro: got.intro }),
+    )
+    check(
+        String(got.tocUrl ?? '').endsWith('/fixture/toc/1'),
+        '`.book-info@a@href`：地址类的字段也走同一条路（中间段是标签 `a`）',
+        JSON.stringify(got.tocUrl),
+    )
+    check(
+        String(got.coverUrl ?? '').endsWith('book-name'),
+        '末段仍是**取值**：`.book-info@h1@class` 读的是 h1 的 class 属性',
+        JSON.stringify(got.coverUrl),
+    )
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(idField)}`)
+    const leftField = (await getJson('/api/sources')).json?.sources ?? []
+    check(
+        !leftField.some((s) => String(s.id).startsWith(`user:${BASE}/field-css`)),
+        '字段规则·CSS 式多段 @ 的测试源已清理',
+    )
+}
+
 console.log('\n=== 结果 ===')
 if (failures.length === 0) {
     console.log(
