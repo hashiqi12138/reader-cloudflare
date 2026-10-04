@@ -15,7 +15,14 @@
 
 import { applyAllInOne, applyRegexOps, splitRegexChain } from './regex'
 import { UnsupportedRuleError, EXTRACT_KINDS, type RuleContext, type RuleResult } from './types'
-import { parseJsoupRule, isHtmlTagName, type JsoupPlan, type JsoupStep } from './jsoup'
+import {
+    applyIndex,
+    isHtmlTagName,
+    parseJsoupRule,
+    splitCssIndex,
+    type JsoupPlan,
+    type JsoupStep,
+} from './jsoup'
 import { baseGlobals, sourceLimits } from './globals'
 import { extractValues, parseHtml, reparseFragment, selectNodes } from './select'
 import { jsonPathToStrings } from './jsonpath'
@@ -913,6 +920,24 @@ function withTailStep(plan: JsoupPlan): JsoupStep[] {
 }
 
 /**
+ * `@` 后面这一段是「CSS 片段」还是「JSOUP 步骤」
+ *
+ * 书源把两种写法混在一起用（`#chapterlist@li a` 与 `.box@ul@li`），所以按段分派：
+ *   - 带 JSOUP 类型前缀的一律当**步骤**（`tag.a`、`text.目录`），哪怕名字里带空格；
+ *   - 以 CSS 的标点开头（`.`、`#`、`[`、`>`、`+`、`~`、`*`）当 **CSS 片段** ——
+ *     尤其是 `.line`：JSOUP 文法会把开头的 `.` 读成「取所有子节点」，语义完全不同；
+ *   - 带空格的（`li a`）当 **CSS 片段** —— JSOUP 的步骤是一段一段的，段里不会有空格；
+ *   - 其余裸词（`ul`、`li`、`dd.2:3`）交给 `parseJsoupRule` 当步骤。
+ */
+function isCssFragment(part: string): boolean {
+    const p = part.trim()
+    if (p === '') return false
+    if (/^(?:class|id|tag|text|children)(?:\.|$)/.test(p)) return false
+    if (/^[.#\[>+~*]/.test(p)) return true
+    return /\s/.test(p)
+}
+
+/**
  * 按规则的「种类」在节点集上选出**节点**
  *
  * 与字段规则那条路（`evalSelector`）的区别：这里给的是节点本身，不是按取值方式抠出来的
@@ -961,28 +986,45 @@ function selectNodesByKind(
             rest = rest.slice(1)
         }
         const { css, extract } = splitCssExtract(rest)
-        // 末尾那个词是取值（`.one@data-id`）→ 一个字都不动
-        if (!isTailTag(extract) && !css.includes('@')) {
-            return { nodes: selectByCss(sel, css), reversed }
-        }
+        // 要不要走「首段 + 步骤」：末尾是标签名，或 CSS 那头还留着 `@`（`.box@ul@li`）。
+        // 都不是（`.one@data-id`）就维持原样：一个字都不动。
+        const withSteps = isTailTag(extract) || css.includes('@')
+        const headRaw = withSteps ? (rest.split('@')[0] ?? '').trim() : css.trim()
+        // 头里可能带 JSOUP 的位置后缀：`.book-dir.1`（第 2 个）、`.row[-1]`、`#list dd[12:-1]`
+        const headSplit = splitCssIndex(headRaw)
+        let headNodes = selectByCss(sel, headSplit.css)
+        if (headSplit.index) headNodes = applyIndex(headNodes, headSplit.index)
+        if (!withSteps) return { nodes: headNodes, reversed }
+
         /**
-         * 首段按 CSS 找一层，`@` 后面**能当步骤的当步骤、剩下的当 CSS 片段**：
-         *   `.box@ul@li`        → 头 `.box`、步骤 [ul, li]
+         * `@` 后面**能当步骤的当步骤、剩下的当 CSS 片段**：
+         *   `.box@ul@li`            → 头 `.box`、步骤 [ul, li]
          *   `.book-img-text@tag.li` → 头 `.book-img-text`、步骤 [tag li]
-         *   `#chapterlist@li a` → 头 `#chapterlist li a`（这一步本身就是 CSS 写法）
+         *   `#chapterlist@li a`     → 头 `#chapterlist li a`（这一段本身就是 CSS 写法）
+         *   `.cover@.line`          → 头 `.cover .line`（`.line` 是 CSS 类，不是「children」）
          * 书源就是这两种混着写的，`parseJsoupRule` 只认前一种，所以按段分派。
          */
-        const parts = rest.split('@').map((p) => p.trim())
-        const headParts: string[] = [parts[0] ?? '']
         const steps: JsoupStep[] = []
-        for (const part of parts.slice(1)) {
+        const headParts: string[] = []
+        for (const part of rest
+            .split('@')
+            .map((p) => p.trim())
+            .slice(1)) {
             if (part === '') continue
+            if (isCssFragment(part)) {
+                headParts.push(part)
+                continue
+            }
             const segSteps = withTailStep(parseJsoupRule(part))
             if (segSteps.length > 0) steps.push(...segSteps)
             else headParts.push(part)
         }
-        const head = headParts.filter((p) => p !== '').join(' ')
-        return { nodes: selectNodes(sel.$, selectByCss(sel, head), steps), reversed }
+        if (headParts.length > 0) {
+            const merged = splitCssIndex([headSplit.css, ...headParts].join(' '))
+            headNodes = selectByCss(sel, merged.css)
+            if (merged.index) headNodes = applyIndex(headNodes, merged.index)
+        }
+        return { nodes: selectNodes(sel.$, headNodes, steps), reversed }
     }
     if (kind === 'xpath') {
         // 列表规则同样要把 `//` 当相对路径用：目录规则要的是「本页里的章节项」，

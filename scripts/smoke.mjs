@@ -4140,6 +4140,7 @@ console.log('\n=== 25. 列表规则的末尾那个词：标签 vs 取值 ===')
      *   ① JSOUP 形状   `class.chapter-list@li@a`
      *   ② CSS 形状     `.chapter-list@li a`   ← 以前整串交给 CSS，直接「CSS 选择器无效」
      *   ③ CSS + 两个 @ `.chapter-list@li@a` ← 以前整串交给 CSS，「CSS 选择器无效」
+     *   ④ CSS 首段带位置 `.chapter-list.0@li@a` ← 同上（`.chapter-list.0` 不是合法 CSS）
      * 断言的是**章数与每章地址** —— 少选一层的话地址一条都取不到（条目会是空的 href）。
      */
     const idBase = `${BASE}/js-tail-list`
@@ -4163,6 +4164,13 @@ console.log('\n=== 25. 列表规则的末尾那个词：标签 vs 取值 ===')
             key: `${idBase}/c`,
             name: '列表规则末尾是标签·CSS 两段（临时）',
             chapterList: '.chapter-list@li@a',
+            chapterName: 'text',
+            chapterUrl: 'href',
+        },
+        {
+            key: `${idBase}/d`,
+            name: '列表规则·CSS 首段带位置后缀（临时）',
+            chapterList: '.chapter-list.0@li@a',
             chapterName: 'text',
             chapterUrl: 'href',
         },
@@ -4201,6 +4209,110 @@ console.log('\n=== 25. 列表规则的末尾那个词：标签 vs 取值 ===')
         )
         await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
     }
+
+    /**
+     * 上面那几个位置都是 `0`（等价于「不选」），只能证明 `.chapter-list.0` 不再被判成
+     * 非法 CSS。这一条才证明位置**真的在选**：`li.1` 取第 2 个 li，一页里位置选错的话
+     * 会变成 3 章 —— 线上 `.book-dir.1@li` / `.chapter[1]@a` 族要的正是这个语义。
+     */
+    const idPos = `user:${idBase}/pos`
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(idPos)}`)
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: '列表规则·CSS 首段位置真的在选（临时）',
+                bookSourceUrl: `${idBase}/pos`,
+                ruleToc: {
+                    chapterList: 'ul.chapter-list li.1@a',
+                    chapterName: 'text',
+                    chapterUrl: 'href',
+                },
+            },
+        ]),
+    )
+    const tocPos = await getJson(
+        `/api/toc?sourceId=${encodeURIComponent(idPos)}&url=${encodeURIComponent(`${BASE}/fixture/toc/1`)}`,
+    )
+    const posChapters = tocPos.json?.chapters ?? []
+    check(
+        posChapters.length === 1 &&
+            posChapters[0]?.name === '第二章 雨落下来' &&
+            /\/fixture\/chapter\/1\/2$/.test(posChapters[0]?.url ?? ''),
+        '`ul.chapter-list li.1@a` → 只取第 2 章（位置后缀真的在选，不是被忽略）',
+        tocPos.json?.error ??
+            JSON.stringify(posChapters.map((x) => [x.name, x.url.replace(BASE, '')])),
+    )
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(idPos)}`)
+
+    /**
+     * `!` 排除下标：`class.grid@tag.tr!0`、`class.listmain@dd!0:1:…:11`、
+     * `.txt-list li!0` —— 线上列表规则上共 **110 处 / 129 个源**。
+     * 这里用内置目录页的 3 个 `li` 验证「排除」真的在排除（不是被当成标签名丢掉 →
+     * 那种情况下 cheerio 不报错、静默 0 条，所以断言**条数**才有意义）：
+     *   ① CSS 形状   `ul.chapter-list li!0@a`   → 留第 2、3 章
+     *   ② JSOUP 形状 `class.chapter-list@li!1@a` → 留第 1、3 章
+     */
+    const idBang = `user:${idBase}/bang`
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(idBang)}`)
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: '列表规则·排除下标·CSS（临时）',
+                bookSourceUrl: `${idBase}/bang`,
+                ruleToc: {
+                    chapterList: 'ul.chapter-list li!0@a',
+                    chapterName: 'text',
+                    chapterUrl: 'href',
+                },
+            },
+        ]),
+    )
+    const tocBang = await getJson(
+        `/api/toc?sourceId=${encodeURIComponent(idBang)}&url=${encodeURIComponent(`${BASE}/fixture/toc/1`)}`,
+    )
+    const bangChapters = tocBang.json?.chapters ?? []
+    check(
+        bangChapters.length === 2 &&
+            bangChapters[0]?.name === '第二章 雨落下来' &&
+            bangChapters[1]?.name === '第三章 天晴了',
+        '`ul.chapter-list li!0@a` → 排除第 1 条，留第 2、3 章',
+        tocBang.json?.error ?? JSON.stringify(bangChapters.map((x) => x.name)),
+    )
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(idBang)}`)
+
+    const idBang2 = `user:${idBase}/bang2`
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(idBang2)}`)
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: '列表规则·排除下标·JSOUP（临时）',
+                bookSourceUrl: `${idBase}/bang2`,
+                ruleToc: {
+                    chapterList: 'class.chapter-list@li!1@a',
+                    chapterName: 'text',
+                    chapterUrl: 'href',
+                },
+            },
+        ]),
+    )
+    const tocBang2 = await getJson(
+        `/api/toc?sourceId=${encodeURIComponent(idBang2)}&url=${encodeURIComponent(`${BASE}/fixture/toc/1`)}`,
+    )
+    const bangChapters2 = tocBang2.json?.chapters ?? []
+    check(
+        bangChapters2.length === 2 &&
+            bangChapters2[0]?.name === '第一章 起风了' &&
+            bangChapters2[1]?.name === '第三章 天晴了',
+        '`class.chapter-list@li!1@a` → 排除第 2 条，留第 1、3 章',
+        tocBang2.json?.error ?? JSON.stringify(bangChapters2.map((x) => x.name)),
+    )
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(idBang2)}`)
 
     const left = (await getJson('/api/sources')).json?.sources ?? []
     check(

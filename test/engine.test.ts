@@ -85,6 +85,45 @@ describe('JSOUP 默认规则解析', () => {
             { by: 'children', name: '', index: null },
         ])
     })
+
+    it('`!` 形式的排除下标与方括号写法同解析（`tr!0` / `tag.tr!0` / `dd!0:1:2`）', () => {
+        // 线上这一类共 110 处（⚡📂笔趣阁 `class.grid@tag.tr!0`、📂文学小说
+        // `class.b_bor@children@tr!0:1:2:3@a`、⚡📂鬼吹灯 `class.listmain@dd!0:1:…:11`）。
+        // 以前 `tr!0` 会被整段当成标签名交给 CSS，cheerio 对非法选择器**不报错、
+        // 静默返回空** —— 症状就是「目录/搜索 0 条，全程不报错」。
+        expect(parseJsoupRule('tr!0').steps).toEqual([
+            { by: 'tag', name: 'tr', index: { excludes: [0] } },
+        ])
+        expect(parseJsoupRule('tag.tr!0').steps).toEqual([
+            { by: 'tag', name: 'tr', index: { excludes: [0] } },
+        ])
+        expect(parseJsoupRule('class.listmain@dd!0:1:2').steps).toEqual([
+            { by: 'class', name: 'listmain', index: null },
+            { by: 'tag', name: 'dd', index: { excludes: [0, 1, 2] } },
+        ])
+        // 与方括号写法完全等价
+        expect(parseJsoupRule('tag.li!0:2')).toEqual(parseJsoupRule('tag.li[!0:2]'))
+    })
+
+    it('`!` 后面是「一串要排除的下标」，不是区间取反', () => {
+        // 判据来自语料里的**非单调**写法 `!0:3:-1:-2`（📂️乐文小说），当区间读不出来
+        expect(parseJsoupRule('class.label!-1:-2@text').steps).toEqual([
+            { by: 'class', name: 'label', index: { excludes: [-1, -2] } },
+        ])
+        // `-` 倒置与 `!` 并存（📥苦瓜书盘 `-class.button!-1@tag.a`）
+        const plan = parseJsoupRule('-class.button!-1@tag.a')
+        expect(plan.reverse).toBe(true)
+        expect(plan.steps).toEqual([
+            { by: 'class', name: 'button', index: { excludes: [-1] } },
+            { by: 'tag', name: 'a', index: null },
+        ])
+    })
+
+    it('`!` 后面不是数字时不动它（类名里的 `!` 仍是类名的一部分）', () => {
+        expect(parseJsoupRule('class.a!b').steps).toEqual([
+            { by: 'class', name: 'a!b', index: null },
+        ])
+    })
 })
 
 describe('位置选择', () => {
@@ -110,6 +149,17 @@ describe('位置选择', () => {
 
     it('排除指定序号', () => {
         expect(applyIndex(items, parseIndexExpr('!0,2'))).toEqual(['b', 'd'])
+    })
+
+    it('`!` 后面用 `:` 隔开也是一串下标（`!0:1:2` / `!0:-1` / `!0:3:-1:-2`）', () => {
+        expect(applyIndex(items, parseIndexExpr('!0:1:2'))).toEqual(['d'])
+        expect(applyIndex(items, parseIndexExpr('!0:-1'))).toEqual(['b', 'c'])
+        // 非单调 —— 这是「排除一串下标」而不是区间的**决定性**证据
+        expect(parseIndexExpr('!0:3:-1:-2')).toEqual({ excludes: [0, 3, -1, -2] })
+    })
+
+    it('`!` 后面不是数字时给 null（`!important` 这类不能当成下标）', () => {
+        expect(parseIndexExpr('!important')).toBeNull()
     })
 
     it('越界不抛错，只是取不到', () => {

@@ -71,7 +71,15 @@ function numOrNull(raw: string | undefined): number | null {
     return Number.isFinite(n) ? n : null
 }
 
-/** 解析方括号/点号里的位置表达式，如 `0`、`-1`、`!1,3`、`-1:0`、`1:10:2` */
+/**
+ * 解析下标表达式：`0`、`-1`、`-1:0`、`1:10:2`、`!1,3`、`!0:1:2`、`!0:-1`、`!0:3:-1:-2`
+ *
+ * `!` 那一支读成「**排除这些下标**」，而不是「区间取反」：
+ * ① Legado 的规则文档就是这么写的（`!` 排除、序号用 `:` 隔开）；
+ * ② 语料里存在 `!0:3:-1:-2`（📂️乐文小说）与 `!0:-1:-2`（📂天下书盟）这种**非单调**的写法 ——
+ *    当成区间根本读不出来，只能是「排除 0、3、倒数第一、倒数第二」这样一串下标。
+ * `,` 与 `:` 都当分隔符（两种写法语料里都有）。
+ */
 export function parseIndexExpr(expr: string): IndexSpec | null {
     const t = expr.trim()
     if (t === '') return null
@@ -79,7 +87,7 @@ export function parseIndexExpr(expr: string): IndexSpec | null {
     if (t.startsWith('!')) {
         const nums = t
             .slice(1)
-            .split(',')
+            .split(/[:,]/)
             .map((x) => numOrNull(x))
             .filter((n): n is number => n !== null)
         return nums.length ? { excludes: nums } : null
@@ -100,7 +108,29 @@ export function parseIndexExpr(expr: string): IndexSpec | null {
     return picks.length ? { picks } : null
 }
 
-/** 解析 `class.odd.0` / `tag.div[-1:0]` / `children` 这类单段 */
+/**
+ * 拆掉段尾的下标表达式：`tr!0` → (`tr`, 排除 0)、`dd.2:3` → (`dd`, 第 2 到第 3 个)
+ *
+ * 三种写法**同义**，都走同一个 `parseIndexExpr`：
+ *   `.N`   点号（`dd.2:3`、`class.book-dir.1`）
+ *   `[N]`  方括号（`p[-1]`）
+ *   `!N`   排除（`tr!0`、`dd!0:1:2:3`、`p!0:-1`）—— `!` 后面紧跟数字才算，
+ *          所以 `class.a!b` 这种照样是一整个类名，不会被切开
+ *
+ * 下标解析不出来时**原样返回**（`.book_list2 ul>li>a[href*='.html']` 的属性选择器
+ * 不能被当成位置 —— `parseIndexExpr` 对非数字给 null，正好用来区分）。
+ */
+function splitSegmentIndex(rest: string): { name: string; index: IndexSpec | null } {
+    const m = /^(.*?)(?:\.(-?\d+(?::-?[\d%]*)?)|\[([^\]]*)\]|!(-?\d(?:[-:,\d]*\d)?))$/.exec(rest)
+    if (!m) return { name: rest, index: null }
+    const name = m[1] ?? ''
+    // `.` / `[` / `!` 前面必须有名字（`.1` 那种纯索引段由 `parseSegment` 的开头单独处理）
+    if (name === '') return { name: rest, index: null }
+    const index = parseIndexExpr(m[2] ?? m[3] ?? `!${m[4] ?? ''}`)
+    return index ? { name, index } : { name: rest, index: null }
+}
+
+/** 解析 `class.odd.0` / `tag.div[-1:0]` / `tag.tr!0` / `children` 这类单段 */
 function parseSegment(seg: string): JsoupStep | null {
     // 纯索引段：`.1` 或 `[1]`，等价于 children[1]
     if (seg.startsWith('.') || seg.startsWith('[')) {
@@ -112,44 +142,18 @@ function parseSegment(seg: string): JsoupStep | null {
     if (!m) {
         // 没写类型的裸名字按**标签名**处理。Legado 明确把
         // `head@.1@text` 与 `head@children[1]@text` 视为等价，
-        // 所以 `head`、`div`、`ul[1]` 这类写法必须认。
+        // 所以 `head`、`div`、`ul[1]`、`tr!0` 这类写法必须认。
         //
-        // 点号后面的位置允许再跟一段 `:N`（`dd.2:3`，线上 📂阳光小说 的 kind）。
-        // 它走的是**同一个 `parseIndexExpr`**，因此与方括号写法 `dd[2:3]` 完全等价。
-        //
-        // 语义上的一个不确定：Legado 的规则文档把第三段描述为「`!` 排除、序号用 `:`
-        // 隔开」，照那个说法 `2:3` 是「第 2 和第 3 个」两个下标，而这个引擎一直把 `:`
-        // 读成**区间**。对 `2:3` 这一处两种解释恰好都落在 2..3，所以这里选择与自家
-        // 方括号写法保持一致，不再引入第三种语义 —— 真正的差别只会在
-        // `2:4` 这种（区间=3 个、下标集合=2 个）才显出来，而线上没有这样的写法。
-        const bare = /^([A-Za-z][\w:-]*?)(?:\.(-?\d+(?::-?[\d%]*)?)|\[([^\]]*)\])?$/.exec(seg)
-        if (!bare) return null
-        return {
-            by: 'tag',
-            name: bare[1] ?? '',
-            index: parseIndexExpr(bare[2] ?? bare[3] ?? ''),
-        }
+        // 位置后缀三种写法（`.` / `[]` / `!`）都走 `splitSegmentIndex`，语义与
+        // `dd[2:3]` 完全一致 —— 线上 `tr!0` / `dd!0:1:2:3:4:5` 这一类共 110 处，
+        // 以前 `tr!0` 会被整段当成标签名交给 CSS，cheerio 不报错、静默返回 0 条。
+        const bare = splitSegmentIndex(seg)
+        if (!/^[A-Za-z][\w:-]*$/.test(bare.name)) return null
+        return { by: 'tag', name: bare.name, index: bare.index }
     }
 
-    const by = m[1] as StepBy
-    let rest = m[2] ?? ''
-    let index: IndexSpec | null = null
-
-    // 尾部方括号形式的位置
-    const br = /^(.*)\[([^\]]*)\]$/.exec(rest)
-    if (br) {
-        rest = br[1] ?? ''
-        index = parseIndexExpr(br[2] ?? '')
-    } else {
-        // 点号形式的位置：`odd.0` 里最后的 `.0`
-        const dm = /^(.*)\.(-?\d+)$/.exec(rest)
-        if (dm) {
-            rest = dm[1] ?? ''
-            index = parseIndexExpr(dm[2] ?? '')
-        }
-    }
-
-    return { by, name: rest, index }
+    // 写了类型的那些（`tag.tr!0` / `class.button!-1` / `text.下一页`）：类型后面整段当名字 + 下标
+    return { by: m[1] as StepBy, ...splitSegmentIndex(m[2] ?? '') }
 }
 
 /**
@@ -282,6 +286,25 @@ const HTML_TAG_NAMES = new Set([
 /** 这个裸词是不是 HTML 标签名（大小写不敏感） */
 export function isHtmlTagName(name: string): boolean {
     return HTML_TAG_NAMES.has(name.trim().toLowerCase())
+}
+
+/**
+ * 拆「CSS 式选择器 + JSOUP 下标后缀」：`.book-dir.1` → (`.book-dir`, 第 2 个)
+ *
+ * 书源会把 JSOUP 的下标写法直接缀在 CSS 选择器后面，线上 46 处：
+ * `.section-list.1@li`、`.chapter.1@li@a`、`.row[-1]@a`、`#list dd[12:-1]`；
+ * 还有 `!` 那一支（`.txt-list li!0`、`tr!0:-1`、`#chapterlist p!0`）。
+ * 下标解析不出来时**原样返回** —— `.book_list2 ul>li>a[href*='.html']` 这种属性选择器
+ * 不能被当成位置（`parseIndexExpr` 对非数字给 null，正好用来区分）。
+ */
+export function splitCssIndex(selector: string): { css: string; index: IndexSpec | null } {
+    const t = selector.trim()
+    const m = /^(.*?)(?:\.(-?\d+(?::-?[\d%]*)?)|\[([^\]]*)\]|!(-?\d(?:[-:,\d]*\d)?))$/.exec(t)
+    if (!m) return { css: t, index: null }
+    const head = (m[1] ?? '').trim()
+    if (head === '') return { css: t, index: null }
+    const index = parseIndexExpr(m[2] ?? m[3] ?? `!${m[4] ?? ''}`)
+    return index ? { css: head, index } : { css: t, index: null }
 }
 
 /** 把一条 JSOUP 默认规则解析成计划 */
