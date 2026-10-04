@@ -68,6 +68,8 @@ export interface PlatformCapabilities {
  *
  * 只有「取网」这一项是有的 —— 其余四项恰恰是上游那些能力的来源，
  * 所以表里凡是需要它们的成员都登记成 `absent`（报出名字，而不是静默给空值）。
+ * 唯一的例外是 `showBrowser`：它需要 WebView，但书源会拿 `typeof` 探测它来选分支，
+ * 按下面的规矩登记成 `keep-absent`，见那条成员自己的说明。
  */
 export const WORKERS_PLATFORM: PlatformCapabilities = {
     http: true,
@@ -665,14 +667,19 @@ export const JAVA_SURFACE: JavaMember[] = [
     { name: 'sleep', upstream: null, support: 'implemented', note: 'Worker 里不能阻塞线程，忽略' },
     {
         /**
-         * 把一个内联页面（HTML + 脚本 + 配置）用 WebView 显示出来 ——
-         * 🏷晋江文学 的书评、登录都靠它。本引擎没有 WebView，报出名字并说明缺什么。
+         * 把一个内联页面（HTML + 脚本 + 配置）用 WebView 显示出来 —— 🏷晋江文学 的书评、登录靠它。
+         *
+         * 两个兄弟成员（startBrowser / startBrowserAwait）都是 absent，它**特意**是 keep-absent：
+         * 🏷七猫小说 拿 `typeof java.showBrowser == 'function'` 当**探测**，串起一条
+         * 「this.java → java → QM_C_RUNTIME_JAVA」的降级链。给一个（哪怕会报错的）函数，
+         * 探测就为真、它会挑走这一支然后再炸；缺着反而能落到自己的兜底上。
+         * 按文件开头的规矩：absent 只给「书源会无条件调用」的成员。
          */
         name: 'showBrowser',
         upstream: null,
-        support: 'absent',
+        support: 'keep-absent',
         platform: 'webview',
-        reason: '需要 WebView（上游用它把一段 HTML 连同脚本显示出来）',
+        reason: '故意不定义：🏷七猫小说 用 typeof 探测它来选分支（需要 WebView 的是它挑中的那一支）',
     },
     {
         name: 'startBrowser',

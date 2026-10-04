@@ -825,6 +825,17 @@ var book = (function () {
     if (!map) return
     for (var k in map) obj.putVariable(k, map[k])
   }
+  // book.setReverseToc(flag)：上游用它把目录倒序显示。语料 2 处（📂就去看网 / 📂言情小说）
+  // 都写在 **ruleBookInfo.name 的中途** —— 没有这个方法时那一句直接抛错，
+  // 连书名都取不到（比「目录顺序不对」严重得多）。本引擎不改目录顺序，只把意图记下来。
+  obj.reverseToc = false
+  obj.setReverseToc = function (flag) { obj.reverseToc = !!flag }
+  // book.putCustomVariable(value)：上游语义未确认。语料 3 处都只往里放一条状态字符串、
+  // 没有任何地方读回（🏷晋江文学 的目录菜单放「开启•购买」、🌍🔞爱丽丝书屋 放空串清掉）。
+  // 存下来、不报错；**不与书变量表混用**，免得它去顶替某个真变量。
+  obj.putCustomVariable = function (value) {
+    obj.customVariable = value === undefined || value === null ? '' : String(value)
+  }
   return obj
 })()
 
@@ -843,6 +854,16 @@ var chapter = (function () {
   obj.getVariable = function (name) { return book.getVariable(name) }
   obj.putVariable = function (name, value) { book.putVariable(name, value) }
   obj.getVariableMap = function () { return book.getVariableMap() }
+  // chapter.isVip()：上游的「这一章要不要付费」。语料 1 处（🏷起点(部分可看) 的正文规则
+  // if (chapter.isVip()) { 走 JSON } else { 走 jsoup }）—— 没有它时报 TypeError，
+  // **整章正文一条都取不到**。但目录带上来的章节上下文目前只有 title / name / url / index
+  // （见 index.ts 的 requestChapterContext），没有 vip 标记，所以现在恒为 false：
+  // 免费章走对分支、付费章走错 —— 这是「缺信息」，不是「方法不存在」。
+  obj.isVip = function () { return data.isVip === true || data.isVip === 'true' || data.isVip === 1 }
+  // chapter.putImgUrl(url)：上游把这一章的图片地址写回章节对象。语料 1 处
+  // （🏷书旗小说 的 ruleContent.title，写在 try 里、只为清掉旧值）。
+  // 节点集在宿主侧是共享的，改它会串到同一份文档的其它句柄上，所以是空实现。
+  obj.putImgUrl = function () {}
   return obj
 })()
 
@@ -920,6 +941,24 @@ var source = (function () {
     // 重建一份，保证「先 put 再 get」在同一个脚本里就能读到
     obj.__loginInfoMap = __toJavaMap(obj.__loginInfo)
   }
+  // getLoginInfo() 与 putLoginInfo 配套：上游返回登录信息**字符串**，
+  // 源自己 JSON.parse 后按键取。语料 2 处（🎨漫蛙 / 🎨🔞禁漫天堂），都写成
+  // JSON.parse(source.getLoginInfo())[键]；没登录时这里是空串，JSON.parse 会抛 ——
+  // 但那两句本来就写在 try 里，抛了正好落到「未登录」那条分支。
+  obj.getLoginInfo = function () {
+    return String(obj.__loginInfo === undefined || obj.__loginInfo === null ? '' : obj.__loginInfo)
+  }
+  obj.removeLoginInfo = function () {
+    obj.__loginInfo = ''
+    obj.__loginInfoMap = __toJavaMap('')
+  }
+  // 退出登录：语料 4 处 / 4 源（🌍🔞爱丽丝书屋 / 📂完本神站（登录）/ 🏷七猫小说 /
+  // ⚡📂三五中文，都在 logout / clearLogin 那条路上），与已实现的 putLoginHeader 对称。
+  obj.removeLoginHeader = function () { obj.__loginHeader = '' }
+  // source.putConcurrent("并发数/间隔")：上游拿它调**书架刷新**的并发。
+  // 语料 2 处（🔞 Linpx / 🔞兽人小说站 的 startShelfRefresh / endShelfRefresh 回调），
+  // 本引擎没有书架刷新，空实现。
+  obj.putConcurrent = function () {}
   obj.refreshExplore = function () { java.refreshExplore() }
   obj.setExploreScreen = function () {}
   return obj
@@ -932,12 +971,61 @@ var source = (function () {
 
 var cookie = (function () {
   var jar = {}
+
+  // cookie.getKey(url, key)：从按域保存的 cookie 串里取**一个键**的值。
+  // 语料 2 处 / 2 源 —— 🏷起点 的发现页地址模板（cookie.getKey("https://qidian.com","_csrfToken")，
+  // 338 处模板里都在用）与 🏷阅文集团 的登录脚本。以前没有这个方法，模板那一句直接
+  // TypeError，**整条分类地址都建不出来**。
+  //
+  // 但要说清这个缺口的性质：**响应里的 Set-Cookie 还没有收进这个 jar**
+  // （只有同一段脚本里 cookie.setCookie 写进来的才有），而它要的键本来是浏览器登录后
+  // 由站点下发的。所以线上多半返回空串 —— 这是「没实现」，不是「没这个名字」。
+  //
+  // 注意：这一段是模板字符串的一部分 —— 里面**不能写带反斜杠的正则**：
+  // 模板字符串会把反斜杠吃掉（转义过的斜杠只剩斜杠、空白类只剩它后面那个字母），
+  // 正则于是悄悄变形、连语法错误都不报。所以这两个小助手一个反斜杠都不用。
+  function hostOf(url) {
+    var s = String(url)
+    var scheme = s.indexOf('://')
+    if (scheme > 0) s = s.slice(scheme + 3)
+    else if (s.slice(0, 2) === '//') s = s.slice(2)
+    var end = s.length
+    var slash = s.indexOf('/')
+    if (slash !== -1 && slash < end) end = slash
+    var query = s.indexOf('?')
+    if (query !== -1 && query < end) end = query
+    return s.slice(0, end)
+  }
+  function findKey(entry, key) {
+    var parts = String(entry).split(';')
+    for (var i = 0; i < parts.length; i++) {
+      var seg = parts[i].trim()
+      var eq = seg.indexOf('=')
+      if (eq > 0 && seg.slice(0, eq) === key) return seg.slice(eq + 1)
+    }
+    return ''
+  }
+
   return {
     getCookie: function (url) { var v = jar[String(url)]; return v === undefined ? '' : v },
     setCookie: function (url, value) { jar[String(url)] = String(value) },
     replaceCookie: function (url, value) { jar[String(url)] = String(value) },
     removeCookie: function (url) { delete jar[String(url)] },
     getCookieMap: function () { return jar },
+    getKey: function (url, key) {
+      var want = hostOf(url)
+      var name = String(key)
+      if (want === '') return ''
+      for (var u in jar) {
+        var have = hostOf(u)
+        // 域名互相包含就算同一个站：cookie.getKey("qidian.com", k) 也要命中
+        // 存成 https://qidian.com/xxx 的那一条（反过来也一样）。
+        if (have !== want && have.indexOf(want) === -1 && want.indexOf(have) === -1) continue
+        var hit = findKey(jar[u], name)
+        if (hit !== '') return hit
+      }
+      return ''
+    },
   }
 })()
 

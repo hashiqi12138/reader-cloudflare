@@ -15,6 +15,7 @@
 
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
+import { Script } from 'node:vm'
 
 import {
     JAVA_SURFACE,
@@ -26,6 +27,8 @@ import {
     unsupportedPrelude,
 } from '../src/engine/platform'
 
+const JS_SOURCE = readFileSync(new URL('../src/engine/js.ts', import.meta.url), 'utf8')
+
 /** 沙箱预置里手写实现的名字（`名字: function`，取 JAVA_PRELUDE 那一段） */
 function sandboxImplementedNames(): Set<string> {
     const source = readFileSync(new URL('../src/engine/js.ts', import.meta.url), 'utf8')
@@ -33,6 +36,16 @@ function sandboxImplementedNames(): Set<string> {
     const end = source.indexOf('const GLOBALS_PRELUDE =')
     const prelude = source.slice(start, end)
     return new Set([...prelude.matchAll(/^\s{2}([A-Za-z_$][\w$]*): function /gm)].map((m) => m[1]!))
+}
+
+/** 抠出一段预置模板字符串的**原始文本**（含还没被解转义的转义） */
+function templateBody(marker: string): string {
+    const at = JS_SOURCE.indexOf(marker)
+    if (at === -1) throw new Error(`js.ts 里找不到 ${marker}`)
+    const start = at + marker.length
+    const end = JS_SOURCE.indexOf('\n`\n', start)
+    if (end === -1) throw new Error(`${marker} 没有正常结束`)
+    return JS_SOURCE.slice(start, end + 1)
 }
 
 const sandbox = sandboxImplementedNames()
@@ -73,6 +86,33 @@ describe('java 兼容层：表与沙箱预置一致', () => {
         expect(unsupported).not.toContain('`')
         expect(unsupported).not.toContain('${')
     })
+
+    /**
+     * 预置是**模板字符串**，所以里面写的反斜杠会被吃掉 —— 转义过的斜杠只剩一个斜杠、
+     * 空白类只剩它后面那个字母（`\s` 变 `s`）。前者让正则提前收尾、直接变成**语法错误**，
+     * 报出来的却是一句 `沙箱预置失败（全局对象）：[object Object]`（QuickJS 的 Error
+     * 被 dump 成对象）；后者更阴 —— 不报错，正则悄悄对不上。
+     *
+     * 第五十三轮给 `cookie` 加 `getKey` 时就是这么把**整条链路**弄坏的：
+     * 语法检查单看源码文本是「通过」的，只有先把模板字符串解转义再解析才看得出来。
+     */
+    it('预置按模板字符串解转义之后仍然能解析（反斜杠会被吃掉）', () => {
+        for (const marker of ['const JAVA_PRELUDE = `', 'const GLOBALS_PRELUDE = `']) {
+            const raw = templateBody(marker)
+            expect(raw, `${marker} 里不该有反引号`).not.toContain('`')
+            // 只允许「换行」这一种转义（源码里写成两个反斜杠 + n）。别的一律会被吃掉：
+            // 转义过的斜杠让正则提前收尾（语法错）、空白类只剩一个字母（静默错）
+            const otherBackslashes = raw.replace(/\\\\n/g, '')
+            expect(otherBackslashes, `${marker} 里出现了会被模板字符串吃掉的转义`).not.toContain(
+                '\\',
+            )
+            // 解转义：这一步与运行时把模板字符串求值成字符串是同一件事
+            const cooked = new Function('unsupportedPrelude', `return \`${raw}\``)(
+                () => '',
+            ) as string
+            expect(() => new Script(cooked), marker).not.toThrow()
+        }
+    })
 })
 
 describe('java 兼容层：面与平台能力', () => {
@@ -91,10 +131,14 @@ describe('java 兼容层：面与平台能力', () => {
             ui: false,
             filesystem: false,
         })
-        // 反过来说：需要 WebView 的能力，一定被登记成 absent（不会悄悄变成「有」）
+        // 反过来说：需要 WebView 的能力，绝不会被登记成「有」。
+        // 其中唯一一个被书源用 typeof 探测的（showBrowser，🏷七猫小说 的降级链）是 keep-absent
         const webviewMembers = JAVA_SURFACE.filter((m) => m.platform === 'webview')
         expect(webviewMembers.length).toBeGreaterThan(0)
-        expect(webviewMembers.every((m) => m.support === 'absent')).toBe(true)
+        expect(webviewMembers.every((m) => m.support !== 'implemented')).toBe(true)
+        expect(
+            webviewMembers.filter((m) => m.support === 'keep-absent').map((m) => m.name),
+        ).toEqual(['showBrowser'])
     })
 
     it('上游签名原样留着（语义对齐靠它：例如 get 在上游只有两参一个重载）', () => {
