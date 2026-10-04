@@ -901,8 +901,25 @@ var source = (function () {
   obj.putLoginHeader = function (header) {
     obj.__loginHeader = header === undefined || header === null ? '' : String(header)
   }
-  obj.getLoginInfoMap = function () { return {} }
-  obj.putLoginInfo = function () {}
+  obj.getLoginInfoMap = function () {
+    // Legado 那边 getLoginInfoMap() 返回的是一个 Java Map，书源因此写成
+    // info.get("vid")（还会先判 info == null）。这里以前直接返回一个裸的 {}，
+    // 连 putLoginInfo 也是空函数 —— 于是 .get 不存在，报出来的是
+    // TypeError: not a function，一个把方向完全指偏的错：真正的原因往往是
+    // 「这份源需要登录，而当前没有登录信息」，而书源自己带着那句清楚的提示，
+    // 只是走不到（🏷微信读书二合一本地源 就是这么报的）。
+    //
+    // __toJavaMap 给出的对象同时支持 map.get(k) 与 map[k]（线上两种写法都有），
+    // 缺键回空串 —— 与 getLoginHeaderMap 同一套。
+    // 线上 getLoginInfoMap 30 处 / 16 源、putLoginInfo 12 处 / 8 源。
+    if (!obj.__loginInfoMap) obj.__loginInfoMap = __toJavaMap(obj.__loginInfo)
+    return obj.__loginInfoMap
+  }
+  obj.putLoginInfo = function (info) {
+    obj.__loginInfo = info === undefined || info === null ? '' : String(info)
+    // 重建一份，保证「先 put 再 get」在同一个脚本里就能读到
+    obj.__loginInfoMap = __toJavaMap(obj.__loginInfo)
+  }
   obj.refreshExplore = function () { java.refreshExplore() }
   obj.setExploreScreen = function () {}
   return obj

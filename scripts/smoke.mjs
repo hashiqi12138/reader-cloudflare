@@ -5561,6 +5561,80 @@ console.log('\n=== 38. JSOUP 简写 `class.A B`：两个类都要有 ===')
     )
 }
 
+console.log('\n=== 39. `source.getLoginInfoMap()` 给的是 Map（书源写 `info.get(键)`） ===')
+{
+    /**
+     * Legado 那边 `getLoginInfoMap()` 返回一个 **Java Map**，书源因此写成
+     * `info.get("vid")`（还会先判 `info == null`）。我们以前返回裸的 `{}`、
+     * `putLoginInfo` 也是空函数 —— 于是 `.get` 不存在，报的是
+     * `TypeError: not a function`。线上 `getLoginInfoMap` **30 处 / 16 源**、
+     * `putLoginInfo` **12 处 / 8 源**；🏷微信读书二合一本地源 就是这么报错的，
+     * 而它**自己**带着「缺少 APP 登录参数…」那句提示，只因 `.get` 抛错而走不到。
+     *
+     * 改用与 `getLoginHeaderMap` 同一套 `__toJavaMap`（同时支持 `map.get(k)` 与
+     * `map[k]`，缺键回空串），并让 `putLoginInfo` 真的存下来。验四件事：
+     *   ① 没有登录信息时 `.get(键)` 回空串、`typeof m.get` 是 function（不再是 TypeError）
+     *   ② `putLoginInfo` 之后同一个脚本里就读得到（`get` 与 `[键]` 两种写法）
+     *   ③ `containsKey` 认得出键
+     *   ④ 书源那种 `info == null ? null : info.get(...)` 的写法跑得通
+     */
+    const id = `user:${BASE}/login-info`
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: '登录信息 Map（临时）',
+                bookSourceUrl: `${BASE}/login-info`,
+                searchUrl: '/fixture/search?q={{key}}',
+                ruleSearch: {
+                    bookList: 'div.result-item',
+                    // ① ② ③ 都在这一条里：先读（空）→ put → 再读
+                    name:
+                        `@js:(function(){var m=source.getLoginInfoMap();var shape=typeof m.get;var before=String(m.get('vid'));` +
+                        `source.putLoginInfo(JSON.stringify({vid:'V1',accessToken:'T1'}));var n=source.getLoginInfoMap();` +
+                        `return ['shape='+shape,'before='+JSON.stringify(before),'vid='+n.get('vid'),'tok='+n.get('accessToken'),` +
+                        `'idx='+n['vid'],'has='+n.containsKey('vid'),'miss='+JSON.stringify(n.get('zzz'))].join(' | ');})()`,
+                    // ④ 🏷微信读书 那个 wrValue 的原样形状
+                    author:
+                        `@js:(function(){var info=source.getLoginInfoMap();var value=info==null?null:info.get('vid');` +
+                        `return 'wrValue='+(value==null?'':String(value)).trim();})()`,
+                    bookUrl: 'h3.title a@href',
+                },
+            },
+        ]),
+    )
+
+    const res = await fetch(`${BASE}/api/search`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ keyword: '测试', sourceIds: [id] }),
+    })
+    const one = (await res.json()).sources?.[0]
+    const book = one?.books?.[0]
+
+    check(one?.ok === true, '这一条源能跑通（改前是 `not a function`）', String(one?.error ?? ''))
+    check(
+        book?.name === 'shape=function | before="" | vid=V1 | tok=T1 | idx=V1 | has=true | miss=""',
+        'putLoginInfo 之后 `get(键)` / `[键]` 都读得到，缺键回空串、containsKey 认得',
+        String(book?.name ?? ''),
+    )
+    check(
+        book?.author === 'wrValue=',
+        '书源那种 `info == null ? null : info.get(…)` 写得通，没有信息时回空串',
+        String(book?.author ?? ''),
+    )
+
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+    check(
+        !((await getJson('/api/sources')).json?.sources ?? []).some((s) =>
+            String(s.id).includes('login-info'),
+        ),
+        '登录信息 Map 的测试源已清理',
+    )
+}
+
 console.log('\n=== 结果 ===')
 if (failures.length === 0) {
     console.log(
