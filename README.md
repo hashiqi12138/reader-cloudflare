@@ -32,7 +32,8 @@
 | 前端：书架 / 搜索 / 书源管理 / 阅读页                                                               | 已实现（书源与阅读进度都落 D1）                                                                                                                                                                                                                                                                                                                 |
 | **图片源 / 音频源 / 文件源**（`bookSourceType` 1 / 2 / 3）                                          | 已实现（见「媒体类书源」一节）                                                                                                                                                                                                                                                                                                                  |
 | 媒体代取（防盗链 / 混合内容 / 跨域）                                                                | 已实现（签名地址 + Range 透传；**防盗链封面**也走它 —— 带选项的封面签发 `coverProxyUrl`，见「第四十七轮」）                                                                                                                                                                                                                                     |
-| 沙箱里的 `source` / `book` / `chapter` / `cookie` / `cache` / `infoMap` 全局                        | 已实现（见「沙箱里的全局对象」；`source.getKey()` 线上用了 413 次；`getLoginInfoMap()` / `putLoginInfo` 给的是 Map 语义；这五个对象的**方法面**有一张登记表 `test/sandboxSurface.ts`、语料差集必须为空 —— 见「第五十一 / 五十三轮」）                                                                                                           |
+| 沙箱里的 `source` / `book` / `chapter` / `cookie` / `cache` / `infoMap` 全局                        | 已实现（见「沙箱里的全局对象」；`source.getKey()` 线上用了 413 次；`getLoginInfoMap()` / `putLoginInfo` 给的是 Map 语义；这五个对象的**方法面**有一张登记表 `test/sandboxSurface.ts`、语料差集必须为空 —— 见「第五十一 / 五十三轮」）                                                                                                                                                                                                   |
+| **cookie 罐**（`enabledCookieJar` 的源：收 `Set-Cookie` / 请求自动带 `Cookie` / 按源落库）          | 已实现（816 条源里 457 条开着这个东西；「搜索那一趟拿到的会话 cookie 能不能带到详情那一趟」就靠它 —— 见「`cookie` 罐」与「第五十四轮」）                                                                                                                                                                                                                                                                    |
 | 书源自带的 `jsLib` 全局函数库                                                                       | 已实现（35 条源在用；作为沙箱前置脚本执行，失败不中断但会说明原因）                                                                                                                                                                                                                                                                             |
 | 沙箱里的 `book` / `chapter` 上下文与**书的变量**（`book.getVariable` / `putVariable`）              | 已实现（`book.name` 54 处 / 39 源、`chapter.title` 32 处 / 30 源；变量落 `book_variables`，见「第三十五轮」）                                                                                                                                                                                                                                   |
 | `org.jsoup.Jsoup` + Element/Elements API                                                            | 已实现（宿主桥 + cheerio 句柄；写操作是空操作，未实现的方法报出方法名；`<script>` / `<style>` 也是元素 —— 见「第四十九轮」）                                                                                                                                                                                                                    |
@@ -1086,21 +1087,49 @@ OpenCC 的 `TSCharacters.txt` 有几千条、且带「一简对多繁」的分�
    MD5 给的是**原始字节**而不是十六进制串 —— 七猫就是拿它逐位 `(b[i] & 0xff).toString(16)` 拼签名的，
    给错形态会算出一个合法但完全错的签名，站点回 403。
 
-### `cookie` 与 `cache`：只在本次求值内有效
+### `cookie` 罐：收 / 发 / 存（第五十四轮）
 
-它们是内存对象，求值结束就销毁 —— 真正的跨规则持久化需要一张表加按书源隔离，这里没有做。
-书源里绝大多数用法是「同一段脚本里先存后取」，内存版足够。
+以前它是「只在本次求值内有效」的内存对象 —— 而书源里最常见的那个形态恰恰要求它跨请求：
+**搜索那一趟拿到会话 cookie，点进详情那一趟必须带上**。在我们这里那是四次互不相干的
+HTTP 请求，所以罐子必须落库。
+
+三件事，缺一件整个机制就是空转（实现在 `src/lib/cookies.ts`）：
+
+| | 在哪做 | 说明 |
+| --- | --- | --- |
+| 收 | `lib/http.ts` 的 `fetchDetailed` | 每个响应的 `Set-Cookie` 进罐（只留 `名字=值`，属性全丢；`Max-Age=0` / 已过期的 `Expires` 是站点在删） |
+| 发 | 同上 | 请求前按「目标主机 + 各级父域」拼 `Cookie` 头；**书源自己声明了 `Cookie` 就不覆盖** |
+| 存 | `data/db.ts` 的 `saveSourceCookies` | 罐子变了就写穿（`sources.cookies`），一次站点会话通常只写一两次 |
+
+**只有 `enabledCookieJar === true` 的书源才建罐子**（816 条里 457 条开着、359 条作者明确
+关掉了）—— 关掉的源连罐子都不建，`cookie.*` 退回「只活本次求值」的老行为，与它们
+自己声明的取舍一致。
+
+键是**主机名**而不是完整地址，这是与原项目的一处刻意分歧：原项目的 `CookieStore` 按传来的
+整条 url 存（真实的收发靠 OkHttp 的 CookieJar 按 domain/path 做），我们只有一层。
+按主机名归并之后，`cookie.removeCookie(source.getKey())`（72 处 / 67 源）想要的
+「清掉这个站的 cookie」才对得上，`setCookie('https://a.com/x', …)` 之后向
+`https://a.com/y` 发请求也带得上。
+
+还有两处**有意的不对称**，都在代码里写明了理由：
+
+- **发出去的那一份窄，沙箱里看到的那一份宽**。发请求只按「目标主机 + 各级父域」拼；
+  而沙箱里的 `cookie.getCookie` / `getKey` 还往下找子域 —— 站点常把会话 cookie 下在
+  `m.qidian.com` 上，而 🏷起点 的发现页模板问的是 `qidian.com`（338 处）。前者是
+  「这次请求发什么」，后者是「脚本查这个站的 cookie」，宁可宽不可窄的是后者。
+- **`cookie.mapToCookie` 仍然没补**：它要的是 `response.cookies()` 的返回值，
+  那个方法也没有，单独补它不解决问题（登录流程整条没实现，见「第五十三轮」）。
+
+`cache` 还是内存对象，求值结束就销毁 —— 它没有「站点下发」这个来源，书源里
+绝大多数用法是「同一段脚本里先存后取」，内存版足够。
 `cache.getFile` / `putFile` 明确返回空（服务端没有可持久化的私有文件系统）。
 
-`cookie.getKey(url, key)` 是第五十三轮补的：它按**域**从 jar 里取某一个 cookie 键的值
-（🏷起点 的发现页地址模板 `{{cookie.getKey("https://qidian.com","_csrfToken")}}` 用它拼接口地址，
-338 处模板都在用；🏷阅文集团 的登录脚本也用）。**但要说清这个缺口的性质**：
-响应里的 `Set-Cookie` 还没有收进这个 jar（只有同一段脚本里 `cookie.setCookie` 写进来的才有），
-而它要的键本来是浏览器登录后由站点下发的 —— 所以线上多半返回空串。
-这是**没实现**，不是**没这个名字**：补上它之前，那一句是 `TypeError`，整条分类地址都建不出来。
+**这一版还没做的两件事**（都记在「第五十四轮」那一节）：
 
-`cookie.mapToCookie` 属于同类但**没补**：它要的是 `response.cookies()` 的返回值，
-而那个方法也没有、`Set-Cookie` 也不收 —— 单独补它不解决问题（登录流程整条没实现，见下）。
+- **3xx 响应上的 `Set-Cookie` 收不到**：`fetch` 的 `redirect: 'follow'` 会把中间响应吃掉，
+  而不少站点正是用 302 下发会话 cookie。要收它得自己跟重定向。
+- **24 个关着开关的源也在调 `cookie.removeCookie`**：它们的罐子是空的，那句等于没做 ——
+  这是它们自己关掉开关的后果，不是引擎漏了。
 
 ### 五个对象全局的**方法面**是一张登记表
 
@@ -4596,14 +4625,110 @@ this.classNames = className.trim().split("\\s+");   // 然后要求**每一个**
 
 **这一轮仍然没做完的**
 
-- **`cookie.getKey` 的值多半是空的**：响应的 `Set-Cookie` 还没收进 jar。要真让它有值，
-  得先做「按书源隔离的 cookie 表」+ 响应头回写 —— 与下面的登录状态是同一件事
+- **`cookie.getKey` 的值多半是空的**：响应的 `Set-Cookie` 还没收进 jar。
+  **第五十四轮做掉了**（cookie 罐：收 / 发 / 存），见那一轮
 - **登录状态没有实现**：`putLoginHeader` / `putLoginInfo` 只在**本次求值**里有效
   （第四十一 / 五十一 / 五十三轮都只是让它别抛一个指错方向的错）
 - **`chapter.isVip` 缺信息**：章节上下文里没有 vip 标记（见上）
 - `parseFragments` 把「整篇文档」当一段的怪相、选项里 `{{}}` 与 `body` 混用、
   `media.ts` 的两条多行地址路、`java.get(键)` 读不到持久化的书变量 —— 都还挂着（前几轮记的）
 - **WebView 那一族（16 个名字）**：本平台的取舍就是没有 WebView
+
+### 第五十四轮：cookie 罐 —— 让「搜索那一趟拿到的会话」活到详情那一趟
+
+第五十三轮补上 `cookie.getKey` 之后，缺的那一环暴露得很清楚：**罐子是空的**。
+响应里的 `Set-Cookie` 没有人收，而书源里最常见的形态恰恰是
+「搜索那一趟站点下发会话 cookie，点进详情那一趟必须带上」。在我们这里那是
+**四次互不相干的 HTTP 请求**，所以罐子必须落库 —— 否则症状是「搜得到书、点进去 403」，
+一个看起来像书源坏了的错。
+
+**一、先量。** 816 条源全都有 `enabledCookieJar` 这个字段，**457 条是 true、359 条 false** ——
+是作者明确表过态的。`cookie.*` 的用量（按开关切开）：
+
+| | 开 | 关 | |
+| --- | --- | --- | --- |
+| `getKey` | 338 | 0 | 全在 🏷起点 的发现页模板里 |
+| `removeCookie` | 48 | 24 | 清会话 |
+| `getCookie` | 12 | 1 | |
+| `setCookie` | 8 | 2 | |
+| `replaceCookie` | 1 | 0 | |
+
+还有一条更关键的判据：**只读不写**的源（只用 `getCookie` / `getKey`，从不写）——
+它们读的东西**不可能来自自己写的**，只能来自站点下发。这样的源有 **4 个**
+（🏷起点 / ⚡📂听笔趣阁 / 📂66书吧 / 📂乐乎文章），**四个都开着开关**。
+这一条成了第 16 条账本（`test/cookieJar.scan.test.ts`）钉住的性质：
+「只读 cookie 的源必须开着开关」—— 关了的话它读到的永远是空串，而不报任何错。
+
+**二、三件事一起做（缺一件整个机制就是空转）。**
+
+| | 落在哪 | 怎么做 |
+| --- | --- | --- |
+| **收** | `lib/http.ts` 的 `fetchDetailed` | 每个响应的 `Set-Cookie` 进罐；只留 `名字=值`，属性全丢；`Max-Age=0` / 已过期的 `Expires` 当作站点在删 |
+| **发** | 同上 | 请求前按「目标主机 + 各级父域」拼 `Cookie` 头；**书源自己声明了 `Cookie` 就不覆盖** |
+| **存** | `sources.cookies`（迁移 0014） | 罐子真的变了才写穿；一次站点会话通常只写一两次 |
+
+**三、四个刻意的设计选择**（都写进了代码注释，因为它们都是「看起来可以更简单」的地方）。
+
+1. **只有 `enabledCookieJar === true` 才建罐子。** 关掉的 359 条连罐子都不建，
+   它们的 `cookie.*` 退回「只活本次求值」的老行为 —— 与它们自己声明的取舍一致，
+   也避免把一批源的请求行为悄悄改掉。装配点在 `data/db.ts` 的 `rowToSource`：
+   那是唯一同时知道「库里的行」与「db」的地方。
+2. **罐子挂在书源对象上，不挂在求值上下文上。** 因为取网层、沙箱、落库三处都要看到
+   同一个对象，而它们都从书源取 —— 挂上下文就得一路传参，漏一处的表现是
+   「某个入口不带 cookie」这种半好半坏的状态。`FetchPlan` 再加两个字段
+   （`cookieJar` / `persistCookies`）就够了，`planFromResolvedUrl` 是**所有**请求的
+   唯一出口，挂在那里等于链路请求与 `java.ajax` 全都走它。
+3. **发出去的那一份窄，沙箱里看到的那一份宽。** 发请求只按「主机 + 各级父域」；
+   沙箱里的 `cookie.getCookie` / `getKey` 还往下找子域。理由是 🏷起点：
+   它的页面全在 `m.qidian.com` 上，而模板问的是 `qidian.com`。
+   两件事的取舍不同 —— 发出去的宁窄（别把 A 站的会话带给 B 站），
+   脚本查的宁宽（别让书源找不到自己的 cookie）。
+4. **键是主机名，不是完整地址。** 原项目的 `CookieStore` 按整条 url 存，
+   真实的收发靠 OkHttp 按 domain/path 做；我们只有一层，按主机名归并之后
+   `cookie.removeCookie(source.getKey())`（72 处 / 67 源）想要的「清掉这个站的 cookie」
+   才对得上。代价是没有 path 语义 —— 比浏览器宽一点，但不会漏发。
+
+沙箱那侧另有一份镜像实现（`GLOBALS_PRELUDE` 里，QuickJS 里 import 不了宿主那一份），
+它只做「读写注入进来的那一份 + 把改动记到 `__cookieJarOut`」；求值结束后
+`collectCookies` **只收回改过的主机**，不是整份快照 —— 这一点很要紧：这次求值期间
+书源可能自己发过请求，取网层已经把新 cookie 收进同一个罐子了，整份覆盖会把它们抹掉。
+
+**四、验证。**
+
+- 单测 **770 → 793**（`test/cookies.test.ts` 15 条纯函数；`test/fetchLayer.test.ts`
+  在**真实 HTTP 线上**加 6 条：收 / 发 / 不覆盖书源的 Cookie / `Max-Age=0` 删除 /
+  没变不写库 / 没罐子时行为不变）
+- 账本 **15 → 16 条**（新增 `test/cookieJar.scan.test.ts`）
+- 冒烟**新增第 41 段**，三段一起验（缺一段结论就不成立）：
+  A 开着开关 → 详情打开；**B 同一个链路把开关关掉 → 详情 403**（证明起作用的确实是罐子，
+  而不是站点恰好在放行）；C 沙箱里 `setCookie` 合并 / `replaceCookie` 整串换 /
+  `removeCookie` 清掉 / `getKey` 取值都对
+- 靶子是测试站点新加的两个端点：`/fixture/cookie-set`（下发 `rc54=1` + 一页书目）、
+  `/fixture/cookie-need`（**只在带着它时**才回 200）
+
+**五、线上核验**（`/api/probe` 报 `0.44.0`）。用 httpbin 的两个端点做真站点对照
+（都是 200，不依赖重定向）：`/response-headers?Set-Cookie=rc54%3D1` 下发，`/cookies` 回显收到了什么。
+
+| 场景 | 改前（0.43.0） | 改后（0.44.0） |
+| --- | --- | --- |
+| 临时源：搜索那一趟下发 cookie，正文那一趟请求 `/cookies` | `/cookies` 回 `{"cookies":{}}`（会话没带过去） | `/cookies` 回 **`{"cookies":{"rc54":"1"}}`** |
+| 同一个源把 `enabledCookieJar` 关掉 | — | 回 `{"cookies":{}}`（对照仍在） |
+
+**这一轮仍然没做完的**
+
+- **3xx 响应上的 `Set-Cookie` 收不到**：`fetch` 的 `redirect: 'follow'` 会把中间响应吃掉，
+  而不少站点正是用 302 下发会话 cookie。要收它得自己跟重定向（`redirect: 'manual'` 加一个循环），
+  那会改动所有请求的行为，值得单独一轮
+- **没有 path / domain 属性**：`Set-Cookie` 的属性全丢，按主机名归并（见上）。
+  同一主机上不同 path 的同名 cookie 会互相覆盖
+- **24 个关着开关的源也在调 `cookie.removeCookie`**：它们的罐子是空的，那句等于没做 ——
+  是它们自己关掉开关的后果，不是引擎漏了（第 16 条账本把它们打出来了）
+- **登录流程仍然没实现**：这次让「搜索→详情→目录→正文」这几趟之间的会话活了下来，
+  但「用户在浏览器里登录一次、之后一直用」还需要一个能跑 `loginUrl` 的入口
+  （`cookie.mapToCookie` 也还缺，见「第五十三轮」）
+- 前几轮挂着的那几笔（`parseFragments` 的怪相、选项里 `{{}}` 与 `body` 混用、
+  `media.ts` 的两条多行地址路、`java.get(键)`、`chapter.isVip` 缺证据、
+  **WebView 那一族（16 个名字）**）都没动
 
 ## 验证
 
@@ -4824,7 +4949,7 @@ B 导入 → B 的书架、阅读位置（含「停在第几页」）、书签�
 ### 用真实书源全量扫描
 
 冒烟跑的是内置站点 —— 它证明「运行时可跑」，但证明不了「线上 800 多条书源里没有漏网的」。
-有些结论只能拿整份集合去量，现在有十五个扫描（各自独立，都默认跳过）：
+有些结论只能拿整份集合去量，现在有十六个扫描（各自独立，都默认跳过）：
 
 | 扫描                            | 量什么                                                                                   |
 | ------------------------------- | ---------------------------------------------------------------------------------------- |
@@ -4843,6 +4968,7 @@ B 导入 → B 的书架、阅读位置（含「停在第几页」）、书签�
 | `putGet.scan.test.ts`           | `@get:` / `@put:` / `init` 的量级、单键形状、括号配平与写法分类（第三十九轮）            |
 | `javaSurface.scan.test.ts`      | 脚本用到的 `java.*` 名字表里都有登记吗（没登记就是 `not a function`，第五十二轮）        |
 | `sandboxObjects.scan.test.ts`   | `source`/`book`/`chapter`/`cookie`/`cache` 上用到的方法都在表里吗（同上，第五十三轮）    |
+| `cookieJar.scan.test.ts`        | 只读 cookie（靠站点下发）的源有没有关掉 `enabledCookieJar`；开关与各方法的用量分布（第五十四轮） |
 
 ```bash
 # 导出一份书源（wrangler --json 的原样输出即可，也接受裸数组或探索结果的 json）
@@ -4853,7 +4979,7 @@ SOURCES_DUMP=sources.json npx vitest run test/ruleSplitting.scan.test.ts test/ru
   test/listMarker.scan.test.ts test/resultHtml.scan.test.ts test/jsTailList.scan.test.ts \
   test/listExtract.scan.test.ts test/listCssHeadIndex.scan.test.ts test/bangIndex.scan.test.ts \
   test/fieldCssStops.scan.test.ts test/putGet.scan.test.ts test/javaSurface.scan.test.ts \
-  test/sandboxObjects.scan.test.ts
+  test/sandboxObjects.scan.test.ts test/cookieJar.scan.test.ts
 ```
 
 **默认整组跳过**，所以 CI 与日常 `npm test` 不受影响，书源也不会进仓库（dump 在 `.gitignore` 里）。
