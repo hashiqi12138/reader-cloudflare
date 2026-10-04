@@ -237,6 +237,13 @@ export interface SandboxHttp {
         status: number
         headers: Record<string, string[]>
         body: string
+        /**
+         * 这次请求**自己**拿到的那一跳重定向（见 `lib/http.ts` 的 `FetchedResponse`）
+         *
+         * 沙箱那一侧拿它兜 `header('Location')` —— 线上 11 个源靠那个 Location
+         * 找真正的搜索页地址，而重定向是我们替它们跟的。
+         */
+        redirectedFrom?: { status: number; location: string }
     }>
     /**
      * 把一个（可能相对的、可能带 `,{...}` 请求选项的）地址解析成**绝对地址**

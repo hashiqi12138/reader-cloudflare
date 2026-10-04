@@ -245,7 +245,21 @@ function __attachResponse(target, getDetail, urlOf) {
   target.headers = function (name) {
     var d = getDetail()
     if (!d.ok) return []
-    var list = (d.headers || {})[String(name).toLowerCase()]
+    var key = String(name).toLowerCase()
+    var list = (d.headers || {})[key]
+    /**
+     * Location 要特别对待：重定向是**我们替书源跟的**，跟完之后最终响应里当然没有它，
+     * 但那个 Location 是书源那次请求的**真实响应头**。线上 11 个源的 searchUrl 就是
+     * 靠它找真正的搜索页地址（写法是 java.post(url, body, {}).header('location')），
+     * 丢了它们只会拿到空串、然后拿空地址去请求。
+     */
+    if (
+      (list === undefined || list === null || list.length === 0) &&
+      key === 'location' &&
+      d.redirectedFrom
+    ) {
+      return [String(d.redirectedFrom.location)]
+    }
     return list === undefined || list === null ? [] : list
   }
   target.header = function (name, fallback) {
@@ -2269,6 +2283,8 @@ async function handleHttpResponse(
             status: response.status,
             headers: response.headers,
             body: response.body,
+            // 第一跳重定向（若有）：沙箱那一侧拿它兜 header('Location')
+            ...(response.redirectedFrom ? { redirectedFrom: response.redirectedFrom } : {}),
         })
     } catch (err) {
         return JSON.stringify({

@@ -155,8 +155,34 @@ async function readBounded(response: Response): Promise<ArrayBuffer> {
  * 以前**完全没有超时**，于是站点不响应时只能干等上游自己放弃 —— 实测最慢的一次
  * 是 39 秒（`wrangler tail` 里也能看到 522 要等 20 秒才回来）。20 秒是给
  * 「慢但真的能读」的站点留的余量，同时给所有请求一个上限。
+ *
+ * 第五十五轮改成自己跟重定向之后，它是**整条链**的预算（见 `fetchDetailed`），
+ * 不是每一跳各给一份 —— 否则 5 跳 × 20 秒能把一次搜索拖到 100 秒。
  */
 const DEFAULT_TIMEOUT_MS = 20_000
+
+/**
+ * 最多跟几跳重定向
+ *
+ * 书源场景里 2 跳（`http` → `https` → `www`）就见顶了，5 跳足够；
+ * 超过就**停下、把那个 3xx 当最终响应交出去**（`fetchText` 会照常报
+ * 「上游返回 HTTP 302」，比编一个「重定向太多」更贴近事实）。
+ */
+const MAX_REDIRECTS = 5
+
+/** 这一跳要不要跟下去 */
+function isRedirectStatus(status: number): boolean {
+    return status === 301 || status === 302 || status === 303 || status === 307 || status === 308
+}
+
+/** 相对 `Location` 按当前这一跳的地址解析成绝对地址 */
+function resolveLocation(location: string, from: string): string {
+    try {
+        return new URL(location, from).href
+    } catch {
+        return location
+    }
+}
 
 /**
  * 搜索阶段的超时
@@ -188,6 +214,15 @@ export interface FetchedResponse {
     /** 响应头，名字已小写；同一个名字可能有多条（`Set-Cookie` 就靠这个） */
     headers: Record<string, string[]>
     body: string
+    /**
+     * 这次请求**自己**拿到的那一跳重定向（只有第一跳是 3xx 时才有）
+     *
+     * 为什么要留着它：我们自己替书源把重定向跟完了，但**那个 `Location` 是书源
+     * 那次请求的真实响应头** —— 全丢了的话，靠它拿真地址的书源（线上 11 个：
+     * 无忧书城 / 米读小说 / 天悦小说 等，写法都是 `java.post(u, body, {}).header('location')`）
+     * 只会拿到空串，然后拿空地址去请求。丢掉的是信息，不是噪声。
+     */
+    redirectedFrom?: { status: number; location: string }
 }
 
 /** 把响应头收成「小写名 → 值数组」；`Set-Cookie` 单独取，避免被合并成一条 */
@@ -208,42 +243,122 @@ function collectHeaders(headers: Headers): Record<string, string[]> {
  *
  * 与 `fetchText` 的分工：搜索 / 目录 / 正文这些链路要的是「不是 2xx 就是失败」，
  * 所以 `fetchText` 仍然抛错；而 `java.connect` 要的是「把响应原样交给脚本」。
+ *
+ * **重定向是自己跟的**（`redirect: 'manual'` 加一个循环），不是交给 `fetch` 的
+ * `follow`。两个理由，都不是风格问题：
+ *
+ *   1. **要看到每一跳的 `Set-Cookie`。** `follow` 会把中间响应整份吃掉，
+ *      而站点常常正是用 302 下发会话 cookie（`/cookies/set` 那种）。第五十四轮
+ *      把 cookie 罐接上之后，这一条就成了唯一的漏点。
+ *   2. **书源要那个 `Location`。** 线上 11 个源的 `searchUrl` 写成
+ *      `java.post(url, body, {}).header('location')` —— 它们拿 POST 的 302 去**找真正的
+ *      搜索页地址**。`follow` 之后 `Location` 就没了，那些源只会拿到空串。
+ *      所以第一跳的三要素留在 `redirectedFrom` 里（见 `FetchedResponse`）。
+ *
+ * 跟法照抄 `fetch` 的规矩，别自作聪明：301/302/303 上的 POST 退化成 GET 且**不再发 body**
+ * （站点把「表单已提交」的那一次 302 指向结果页，再发一遍 body 就成了重复提交）；
+ * 307/308 保留方法与 body。超时是**整条链**共享的一份预算。
  */
 export async function fetchDetailed(plan: FetchPlan): Promise<FetchedResponse> {
-    const method = plan.method.toUpperCase()
-    const body = isBodyless(method) ? undefined : plan.body
     const timeoutMs = plan.timeoutMs ?? DEFAULT_TIMEOUT_MS
+    const deadline = Date.now() + timeoutMs
 
-    /**
-     * 带上 cookie 罐里的 Cookie 头
-     *
-     * **书源自己声明了 `Cookie` 时不覆盖**：有些站点要的是一份专门的 cookie
-     * （签名、风控令牌），而罐子里那一份是站点下发的会话 cookie，混在一起反而会挂。
-     * 书源既然写了，就说明它知道自己要什么。
-     */
-    const jarCookie = plan.cookieJar ? cookieHeaderFor(plan.cookieJar, plan.url) : ''
-    const headers =
-        jarCookie !== '' && !hasHeader(plan.headers, 'cookie')
-            ? { ...plan.headers, Cookie: jarCookie }
-            : plan.headers
+    let method = plan.method.toUpperCase()
+    let body = isBodyless(method) ? undefined : plan.body
+    let target = plan.url
+    let redirectedFrom: FetchedResponse['redirectedFrom']
+    let final: { response: Response; headers: Record<string, string[]> } | undefined
 
-    let response: Response
-    try {
-        response = await fetch(plan.url, {
-            method,
-            // 带 body 时必须自己声明 Content-Type，否则站点收不到参数（见 requestHeaders）
-            headers: requestHeaders(method, body, headers),
-            body,
-            redirect: 'follow',
-            signal: AbortSignal.timeout(timeoutMs),
-        })
-    } catch (err) {
-        if (isTimeout(err)) throw new UpstreamError(`请求超时（>${timeoutMs}ms）：${plan.url}`)
-        throw new UpstreamError(
-            `请求失败：${plan.url}（${err instanceof Error ? err.message : String(err)}）`,
-        )
+    for (let hop = 0; ; hop++) {
+        const remaining = deadline - Date.now()
+        if (remaining <= 0) {
+            throw new UpstreamError(`请求超时（>${timeoutMs}ms，含重定向）：${plan.url}`)
+        }
+
+        /**
+         * 带上 cookie 罐里的 Cookie 头（按**这一跳**的地址取 —— 重定向可能换域，
+         * 而换过去之后该带的就是那个域的 cookie）
+         *
+         * **书源自己声明了 `Cookie` 时不覆盖**：有些站点要的是一份专门的 cookie
+         * （签名、风控令牌），而罐子里那一份是站点下发的会话 cookie，混在一起反而会挂。
+         */
+        const jarCookie = plan.cookieJar ? cookieHeaderFor(plan.cookieJar, target) : ''
+        const headers =
+            jarCookie !== '' && !hasHeader(plan.headers, 'cookie')
+                ? { ...plan.headers, Cookie: jarCookie }
+                : plan.headers
+
+        let response: Response
+        try {
+            response = await fetch(target, {
+                method,
+                // 带 body 时必须自己声明 Content-Type，否则站点收不到参数（见 requestHeaders）
+                headers: requestHeaders(method, body, headers),
+                body,
+                redirect: 'manual',
+                signal: AbortSignal.timeout(remaining),
+            })
+        } catch (err) {
+            if (isTimeout(err)) throw new UpstreamError(`请求超时（>${timeoutMs}ms）：${target}`)
+            throw new UpstreamError(
+                `请求失败：${target}（${err instanceof Error ? err.message : String(err)}）`,
+            )
+        }
+
+        const collected = collectHeaders(response.headers)
+
+        /**
+         * 每一跳的 `Set-Cookie` 都收进罐子，变了就**立刻写回库**（写穿）
+         *
+         * 落库要等（`await`）：Worker 的响应一旦返回，还在飞的 promise 会被直接掐掉，
+         * 而站点恰恰是在**搜索那一趟**（常常是那一趟里的 302）下发会话 cookie 的 ——
+         * 不等它写完，「读目录」那一趟就带不上，表现是「搜得到、点进去 403」。
+         */
+        if (plan.cookieJar) {
+            const changed = mergeSetCookie(
+                plan.cookieJar,
+                response.url || target,
+                collected['set-cookie'] ?? [],
+            )
+            if (changed && plan.persistCookies) {
+                try {
+                    await plan.persistCookies()
+                } catch {
+                    /* 落库失败不该让这一次请求失败 —— cookie 丢了顶多少一次会话，正文还得给用户 */
+                }
+            }
+        }
+
+        const location = collected['location']?.[0]
+        if (!isRedirectStatus(response.status) || location === undefined || hop >= MAX_REDIRECTS) {
+            final = { response, headers: collected }
+            break
+        }
+
+        if (redirectedFrom === undefined) {
+            redirectedFrom = {
+                status: response.status,
+                location: resolveLocation(location, target),
+            }
+        }
+        // 301/302/303 上的 POST 退化成 GET（别把 body 再发一遍 —— 那是重复提交）
+        if (response.status === 301 || response.status === 302 || response.status === 303) {
+            if (method === 'POST') {
+                method = 'GET'
+                body = undefined
+            }
+        }
+        // 跟走的那一跳的正文不要了：省一次读取，也免得把 302 的错误页当成结果
+        try {
+            await response.body?.cancel()
+        } catch {
+            /* 已经读完或已关闭都无所谓 */
+        }
+        target = resolveLocation(location, target)
     }
 
+    // 循环里一定会先赋值再 break（`hop >= MAX_REDIRECTS` 那一支兜底）
+    const { response, headers: collected } = final!
     const buffer = await readBounded(response)
 
     let charset = normalizeCharset(plan.charset)
@@ -258,34 +373,12 @@ export async function fetchDetailed(plan: FetchPlan): Promise<FetchedResponse> {
         charset = normalizeCharset(sniffCharset(probe)) ?? 'utf-8'
     }
 
-    const actualUrl = response.url || plan.url
-    const collected = collectHeaders(response.headers)
-
-    /**
-     * 把响应里的 `Set-Cookie` 收进罐子，变了就**立刻写回库**（写穿）
-     *
-     * 落库要等（`await`）：Worker 的响应一旦返回，还在飞的 promise 会被直接掐掉，
-     * 而站点恰恰是在**搜索那一趟**下发会话 cookie 的 —— 不等它写完，
-     * 「读目录」那一趟就带不上，表现是「搜得到、点进去 403」。
-     *
-     * 只在罐子真的变了时才调：一个站点会话里通常就一两次，不会变成每次请求都写库。
-     */
-    if (plan.cookieJar) {
-        const changed = mergeSetCookie(plan.cookieJar, actualUrl, collected['set-cookie'] ?? [])
-        if (changed && plan.persistCookies) {
-            try {
-                await plan.persistCookies()
-            } catch {
-                /* 落库失败不该让这一次请求失败 —— cookie 丢了顶多少一次会话，正文还得给用户 */
-            }
-        }
-    }
-
     return {
-        url: actualUrl,
+        url: response.url || target,
         status: response.status,
         headers: collected,
         body: decode(buffer, charset),
+        ...(redirectedFrom ? { redirectedFrom } : {}),
     }
 }
 
