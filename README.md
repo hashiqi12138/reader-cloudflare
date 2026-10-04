@@ -174,6 +174,10 @@ src/
 ├── index.ts              Worker 入口与 API 路由
 ├── changelog.ts          更新记录（版本 → 一句话；`/api/version` 与前端「关于」页读它）
 ├── fixture.ts            内置测试站点（ENABLE_FIXTURE=true 时才挂载）
+├── platform/             与「跑在哪」有关的那三样，全收敛在这一层（第六十六轮）
+│   ├── types.ts          平台接口：PlatformDb / PlatformStatement / PlatformResult / PlatformAssets / AppEnv
+│   ├── cloudflare.ts     Cloudflare 侧的绑定：把 Worker 的 env 变成 AppEnv（唯一出现原始 Env 的地方）
+│   └── wasm.ts           QuickJS 那个 WASM 从哪来（唯一 `import '*.wasm'` 的地方）
 ├── data/
 │   ├── types.ts          书源身份、书架主键、数据层错误
 │   ├── db.ts             D1 读写与导入校验（书源）
@@ -5789,12 +5793,63 @@ ETag 还没变」的窗口，那期间浏览器拿到的 304 是过期的。自�
 从新到旧严格递减且无重复）；浏览器里实测页脚显示 `v0.54.0`、点开进 `#/about`、
 未登录也能读到记录；窄屏那一段由冒烟守着。
 
+### 第六十六轮：把「跑在哪」收敛成一层 —— 抽接口，但不落第二个适配器
+
+第六十四轮把「换平台要抽哪些东西」摸清了，这一轮把那层抽出来。范围照上一轮说好的：
+**只抽接口，不写第二个适配器** —— 目的不是现在就能跑在别处，而是把「跑在别处要改什么」
+变成一份看得见的清单。
+
+**平台相关的东西只有三样。**
+
+| 是什么            | 接口                                                  | Workers 上        |
+| ----------------- | ----------------------------------------------------- | ----------------- |
+| 数据库            | `PlatformDb` / `PlatformStatement` / `PlatformResult` | `env.DB`（D1）    |
+| 静态资源          | `PlatformAssets`                                      | `env.ASSETS`      |
+| QuickJS 那个 WASM | `quickJsWasmModule`（`platform/wasm.ts`）             | `import '*.wasm'` |
+
+**接口的形状照着 D1 定**，这是这一轮最要紧的一个决定。自己造一套 DB 抽象（比如
+`query(sql, params)`）看着更干净，但要付两笔钱：每次查询多一层转发；以及那个「假 D1」
+得自己实现 `batch` 的语义（一批语句一次往返、结果与传入顺序一一对应）。照着 D1 定形状
+换来一件大好事：**Cloudflare 那个绑定直接满足接口** —— `platform/cloudflare.ts` 里
+就四个赋值，没有包装层、没有 `as` 强转。真要哪一处对不上，`tsc` 会**在那个文件里**
+直接报出来，而不是等换平台时才发现。
+
+**实际用到的面比预想的窄。** 全项目对数据库只用 `prepare` / `bind` / `first` / `run` /
+`all` / `batch`，加上 `meta.changes` 与 `meta.last_row_id` 两项 —— **没有** `.exec()` /
+`.raw()` / 会话。抽这一层时唯一被暴露出来的东西就是 `last_row_id`（`createAccount`
+插入账号后要拿自增 id）：它在接口里被写成「插入并拿回 id」这个需求，换平台时用
+`INSERT … RETURNING id` 也算满足。
+
+**WASM 单独一个文件，因为它是构建期的事。** `engine/js.ts` 里那句 `import '*.wasm'`
+挪去了 `platform/wasm.ts`。理由不是好看：只要引擎那侧留着它，任何非 Workers 的构建都会在
+**模块加载**阶段就失败 —— 连「先跑一下别的功能」都做不到。换平台时替换这一个文件
+（Node 上是 `readFile` + `WebAssembly.compile`）即可。
+
+**入口那条缝。** Worker 的 `export default { fetch(request, env, ctx) }` 仍是唯一入口，
+但它在把 `env` 交给应用之前先过一遍 `cloudflareEnv(env)`，拿到的是 `AppEnv`；业务代码
+（`new Hono<{ Bindings: AppEnv }>`、所有路由、13 个数据层文件）**只认 `AppEnv`**，
+一处都没再提 D1。换平台时新写一个同样返回 `AppEnv` 的函数就够了。
+
+**改动量与「行为零变化」。** 13 个数据层文件加入口，把 `D1Database` 换成 `PlatformDb`、
+`D1PreparedStatement` 换成 `PlatformStatement` —— 纯类型改名，**没有一行逻辑改动**；
+901 项单测与整条端到端冒烟原样通过。
+
+**看门测试。** 这件事真正的风险不是「抽得不好」，而是**慢慢漏回去**：某天有人在路由里
+顺手写个 `db: D1Database`，一切照常跑，换平台那天才发现还有一处 —— 而类型层面拦不住，
+因为它恰恰「能编过」。所以 `test/platformBoundary.test.ts` 直接读源码断言四件事：
+业务代码里不出现 `D1Database` / `D1PreparedStatement` / `@cloudflare/workers-types`；
+`import '*.wasm'` 只有 `platform/wasm.ts` 一处；那五个接口只在一处定义；Worker 的原始
+绑定类型 `Env` 只出现在入口与适配层。
+
+**还没做的**：第二个适配器（Node / Docker 那条路）。上面三样各写一份、入口包一层就完事，
+但那是下一轮的事。
+
 ## 验证
 
 ```bash
 npm install
 npm run db:migrate   # 建本地 D1 表（首次、以及每次新增迁移后）
-npm test             # 单元测试（901 项，Node 里毫秒级跑完；另有十八个默认跳过的全量扫描，见下）
+npm test             # 单元测试（905 项，Node 里毫秒级跑完；另有十八个默认跳过的全量扫描，见下）
 npm run dev          # 起本地服务，浏览器打开首页即可用；另开一个终端跑下面这条
 npm run smoke        # 端到端：链路 + 书源管理 + 静态资源 + 账号/书架/进度/书签 + 改显示名/改密码 + 导出导入备份 + 书签清单 + 替换净化同步 + 笔记 + 媒体 + 字段模板 + 选择器@js: + 空选择器取值 + 列表标记（+ / 顶格 <js>）+ 沙箱助手 + setContent/digestHex/UI 动作 + 节点级助手/加解密 + 连接式取网与 result.toArray() + 书源变量落库 + 书的上下文与书的变量 + JS 尾段列表规则保留节点 + 连接符切分 + 列表规则（末尾那个词 / CSS 首段的位置后缀 / `!` 排除下标）+ 字段规则（CSS 式多段 `@`）+ 变量指令（`@put:` / `@get:` 含**跨请求**那一半）+ `init`（铺变量与**换根**两种）+ `<js>` 段 + JSONPath 尾段（`$[*]` / `$[:n]`）+ 地址尾部的请求选项（`地址,{选项}` / 排成多行的那份选项块）+ URL 选项里 `body` 写对象（`application/json`）+ 展示用字段的容错与 `warnings` + 单斜杠 XPath（`/a/p[1]/text()` 相对当前条目）+ 防盗链封面走 `/api/media` 代取 + http 封面（混合内容）也代取 + `<script>` / `<style>` 也是元素（`java.getElement("script")` 那条路） + JSOUP 简写 `class.A B`（两个类都要有） + `source.getLoginInfoMap()` 的 Map 语义 + URL 字段 JS + 发现/首页 + cookie 罐（收 / 发 / 按源落库）+ 重定向自己跟（302 上的 `Set-Cookie` 与 `Location`）+ 目录里的 `isVip` / `isPay` / `isVolume` / `updateTime` + 登录态（跑一次 `loginUrl` → 落库 → 之后每趟请求都带上）+ 登录界面（读 `loginUi` → 渲染表单 → 界面上的按钮单独调得到）+ 沙箱里的取网跟着这次求值的预算走（列表规则里 / 搜索地址模板里，含「响应头回了、正文拖很久」那层兜底）+ 搜索 / 发现里的逐条字段走批量求值（批按 jsLib 分开，两源互不串味）+ PWA（`manifest.json` / 四张图标是真 PNG / `/sw.js` 的 JS 类型 / `/js/swPolicy.js` 可取 / head 里的 link）+ 书源列表的协商缓存（首次带 `ETag` / 同一个 `ETag` 回 304 且无正文 / 对不上的照旧回完整列表）+ 版本与更新记录（`/api/version` 带版本号 / 记录非空且最新一条与版本号一致）
 ```
