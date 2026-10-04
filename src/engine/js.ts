@@ -47,7 +47,7 @@ import {
 import type { SandboxHttp } from './types'
 import { base64OfUtf8, bytesOfBase64, utf8OfBase64 } from '../lib/base64'
 import { DEFAULT_TIME_OFFSET_HOURS, formatJavaTime } from '../lib/javatime'
-import { md5Bytes, md5Hex, sha256Hex } from '../lib/hash'
+import { md5Bytes, md5Hex, runHash, sha256Hex, type HashRequest } from '../lib/hash'
 import { runSymmetric, type SymmetricRequest } from '../lib/symmetric'
 import { JsoupBridge } from './jsoupBridge'
 import { unsupportedPrelude } from './platform'
@@ -448,14 +448,102 @@ var java = {
   aesBase64DecodeToString: function (data, key, transformation, iv) {
     return java.__crypto('decryptBase64ToString', transformation, key, iv, data)
   },
-  aesDecodeToString: function (data, key, transformation, iv) {
-    return java.__crypto('decryptHex', transformation, key, iv, data)
+  // ---------------------------------------------------------------- 上游那批「旧版对称加密」包装
+  //
+  // 上游 JsEncodeUtils.kt 里这一批全带 @Deprecated（"过于繁琐弃用"），
+  // 方法体一律是「createSymmetricCrypto(transformation, key, iv).某方法(data)」的一行 ——
+  // 所以这里也照抄成一行，不再各写一套。语料里它们 0 次调用，
+  // 但用户自己导入的书源可能还在用，而实现成本就是一行。
+  //
+  // 语义以**上游方法体**为准，不看名字猜：
+  aesDecodeToByteArray: function (str, key, transformation, iv) {
+    return java.__crypto('decryptBase64', transformation, key, iv, str)
+  },
+  aesBase64DecodeToByteArray: function (str, key, transformation, iv) {
+    return java.__crypto('decryptBase64', transformation, key, iv, str)
+  },
+  aesDecodeToString: function (str, key, transformation, iv) {
+    return java.__crypto('decryptBase64ToString', transformation, key, iv, str)
+  },
+  aesEncodeToByteArray: function (data, key, transformation, iv) {
+    return java.__crypto('encrypt', transformation, key, iv, data)
   },
   aesEncodeToString: function (data, key, transformation, iv) {
-    return java.__crypto('encryptHex', transformation, key, iv, data)
+    return java.__crypto('encryptBase64', transformation, key, iv, data)
+  },
+  aesEncodeToBase64ByteArray: function (data, key, transformation, iv) {
+    return java.strToBytes(java.__crypto('encryptBase64', transformation, key, iv, data))
+  },
+  aesEncodeToBase64String: function (data, key, transformation, iv) {
+    return java.__crypto('encryptBase64', transformation, key, iv, data)
   },
   aesBase64EncodeToString: function (data, key, transformation, iv) {
-    return java.__crypto('encryptBase64ToString', transformation, key, iv, data)
+    return java.__crypto('encryptBase64', transformation, key, iv, data)
+  },
+  // 这两个「ArgsBase64」在上游**不对称**：解码版把 key/iv 先 base64 解成字节，
+  // 加密版直接用原字符串。照抄 —— 改了就与上游算出来的密文不一致。
+  aesDecodeArgsBase64Str: function (data, key, mode, padding, iv) {
+    return java.__crypto(
+      'decryptBase64ToString',
+      'AES/' + mode + '/' + padding,
+      java.base64DecodeToByteArray(key),
+      java.base64DecodeToByteArray(iv),
+      data,
+    )
+  },
+  aesEncodeArgsBase64Str: function (data, key, mode, padding, iv) {
+    return java.__crypto('encryptBase64', 'AES/' + mode + '/' + padding, key, iv, data)
+  },
+  desDecodeToString: function (data, key, transformation, iv) {
+    return java.__crypto('decryptBase64ToString', transformation, key, iv, data)
+  },
+  desBase64DecodeToString: function (data, key, transformation, iv) {
+    return java.__crypto('decryptBase64ToString', transformation, key, iv, data)
+  },
+  // 上游是 String(encrypt(data))：把密文字节按 UTF-8 解成字符串
+  // （非 UTF-8 的字节会被替换成 U+FFFD —— 与上游一样是有损的，别拿它当可靠编码）
+  desEncodeToString: function (data, key, transformation, iv) {
+    return java.bytesToStr(java.__crypto('encrypt', transformation, key, iv, data))
+  },
+  desEncodeToBase64String: function (data, key, transformation, iv) {
+    return java.__crypto('encryptBase64', transformation, key, iv, data)
+  },
+
+  // ---------------------------------------------------------------- 摘要与 HMAC
+  //
+  // 三个成员共用宿主那一条 hash 桥（见 js.ts 里 hashFn）：输入输出约定一样，
+  // 只有算法与要不要密钥不同。算法名归一化在宿主侧做 —— 语料里有
+  // "SHA-256" / "sha-256" / "HmacSHA256" / "HMAC-SHA1" 四种写法。
+  __hash: function (op, algorithm, key, data, encoding) {
+    return __host.hash(JSON.stringify({
+      op: String(op),
+      algorithm: String(algorithm),
+      key: key === undefined || key === null ? '' : String(key),
+      data: String(data),
+      encoding: String(encoding),
+    }))
+  },
+  digestBase64Str: function (data, algorithm) {
+    return java.__hash('digest', algorithm, '', data, 'base64')
+  },
+  HMacHex: function (data, algorithm, key) {
+    return java.__hash('hmac', algorithm, key, data, 'hex')
+  },
+  HMacBase64: function (data, algorithm, key) {
+    return java.__hash('hmac', algorithm, key, data, 'base64')
+  },
+  // 上游 MD5Utils.md5Encode16 就是 md5Encode(str).substring(8, 24)（抄自该方法体）
+  md5Encode16: function (str) {
+    return java.md5Encode(String(str)).substring(8, 24)
+  },
+  // 十六进制 → 字节数组（hexDecodeToString 的字节数组版本，线上 8 处）
+  hexDecodeToByteArray: function (hex) {
+    var cleaned = String(hex).replace(/[^0-9a-fA-F]/g, '')
+    var out = []
+    for (var i = 0; i + 1 < cleaned.length; i += 2) {
+      out.push(parseInt(cleaned.slice(i, i + 2), 16))
+    }
+    return out
   },
 
   // 简繁转换。**没有字典表就不做**：原样返回并记一条日志。
@@ -1316,6 +1404,20 @@ async function executeInSandbox(
         })
         vm.setProp(host, 'sha256', sha256Fn)
         sha256Fn.dispose()
+
+        /**
+         * 摘要与 HMAC 的同步桥（脚本里同步、宿主侧 await）
+         *
+         * 一次调用同时服务 `java.digestBase64Str` / `java.HMacHex` / `java.HMacBase64`：
+         * 它们的输入输出约定一样，只有算法与要不要密钥不同，所以合成一条桥就够了 ——
+         * 沙箱那侧三个成员都只是拼一个 JSON 而已（见 JAVA_PRELUDE）。
+         */
+        const hashFn = vm.newAsyncifiedFunction('hash', async (arg) => {
+            const requestJson = String(vm.dump(arg))
+            return vm.newString(await runHash(JSON.parse(requestJson) as HashRequest))
+        })
+        vm.setProp(host, 'hash', hashFn)
+        hashFn.dispose()
 
         const requestFn = vm.newAsyncifiedFunction('request', async (arg) => {
             const optionsJson = String(vm.dump(arg))

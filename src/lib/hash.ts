@@ -7,6 +7,8 @@
  * 好处是它是纯函数，能在 Node 里和 `node:crypto` 逐条对拍。
  */
 
+import { base64OfBytes } from './base64'
+
 /** 32 位循环左移 */
 function rotl(x: number, n: number): number {
     return ((x << n) | (x >>> (32 - n))) >>> 0
@@ -138,4 +140,98 @@ export async function sha256Hex(input: string): Promise<string> {
     let out = ''
     for (const byte of new Uint8Array(digest)) out += byte.toString(16).padStart(2, '0')
     return out
+}
+
+/** 书源里 `java.digestBase64Str` / `java.HMacHex` / `java.HMacBase64` 的一次调用 */
+export interface HashRequest {
+    /** `digest` = 消息摘要，`hmac` = 散列消息鉴别码 */
+    op: 'digest' | 'hmac'
+    /** JCA 写法：`MD5` / `SHA-256` / `HmacSHA256` / `HMAC-SHA1` */
+    algorithm: string
+    key?: string
+    data: string
+    encoding: 'hex' | 'base64'
+}
+
+/**
+ * 算法名归一化：上游书源里同一个算法有四种写法
+ *
+ * 语料里实际出现的是 `"SHA-256"`、`'sha-256'`、`"HmacSHA256"`、`"HMAC-SHA1"` ——
+ * 去分隔符并大写之后都是同一件事。归一化放在这里，沙箱那侧就不必各写一遍。
+ */
+function normalizeAlgorithm(algorithm: string): string {
+    return String(algorithm ?? '')
+        .toUpperCase()
+        .replace(/[-_\s]/g, '')
+}
+
+const WEB_DIGESTS: Record<string, string> = {
+    SHA1: 'SHA-1',
+    SHA256: 'SHA-256',
+    SHA384: 'SHA-384',
+    SHA512: 'SHA-512',
+}
+
+/** HMAC 的哈希算法同样只有这几种走 WebCrypto */
+const WEB_HMAC: Record<string, string> = { ...WEB_DIGESTS }
+
+/**
+ * UTF-8 取字节
+ *
+ * **不要给它写显式返回类型**：写成 `Uint8Array` 会退化成 `Uint8Array<ArrayBufferLike>`，
+ * 而 `crypto.subtle.*` 只接受 `ArrayBuffer` 那一支，于是「类型不兼容」的报错会出现在
+ * 每一个调用点上。让 TS 自己从 `TextEncoder.encode` 推。
+ */
+function bytesOfText(text: string) {
+    return new TextEncoder().encode(text)
+}
+
+function hexOfBytes(bytes: Uint8Array): string {
+    let out = ''
+    for (const byte of bytes) out += byte.toString(16).padStart(2, '0')
+    return out
+}
+
+/**
+ * 消息摘要与 HMAC：`java.digestBase64Str` / `java.HMacHex` / `java.HMacBase64`
+ *
+ * 两者都归到这里，是因为它们的输入输出约定完全一样（字符串进、hex 或 base64 出），
+ * 区别只是 HMAC 多一个密钥。
+ *
+ * 算法覆盖面上有一处**明确的缺口**：**HMAC-MD5 不做**。WebCrypto 不提供 MD5，
+ * 而 `md5Bytes` 只吃字符串 —— HMAC 的中间结果（`H((K⊕ipad)||text)`）是**任意字节**，
+ * 用字符串接口套不出来，硬做会算出一个错的摘要。缺就报错（见下面的分支）。
+ * 语料里 HMac 那两处用的是 `HMAC-SHA1` 与 `HmacSHA256`，都不受影响。
+ */
+export async function runHash(request: HashRequest): Promise<string> {
+    // 归一化之后再去掉 HMAC 前缀：`HmacSHA256` / `HMAC-SHA1` 归一化完是
+    // `HMACSHA256` / `HMACSHA1`，底下要查的是哈希算法 `SHA256` / `SHA1`
+    const algorithm = normalizeAlgorithm(request.algorithm).replace(/^HMAC/, '')
+    const encode = (bytes: Uint8Array): string =>
+        request.encoding === 'base64' ? base64OfBytes(bytes) : hexOfBytes(bytes)
+
+    if (request.op === 'digest') {
+        if (algorithm === 'MD5') return encode(md5Bytes(bytesOfText(request.data)))
+        const webAlgorithm = WEB_DIGESTS[algorithm]
+        if (!webAlgorithm) throw new Error(`不支持的消息摘要算法：${request.algorithm}`)
+        const digest = await crypto.subtle.digest(webAlgorithm, bytesOfText(request.data))
+        return encode(new Uint8Array(digest))
+    }
+
+    const webAlgorithm = WEB_HMAC[algorithm]
+    if (!webAlgorithm) {
+        throw new Error(
+            `不支持的 HMAC 算法：${request.algorithm}` +
+                (algorithm === 'MD5' ? '（HMAC-MD5 没有 WebCrypto 实现）' : ''),
+        )
+    }
+    const key = await crypto.subtle.importKey(
+        'raw',
+        bytesOfText(request.key ?? ''),
+        { name: 'HMAC', hash: webAlgorithm },
+        false,
+        ['sign'],
+    )
+    const signature = await crypto.subtle.sign('HMAC', key, bytesOfText(request.data))
+    return encode(new Uint8Array(signature))
 }

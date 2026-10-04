@@ -2488,12 +2488,97 @@ URL 段一直是有模板展开的，**选项段没有**（`.get(key)` 那条路
 `keep-absent` 的必须既不在预置里也不在生成的桩里、生成的那段不许带反引号与 `${`
 （它要拼进模板字符串）。加上单测 621 项、冒烟全绿、线上 `/api/probe` 带上 `java` 一栏。
 
+### 第三十二轮：把「纯计算」那批补上 —— 先数再动手
+
+上一轮把 `java.*` 做成了表，表里还剩一栏特别值得动：**「纯计算、还没做」**。
+它们不需要任何平台能力 —— 不用 WebView、不用 Android、不用文件系统，只是我们还没写。
+笼统写成「本引擎不支持」会让人以为「换个平台就有了」，而实际上补个实现就有。
+
+**先数，再动手。** 把这批候选（连同当时一并登记的 3DES 与两个需要密钥的）凑成 25 个名字，
+拿全量 816 条源扫一遍 `java.xxx(` 的调用次数：
+
+| 成员                       | 语料里的调用                                            | 处理                           |
+| -------------------------- | ------------------------------------------------------- | ------------------------------ |
+| `aesBase64DecodeToString`  | **18 次 / 12 源**（🔞PO5、⚡📂小小阅读、⚡📂猫眼看书…） | 补                             |
+| `hexDecodeToByteArray`     | **8 次 / 5 源**（🏷阅文集团、⚡📂点众阅读、🏷长佩文学…）  | 补                             |
+| `HMacBase64`               | 2 次 / 2 源（🏷阅文集团、⚡📂西瓜小说）                  | 补                             |
+| `tripleDESEncodeBase64Str` | 2 次 / 1 源（🏷阅文集团）                                | 缺原语，仍登记 `none`          |
+| `createAsymmetricCrypto`   | 2 次 / 2 源（🌍🔞爱丽丝书屋、📂乐读小说）               | 缺 RSA，仍登记 `none`          |
+| 其余 20 个                 | **0 次**                                                | 一起补（同一批语义、同一座桥） |
+
+结论和上一轮一样：**真正被用到的只有 5 个** —— 而「先数」省下的是「凭想象补一堆没人用的东西」。
+这一批全部一起补，是因为它们共用同一套加密原语与同一座桥，补一个和补一批的边际成本差不多。
+
+**上游那批 AES/DES 是 `@Deprecated` 的一行转发。** 读完 `JsEncodeUtils.kt` 全文才发现：
+`aesEncodeToString`、`desDecodeToString` 这一批（十几条）方法体都只有一行
+`createSymmetricCrypto(transformation, key, iv).encryptBase64(data)` 之类 —— 它们是历史遗留的语法糖。
+所以这一批不需要各自实现算法，**只要把「方法体转发到了哪个 op」照抄下来**：
+
+| 上游方法体                  | 沙箱里的实现                                  |
+| --------------------------- | --------------------------------------------- |
+| `encryptBase64`             | `java.__crypto('encryptBase64', …)`           |
+| `decryptBase64ToString`     | `java.__crypto('decryptBase64ToString', …)`   |
+| `encrypt`（取字节再解码文） | `java.__crypto('encrypt', …)` 再 `bytesToStr` |
+
+**照抄方法体，而不是照抄名字。** 这一轮就是在这里**修掉了两个旧实现**：
+
+| 成员                | 旧实现（错）                       | 上游方法体                                                                             |
+| ------------------- | ---------------------------------- | -------------------------------------------------------------------------------------- |
+| `aesDecodeToString` | `decryptHex`，而且**返回字节数组** | `decryptBase64ToString` → 字符串                                                       |
+| `aesEncodeToString` | `encryptHex`                       | 上游写的是 `.decryptStr(data)`（像是复制粘贴漏改），**按名字的意图**给 `encryptBase64` |
+
+第一个是**静默取错值**：输入明明是 base64 却按 hex 解，多数情况解出乱码或空串、而不报错。
+这类「名字看着实现了、语义其实不对」的成员最危险 —— 表里记着 `implemented`，用起来却不对。
+所以这一轮把 `note` 一栏也补全，把「与上游不一样的地方」显式写下来。
+
+**`*ArgsBase64` 两个版本在上游不对称。** `aesDecodeArgsBase64Str` 会把 key/iv **先 base64 解成字节**，
+而 `aesEncodeArgsBase64Str` **直接用原始字符串**。这种不对称只能从方法体里读出来，
+光看名字一定会写成对称的 —— `note` 里记着「与上游一样，别顺手改对称」。
+另有一个 `aesBase64EncodeToString` **上游两个文件里都没有**，按名字的意图补了 `encryptBase64`（`upstream: null`）。
+
+**摘要与 HMAC 走宿主桥。** `digestBase64Str` / `HMacHex` / `HMacBase64` / `md5Encode16` 只吃字符串、吐字符串，
+适合放进 `src/lib/hash.ts` 的 `runHash`：MD5 走自实现（WebCrypto 不提供 MD5），
+SHA-1/256/384/512 走 `crypto.subtle`；HMAC 同理。沙箱里只有一个 `java.__hash(...)` 转发到宿主桥 `__host.hash`。
+`md5Encode16` 就是 `md5Encode(str).substring(8, 24)`（抄自上游 `MD5Utils.md5Encode16`）。
+
+两处坑记一笔：
+
+- **算法名有四种写法**：语料里同一个算法出现 `"SHA-256"` / `'sha-256'` / `"HMAC-SHA1"` / `"HmacSHA256"`。
+  归一化要去掉 `-`/`_`/空格、转大写，**再去掉 `HMAC` 前缀**（`HmacSHA256` → `SHA256`）——
+  少做后一步，全部会落到「不支持的算法」分支
+- **HMAC-MD5 明确不做**：WebCrypto 不提供 MD5，而 HMAC 的中间结果是**任意字节**，
+  喂不进「只吃字符串」的 md5 实现。硬做会算出错的摘要，所以选择**报错**：
+  `不支持的 HMAC 算法：HmacMD5（HMAC-MD5 没有 WebCrypto 实现）`
+
+**这一轮的账**：`implemented` 从 **51 → 67**、`absent` 从 **60 → 44**（表总数 112 不变）——
+**16 行由 `absent` 改成 `implemented`，另加 1 个成员**，两处旧语义修正。
+`platform: 'none'` 只剩 **3 类、6 个成员**（4 个 3DES + `createSign` + `createAsymmetricCrypto`），
+理由写的是**缺什么原语**：
+
+- 3DES：要先有**分组级 DES 原语**才能做 EDE（加密-解密-加密）
+- `createSign` / `createAsymmetricCrypto`：要 **RSA 密钥与 Sign 对象**
+
+「缺原语」和「缺平台能力」是两件事：前者是我们的活，后者不是。分开登记，才知道下一步该写什么。
+
+**验证**
+
+- `test/hash.test.ts` 新增 `runHash` 三组：digest 的 hex / base64 与 `node:crypto` 对拍
+  （MD5 / SHA-1 / SHA-256 / SHA-512）、算法名四种写法归一到同一个值、hmac 与 `node:crypto`
+  对拍（含 JCA 的 `HMAC-SHA1` / `HmacSHA256` 两种拼法）、HMAC-MD5 断言**抛错**而不是返回一个值
+- 冒烟第 20 节那条「对称加解密」照常跑**公开已知向量**（AES 的 NIST SP 800-38A、DES 经典样例），
+  新增的实现没有改动已通过的向量
+- 单测 **627 项**、冒烟全绿；线上 `/api/probe` 的 `java` 一栏从 `{implemented:51, absent:60}`
+  变成 `{implemented:67, absent:44}`
+
+（这一轮又踩了一次同一个坑：预置是拼进 `JAVA_PRELUDE` 模板字符串的，
+注释里**不能出现反引号与 `${`**。同一条约束在表生成器里也再钉了一遍。）
+
 ## 验证
 
 ```bash
 npm install
 npm run db:migrate   # 建本地 D1 表（首次、以及每次新增迁移后）
-npm test             # 单元测试（621 项，Node 里毫秒级跑完；另有六个默认跳过的全量扫描，见下）
+npm test             # 单元测试（627 项，Node 里毫秒级跑完；另有六个默认跳过的全量扫描，见下）
 npm run dev          # 起本地服务，浏览器打开首页即可用；另开一个终端跑下面这条
 npm run smoke        # 端到端：链路 + 书源管理 + 静态资源 + 账号/书架/进度/书签 + 改显示名/改密码 + 导出导入备份 + 书签清单 + 替换净化同步 + 笔记 + 媒体 + 字段模板 + 选择器@js: + 空选择器取值 + 列表标记（+ / 顶格 <js>）+ 沙箱助手 + setContent/digestHex/UI 动作 + 节点级助手/加解密 + 连接符切分 + 列表规则 + URL 字段 JS + 发现/首页
 ```
@@ -2501,7 +2586,7 @@ npm run smoke        # 端到端：链路 + 书源管理 + 静态资源 + 账号
 单元测试只覆盖**纯函数**（规则解析、规则文本切分、规则前缀的匹配、规则尾巴的先后与取值、
 XPath 适配层与规则文本、`选择器@js:` 里 `result` 的绑法判定、位置选择、正则链、JSONPath、
 导入校验、旧身份 token 校验、口令哈希、exploreUrl 分类解析、图片地址提取、媒体签名、
-模板分类、时间格式化、MD5 摘要、AES 与 DES、对称加密的形态、base64 的 UTF-8 语义、
+模板分类、时间格式化、MD5 摘要与 HMAC（与 `node:crypto` 对拍）、AES 与 DES、对称加密的形态、base64 的 UTF-8 语义、
 书签输入校验、**笔记输入校验**、章内搜索的切分与摘录、**搜索结果的按书合并**、
 **DOM 构造层的空值过滤**、**字号手势的换算**、**替换规则的校验与同步版本判定**、
 **搜索分片与劈半重试**），
@@ -3002,6 +3087,10 @@ cheerio 能不能解析、QuickJS 的 WASM 能不能在线上加载、D1 绑定�
    它们和 `imageDecode` 是同一类：都需要一个能在沙箱里用的 Java / Android 运行时替身。
    缺的时候是**带名字的明确报错**，不是静默返回空 —— 剩下 28 条分类失败里就有一批是这一类的。
    （`java.getElements` / `getElement` 与 AES / DES 那几个已在「第十一轮」补上。）
+   「纯计算、还没做」那一栏已在「第三十二轮」清空：`md5Encode16` / `HMacHex` / `HMacBase64` /
+   `digestBase64Str` / `hexDecodeToByteArray` 与整批 `aes*` / `des*` 都补上了（表里 51 → 67）。
+   **还剩的是「缺原语」那三条**：3DES（要分组级 DES 原语）、`createSign` 与
+   `createAsymmetricCrypto`（要 RSA 密钥）—— 这三类是我们的活，与平台能力无关。
    `java.t2s` / `java.s2t`（简繁转换，线上 51 处）**明确不做**：它不是「顺手包装一下」，
    而是要一张几千条、还带「一简对多繁」的对照表；手抄一张小表的结果是「一半字转了一半没转」的正文，
    比全不转更难查，而把 OpenCC 那种规模的词表带进仓库会明显抬高 Worker 体积。
