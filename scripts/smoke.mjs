@@ -5960,6 +5960,160 @@ console.log('\n=== 42. 重定向是自己跟的（302 上的 Set-Cookie 与 Loca
     )
 }
 
+console.log('\n=== 43. 目录里的 isVip / isPay / isVolume / updateTime（以及 chapter.isVip()） ===')
+{
+    /**
+     * 量（816 条源）：`ruleToc` 里与 `chapterName` **同层**的四条逐条字段，引擎以前整片丢掉 ——
+     *   `updateTime` 74 源、`isVip` 45 源、`isVolume` 25 源、`isPay` 7 源。
+     * 症状是「目录里看不出哪一章要钱、也看不到卷与更新时间」；而 `chapter.isVip()` 的
+     * 唯一消费者（🏷起点(部分可看) 的正文规则）**一直拿到 false**，付费章一直走错分支。
+     *
+     * 靶子是测试站点新加的 `/fixture/api/toc?n=`：第 3 条是**卷标题**（url 为空串），
+     * 每 3 条一处 `isVip`、每 6 条一处 `isPay`，每条都有更新时间。
+     *
+     * 四件事一起验：
+     *   ① 四个字段都带出来了（值对不对）
+     *   ② 卷标题**没有正文地址**也留在列表里（以前被 `!urlRaw → continue` 丢掉）
+     *   ③ `chapter.isVip()` 拿到真值（前端把目录里的 isVip 带回去，正文规则读得到）
+     *   ④ 逐条字段走沙箱时（`@js:` 写法）的代价 —— 一条规则一次求值 × 章的条数
+     */
+    const id = `user:${BASE}/toc-fields`
+    const jsId = `user:${BASE}/toc-fields-js`
+    for (const one of [id, jsId]) await call('DELETE', `/api/sources?id=${encodeURIComponent(one)}`)
+
+    const listRules = {
+        chapterList: '$.chapters',
+        chapterName: '$.name',
+        chapterUrl: '$.url',
+    }
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: '目录字段（临时）',
+                bookSourceUrl: `${BASE}/toc-fields`,
+                searchUrl: '/fixture/search?q={{key}}',
+                ruleSearch: {
+                    bookList: '@css:div.result-item',
+                    name: '@css:h3.title@text',
+                    bookUrl: '@css:h3.title a@href',
+                },
+                ruleToc: {
+                    ...listRules,
+                    isVip: '$.isVip',
+                    isPay: '$.isPay',
+                    isVolume: '$.isVolume',
+                    updateTime: '$.time',
+                },
+                // 正文规则只做一件事：把引擎那侧看到的 isVip 原样报出来
+                ruleContent: { content: '@js:"vip="+chapter.isVip()' },
+            },
+            {
+                // ④ 逐条字段全部走沙箱（模板 → 每次求值进一次 QuickJS）
+                bookSourceName: '目录字段（临时·走沙箱）',
+                bookSourceUrl: `${BASE}/toc-fields-js`,
+                searchUrl: '/fixture/search?q={{key}}',
+                ruleSearch: {
+                    bookList: '@css:div.result-item',
+                    name: '@css:h3.title@text',
+                    bookUrl: '@css:h3.title a@href',
+                },
+                ruleToc: {
+                    ...listRules,
+                    isVip: '@js:{{$.isVip}}',
+                    isPay: '@js:{{$.isPay}}',
+                    updateTime: '@js:{{$.time}}',
+                },
+            },
+        ]),
+    )
+
+    const tocUrl = `${BASE}/fixture/api/toc?n=7`
+    const toc = await getJson(
+        `/api/toc?sourceId=${encodeURIComponent(id)}&url=${encodeURIComponent(tocUrl)}`,
+    )
+    const chapters = toc.json?.chapters ?? []
+    check(
+        toc.json?.count === 7,
+        '① 条数对得上（第 3 条是卷，所以 6 章 + 1 卷 = 7 条）',
+        String(toc.json?.count) + ' ' + String(toc.json?.error ?? ''),
+    )
+    check(
+        chapters[2]?.isVolume === true && chapters[2]?.url === '',
+        '② 卷标题留在列表里、且没有正文地址',
+        JSON.stringify(chapters[2]),
+    )
+    check(
+        chapters[5]?.isVip === true &&
+            chapters[5]?.isPay === true &&
+            chapters[5]?.updateTime === '2024-05-16',
+        '① 第 6 章：isVip + isPay + updateTime 都带出来了',
+        JSON.stringify(chapters[5]),
+    )
+    check(
+        chapters[0]?.isVip === false && chapters[2]?.isVip === false,
+        '① 不要付费的章是 false（不是「没这个字段」）',
+        JSON.stringify(chapters[0]),
+    )
+
+    // ③ 把目录里带回来的 isVip 交给正文规则 —— 这正是前端做的事
+    async function contentOf(chapter) {
+        const res = await getJson(
+            `/api/content?sourceId=${encodeURIComponent(id)}&url=${encodeURIComponent(String(chapter.url))}` +
+                `&chapter=${encodeURIComponent(JSON.stringify({ title: chapter.name, url: chapter.url, isVip: chapter.isVip }))}`,
+        )
+        return String(res.json?.content ?? res.json?.error ?? '')
+    }
+    const vipText = await contentOf(chapters[5])
+    const freeText = await contentOf(chapters[0])
+    check(
+        vipText === 'vip=true' && freeText === 'vip=false',
+        '③ chapter.isVip() 拿到真值（以前恒为 false）',
+        `付费章=${vipText} 免费章=${freeText}`,
+    )
+
+    // ④ 代价：n=300 时三条逐条字段各求值 300 次（每次进一次沙箱）
+    const started = Date.now()
+    const big = await getJson(
+        `/api/toc?sourceId=${encodeURIComponent(jsId)}&url=${encodeURIComponent(`${BASE}/fixture/api/toc?n=300`)}`,
+    )
+    const elapsed = Date.now() - started
+    // 299 而不是 300：这条源**没配 isVolume 规则**，于是「没有地址又不是卷」的那一条
+    // 被按规矩丢掉 —— 这条断言顺带把那条规矩也钉住了
+    check(
+        big.json?.count === 299,
+        '④ 逐条字段走沙箱时 299 条（300 减掉被丢的那条卷）仍然取得回来',
+        `count=${big.json?.count} ${elapsed}ms ${String(big.json?.error ?? '')}`,
+    )
+    console.log(`  —— n=300、三条 @js: 逐条字段（约 900 次沙箱求值）耗时 ${elapsed}ms`)
+
+    // ⑤ 上限：超过 MAX_MARKED_CHAPTERS 之后不再求值，而且**要说出来**（不静默）
+    const capped = await getJson(
+        `/api/toc?sourceId=${encodeURIComponent(jsId)}&url=${encodeURIComponent(`${BASE}/fixture/api/toc?n=400`)}`,
+    )
+    const cappedChapters = capped.json?.chapters ?? []
+    check(
+        capped.json?.count === 399 && String(capped.json?.warning ?? '').includes('没有取'),
+        '⑤ 超过上限的目录照样取得回来，并明说「后面的没取标注」',
+        `count=${capped.json?.count} warning=${String(capped.json?.warning ?? '（没有）')}`,
+    )
+    check(
+        cappedChapters[0]?.isVip !== undefined && cappedChapters[350]?.isVip === undefined,
+        '⑤ 前 300 条有标注、后面的没有（而且这是**说过的**降级，不是静默丢）',
+        `第1条=${JSON.stringify(cappedChapters[0]?.isVip)} 第350条=${JSON.stringify(cappedChapters[350]?.isVip)}`,
+    )
+
+    for (const one of [id, jsId]) {
+        const done = await call('DELETE', `/api/sources?id=${encodeURIComponent(one)}`)
+        if (done.status !== 200) console.log(`  删 ${one} 时回了 ${done.status}：${done.raw ?? ''}`)
+    }
+    const left = ((await getJson('/api/sources')).json?.sources ?? []).filter((s) =>
+        String(s.id).includes('toc-fields'),
+    )
+    check(left.length === 0, '目录字段的两个测试源已清理', left.map((s) => s.id).join(' / '))
+}
+
 console.log('\n=== 结果 ===')
 if (failures.length === 0) {
     console.log(

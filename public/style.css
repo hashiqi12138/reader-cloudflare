@@ -1010,7 +1010,10 @@ textarea {
     padding: 0;
 }
 .chapter-link {
-    display: block;
+    /* 一行里放三样：章节名（占满）、VIP 标记、更新时间 —— 见第五十六轮 */
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
     width: 100%;
     text-align: left;
     border: 0;
@@ -1029,6 +1032,42 @@ textarea {
     color: var(--accent);
     font-weight: 650;
     background: var(--accent-soft);
+}
+
+/* 目录里书源给的标注：卷标题 / VIP 标记 / 更新时间（第五十六轮） */
+.chapter-name {
+    flex: 1;
+    /* 没有 min-width，长章节名会把右边两样挤出屏幕 */
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.chapter-mark {
+    flex: none;
+    font-size: 11px;
+    line-height: 1.6;
+    padding: 0 6px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    opacity: 0.85;
+}
+.chapter-time {
+    flex: none;
+    max-width: 40%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 11px;
+    opacity: 0.7;
+}
+.chapter-volume {
+    padding: 12px 8px 6px;
+    background: var(--surface-2);
+    border-bottom: 1px solid var(--line);
+    font-size: 12.5px;
+    font-weight: 650;
+    color: var(--ink);
 }
 
 /* ---------------------------------------------------------------- 状态 */

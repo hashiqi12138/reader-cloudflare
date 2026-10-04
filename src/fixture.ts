@@ -926,6 +926,38 @@ export async function handleFixture(request: Request, url: URL): Promise<Respons
         )
     }
 
+    /**
+     * 目录的 JSON 接口（第五十六轮）：每条带 `isVip` / `isPay` / `isVolume` / `time`
+     *
+     * 这几个字段是 `ruleToc` 里与 `chapterName` 同层的**逐条规则**，引擎以前整片丢掉。
+     * 靶子的形状照着接口型书源写（`chapterList: "$.chapters"`、字段用 `$.名字`）：
+     *   第 3 条是**卷标题**（`url` 是空串、`isVolume` 为真）
+     *   每 3 条里有一条 `isVip`；其中每 6 条里有一条 `isPay`（已购）
+     *   `time` 一律有值，用来验更新时间的展示
+     *
+     * `?n=` 控制条数 —— 冒烟那边既用它验字段，也用它量「逐条字段要走沙箱时」的代价。
+     */
+    if (pathname === '/fixture/api/toc') {
+        const n = Math.max(1, Math.min(500, Number(url.searchParams.get('n') ?? '5') || 5))
+        const chapters: Record<string, unknown>[] = []
+        for (let i = 1; i <= n; i++) {
+            if (i === 3) {
+                chapters.push({ name: `第 ${i} 卷 · 上卷`, url: '', isVolume: true })
+                continue
+            }
+            chapters.push({
+                name: `第 ${i} 章`,
+                url: `/fixture/chapter/1/${i}`,
+                isVip: i % 3 === 0,
+                isPay: i % 6 === 0,
+                time: `2024-05-1${i % 10}`,
+            })
+        }
+        return new Response(JSON.stringify({ chapters }), {
+            headers: { 'Content-Type': 'application/json; charset=utf-8' },
+        })
+    }
+
     const media = MEDIA_FILES[pathname]
     if (media) return mediaResponse(media.body, media.type, request.headers.get('range'))
 

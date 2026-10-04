@@ -303,7 +303,9 @@ export async function viewRead(host) {
                 // 要用来拼地址，`book.getVariable("序")` 要跨章记住探测出来的抓取形状
                 ...contextParams(
                     { name: book.name, author: book.author, bookUrl },
-                    { title: chapter.name, index, url: chapter.url },
+                    // isVip 是从目录带回来的（ruleToc.isVip）—— 引擎那侧的 chapter.isVip()
+                    // 靠它才能给出真值，见「第五十六轮」
+                    { title: chapter.name, index, url: chapter.url, isVip: chapter.isVip },
                 ),
             })}`,
         )
@@ -774,22 +776,55 @@ export async function viewRead(host) {
         // 完整标题留在 title 上，鼠标悬停仍能看到
         const limit = Number(prefs.get('chapterTitleLimit')) || 24
         const clip = (value) => (value.length > limit ? `${value.slice(0, limit)}…` : value)
+        /**
+         * 目录里那三样书源给的标注（第五十六轮）
+         *
+         *   `isVolume`   —— 这一条是**卷标题**，渲染成分组标题、不可点
+         *   `isVip`      —— 要付费；`isPay` 是「已经买过」，两者一起看
+         *   `updateTime` —— 更新时间，右侧一小段灰字
+         *
+         * 序号按**真章节**数（跳过卷标题），而点开时用的仍然是数组下标 ——
+         * 引擎那侧的 `chapter.index` 也是数组下标，两边必须一致，否则
+         * 「取第 N 章」这类规则会错位。
+         */
+        let seq = 0
         const list = el(
             'ul',
             { class: 'chapter-list' },
-            book.chapters.map((item, i) =>
-                el('li', { dataset: { current: String(i === index) } }, [
-                    el('button', {
-                        class: 'chapter-link',
-                        title: item.name,
-                        text: `${i + 1}. ${clip(item.name)}`,
-                        onclick: () => {
-                            closeSheets()
-                            openChapter(i, 'first')
+            book.chapters.map((item, i) => {
+                if (item.isVolume) {
+                    return el('li', { class: 'chapter-volume' }, [
+                        el('span', { class: 'chapter-volume-title', text: item.name }),
+                    ])
+                }
+                seq += 1
+                const mark = item.isVip ? (item.isPay ? '已购' : 'VIP') : null
+                return el('li', { dataset: { current: String(i === index) } }, [
+                    el(
+                        'button',
+                        {
+                            class: 'chapter-link',
+                            title: item.updateTime
+                                ? `${item.name} · ${item.updateTime}`
+                                : item.name,
+                            onclick: () => {
+                                closeSheets()
+                                openChapter(i, 'first')
+                            },
                         },
-                    }),
-                ]),
-            ),
+                        [
+                            el('span', {
+                                class: 'chapter-name',
+                                text: `${seq}. ${clip(item.name)}`,
+                            }),
+                            mark ? el('span', { class: 'chapter-mark', text: mark }) : null,
+                            item.updateTime
+                                ? el('span', { class: 'chapter-time', text: item.updateTime })
+                                : null,
+                        ],
+                    ),
+                ])
+            }),
         )
         openSheet(`目录 · 共 ${book.chapters.length} 章`, list)
         requestAnimationFrame(() => {
