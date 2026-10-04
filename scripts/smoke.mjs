@@ -6340,7 +6340,12 @@ console.log('\n=== 45. 登录界面（loginUi）与界面上的按钮 ===')
                 loginUi: JSON.stringify([
                     { name: '账号', type: 'text' },
                     { name: '密码', type: 'password' },
-                    { name: '线路', type: 'select', chars: ['一线路', '二线路'], default: '二线路' },
+                    {
+                        name: '线路',
+                        type: 'select',
+                        chars: ['一线路', '二线路'],
+                        default: '二线路',
+                    },
                     { name: '登录', type: 'button', action: 'login()' },
                     { name: '打个招呼', type: 'button', action: 'ping()' },
                     { name: '帮助', type: 'button', action: 'https://example.com/help' },
@@ -6370,8 +6375,7 @@ console.log('\n=== 45. 登录界面（loginUi）与界面上的按钮 ===')
         ]),
     )
 
-    const uiOf = (sourceId) =>
-        getJson(`/api/sources/login-ui?id=${encodeURIComponent(sourceId)}`)
+    const uiOf = (sourceId) => getJson(`/api/sources/login-ui?id=${encodeURIComponent(sourceId)}`)
 
     // ① 严格 JSON 那条快路：输入框 / 密码框 / 下拉（含候选与默认）/ 三个按钮
     const ui = await uiOf(id)
