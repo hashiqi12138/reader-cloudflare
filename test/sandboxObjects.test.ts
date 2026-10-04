@@ -20,13 +20,29 @@ import { SANDBOX_OBJECTS } from './sandboxSurface'
 
 const PRELUDE = readFileSync(new URL('../src/engine/js.ts', import.meta.url), 'utf8')
 
-/** 取某个对象那一段 `var xxx = (function () { … })()` 的文本 */
+/**
+ * 取某个对象那一段定义的文本
+ *
+ * 第五十九轮起这五个对象都改成了「工厂函数 + 一次调用」（`function __buildBook() {…}`
+ * 紧跟 `var book = __buildBook()`）—— 这样预置文本在一个请求里只解析一次，
+ * 每次求值只重新造一个对象（见 README 第五十九轮）。这里跟着换一种取法：
+ * 以「工厂函数开头」到「紧跟其后的 `var <名字> = __build…()`」为界。
+ */
 function blockOf(name: string): string {
-    const start = PRELUDE.indexOf(`var ${name} = (function () {`)
-    if (start === -1) throw new Error(`js.ts 里找不到 ${name} 的定义`)
-    const end = PRELUDE.indexOf('\n})()', start)
+    const factory = `function __build${name.charAt(0).toUpperCase()}${name.slice(1)}() {`
+    const start = PRELUDE.indexOf(factory)
+    if (start !== -1) {
+        const endMark = `\n}\nvar ${name} = __build`
+        const end = PRELUDE.indexOf(endMark, start)
+        if (end === -1) throw new Error(`${name} 的工厂函数没有正常结束`)
+        return PRELUDE.slice(start, end + 2)
+    }
+    // 兜底：还是老写法（`var xxx = (function () { … })()`）的对象
+    const fallback = PRELUDE.indexOf(`var ${name} = (function () {`)
+    if (fallback === -1) throw new Error(`js.ts 里找不到 ${name} 的定义`)
+    const end = PRELUDE.indexOf('\n})()', fallback)
     if (end === -1) throw new Error(`${name} 的定义没有正常结束`)
-    return PRELUDE.slice(start, end)
+    return PRELUDE.slice(fallback, end)
 }
 
 /** 这个名字在块里是不是被定义成了成员（赋值或对象字面量两种写法都认，别名也算） */

@@ -6074,7 +6074,8 @@ console.log('\n=== 43. 目录里的 isVip / isPay / isVolume / updateTime（以�
         `付费章=${vipText} 免费章=${freeText}`,
     )
 
-    // ④ 代价：n=300 时三条逐条字段各求值 300 次（每次进一次沙箱）
+    // ④ 代价：n=300 时三条逐条字段各求值 300 次 —— 第五十九轮起走**批量求值**
+    //    （同一个 context 里只重跑 PER_EVAL_PRELUDE），这个耗时就是那一轮的收益
     const started = Date.now()
     const big = await getJson(
         `/api/toc?sourceId=${encodeURIComponent(jsId)}&url=${encodeURIComponent(`${BASE}/fixture/api/toc?n=300`)}`,
@@ -6089,20 +6090,18 @@ console.log('\n=== 43. 目录里的 isVip / isPay / isVolume / updateTime（以�
     )
     console.log(`  —— n=300、三条 @js: 逐条字段（约 900 次沙箱求值）耗时 ${elapsed}ms`)
 
-    // ⑤ 上限：超过 MAX_MARKED_CHAPTERS 之后不再求值，而且**要说出来**（不静默）
-    const capped = await getJson(
+    // ⑤ 第五十九轮把上限放开之后：n=400 这种「以前会被截断」的长度**现在全部带标注**
+    const before = await getJson(
         `/api/toc?sourceId=${encodeURIComponent(jsId)}&url=${encodeURIComponent(`${BASE}/fixture/api/toc?n=400`)}`,
     )
-    const cappedChapters = capped.json?.chapters ?? []
+    const beforeChapters = before.json?.chapters ?? []
     check(
-        capped.json?.count === 399 && String(capped.json?.warning ?? '').includes('没有取'),
-        '⑤ 超过上限的目录照样取得回来，并明说「后面的没取标注」',
-        `count=${capped.json?.count} warning=${String(capped.json?.warning ?? '（没有）')}`,
-    )
-    check(
-        cappedChapters[0]?.isVip !== undefined && cappedChapters[350]?.isVip === undefined,
-        '⑤ 前 300 条有标注、后面的没有（而且这是**说过的**降级，不是静默丢）',
-        `第1条=${JSON.stringify(cappedChapters[0]?.isVip)} 第350条=${JSON.stringify(cappedChapters[350]?.isVip)}`,
+        before.json?.count === 399 &&
+            !before.json?.warning &&
+            beforeChapters[0]?.isVip !== undefined &&
+            beforeChapters[390]?.isVip !== undefined,
+        '⑤ 超过旧的 300 上限的目录现在**全部**带标注、也没有 warning（第五十九轮放开了上限）',
+        `count=${before.json?.count} 第391条=${JSON.stringify(beforeChapters[390]?.isVip)} warning=${String(before.json?.warning ?? '（没有）')}`,
     )
 
     // ⑥ 便宜的那一类（纯 `$.字段`，不走沙箱）**不该被卡上限** —— 线上 📚企鹅阅读 有 1663 章
@@ -6117,6 +6116,25 @@ console.log('\n=== 43. 目录里的 isVip / isPay / isVolume / updateTime（以�
         '⑥ 纯字段名（不走沙箱）的那一类不卡上限：350 条全带标注、也没有 warning',
         `count=${cheap.json?.count} 第341条=${JSON.stringify(cheapChapters[340]?.isVip)} warning=${String(cheap.json?.warning ?? '（没有）')}`,
     )
+
+    // ⑦ 上限（第五十九轮按实测重定为 1200）仍然守得住、而且**要说出来**（不静默）。
+    //    顺带压一下批量求值：1300 条 × 三条 @js: ≈ 3900 次求值
+    const hugeStarted = Date.now()
+    const huge = await getJson(
+        `/api/toc?sourceId=${encodeURIComponent(jsId)}&url=${encodeURIComponent(`${BASE}/fixture/api/toc?n=1300`)}`,
+    )
+    const hugeElapsed = Date.now() - hugeStarted
+    const hugeChapters = huge.json?.chapters ?? []
+    check(
+        huge.json?.count === 1299 &&
+            String(huge.json?.warning ?? '').includes('没有取') &&
+            hugeChapters[0]?.isVip !== undefined &&
+            hugeChapters[1199]?.isVip !== undefined &&
+            hugeChapters[1250]?.isVip === undefined,
+        '⑦ 上限 1200 仍然守得住：前 1200 条有标注、后面 99 条没有，且明说了',
+        `count=${huge.json?.count} ${hugeElapsed}ms 第1条=${JSON.stringify(hugeChapters[0]?.isVip)} 第1200条=${JSON.stringify(hugeChapters[1199]?.isVip)} 第1251条=${JSON.stringify(hugeChapters[1250]?.isVip)}`,
+    )
+    console.log(`  —— n=1300、约 3900 次沙箱求值耗时 ${hugeElapsed}ms（批量求值）`)
 
     for (const one of [id, jsId]) {
         const done = await call('DELETE', `/api/sources?id=${encodeURIComponent(one)}`)
