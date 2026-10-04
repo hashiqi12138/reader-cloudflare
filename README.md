@@ -29,6 +29,7 @@
 | XPath（`//`、单斜杠 `/` 或 `@XPath:`）                                                              | 已实现（完整 XPath 1.0，不是子集；单斜杠开头按**相对当前条目**解释，见「第四十六轮」）                                                                                                                                                                                                                                                          |
 | `java.ajax` / `get` / `post` / `ajaxAll`                                                            | 已实现（asyncify 沙箱，脚本里当同步函数用）                                                                                                                                                                                                                                                                                                     |
 | 书源导入 / 启停 / 删除（存 D1）                                                                     | 已实现                                                                                                                                                                                                                                                                                                                                          |
+| **书源列表的协商缓存**（`/api/sources` 带 `ETag`，没变回 304）                                      | 已实现（摘要由 D1 侧 `json_extract` 算 —— 不再为了三个布尔值把 4.5 MB 的 `payload` 读进 Worker 再逐条 parse；重复加载回 304、不重发那 170 KB，见「第六十四轮」）                                                                                                                                                                                |
 | 前端：书架 / 搜索 / 书源管理 / 阅读页                                                               | 已实现（书源与阅读进度都落 D1）                                                                                                                                                                                                                                                                                                                 |
 | **图片源 / 音频源 / 文件源**（`bookSourceType` 1 / 2 / 3）                                          | 已实现（见「媒体类书源」一节）                                                                                                                                                                                                                                                                                                                  |
 | 媒体代取（防盗链 / 混合内容 / 跨域）                                                                | 已实现（签名地址 + Range 透传；**防盗链封面**也走它 —— 带选项的封面签发 `coverProxyUrl`，见「第四十七轮」）                                                                                                                                                                                                                                     |
@@ -165,6 +166,7 @@ public/                   前端（无构建步骤，直接作为静态资源发
     ├── replaceSync.js    替换净化规则的账号同步：上传 / 取回 / 版本冲突判定（纯函数部分可单测）
     ├── search.js         章内搜索：命中切分与摘录（纯函数，可单测）
     ├── searchPlan.js     搜索分片：一页几个源、还差多少、要不要劈半重试（纯函数，可单测）
+    ├── sourcesCache.js   书源列表的复用：并发共用一趟、兜底时限、显式失效（纯函数，可单测）
     ├── swPolicy.js       Service Worker 的路由与缓存键：哪条请求进哪张表、键怎么算（纯函数，可单测）
     └── zoom.js           字号手势：夹取、捏合比例、滚轮单位与累积（纯函数，可单测）
 src/
@@ -206,6 +208,7 @@ src/
 │   └── exploreParse.ts   exploreUrl 的分类解析（三种写法归一）
 └── lib/
     ├── http.ts           取网：字符集处理、体积上限、默认请求头
+    ├── etag.ts           HTTP 缓存校验器：`If-None-Match` 的比对（纯函数，可单测）
     ├── hash.ts           MD5（WebCrypto 不提供，自己实现对拍 node:crypto）
     ├── cipher.ts         分组密码的公共外壳：transformation 解析、补位、CBC/ECB 串块
     ├── aes.ts            AES-128/192/256 的同步实现（见「沙箱助手」）
@@ -5651,14 +5654,91 @@ quickjs-emscripten，三种情形各跑 200 次：
 `/js/swPolicy.js` 可取、首页 head 里挂了 `manifest` 与 `apple-touch-icon` —— 这几样少任何一样都
 **不会报错**，只是「装不到桌面」或者「离线打不开」。
 
+### 第六十四轮：把「为了三个布尔值 parse 816 份书源」这笔 CPU 挪出计费区
+
+第二十六轮把搜索的 503 归到「免费计划 10 ms CPU」上，也给了三条出路。这一轮先把它**量清楚**，
+再做不花钱就能立刻见效的那部分。
+
+**先量：谁在吃 CPU**
+
+`wrangler tail --format json` 抓真实请求，`cpuTime` 与 `outcome` 是这样：
+
+| 请求            | cpuTime | outcome       | 返回            |
+| --------------- | ------- | ------------- | --------------- |
+| `/api/auth/me`  | 1 ms    | `ok`          | 200             |
+| `/api/sources`  | 27 ms   | `exceededCpu` | **503**（1102） |
+| `/api/search` ① | 339 ms  | `ok`          | 200             |
+| `/api/search` ② | 469 ms  | `ok`          | 200             |
+| `/api/search` ③ | 10 ms   | `exceededCpu` | **503**（1102） |
+
+两处要更正旧认知。一是**不只搜索会挂**：`/api/sources` 这个看上去最轻的接口，连打五次就挂一次。
+二是它**不是一道精确的 10 ms 墙** —— 339 ms 的搜索过去了，10 ms 的那次反而被掐。方向是确定的：
+CPU 预算不够，而 `/api/sources` 是唯一一个「每次都要把全部书源的 `payload` 读出来再逐条
+`JSON.parse`」的地方 —— 线上那张表的 `payload` 合计 **4.5 MB**（`SUM(LENGTH(payload))` = 4 562 779
+个字符，816 条），而路由最后只用其中 10 个字段。
+
+**第一处：把计算下推给 D1**
+
+`hasSearch` / `hasExplore` / `hasLogin` 三个标记是从 `payload` 的规则里推出来的
+（`searchUrl` + `ruleSearch.bookList` 之类），旧写法为了这三个布尔值 parse 了 816 份书源。
+
+新的 `listSourceSummaries` 只 `SELECT` 要用的列，三个标记交给 SQLite 的 `json_extract` 在
+**D1 侧**算。关键点是 **D1 的查询 CPU 不计进 Worker 那 10 ms**：线上这条 SQL 实测
+`sql_duration_ms` 26 ms，而 Worker 侧只剩「读行 + 序列化」—— 响应体的形状与体积都没变
+（还是那 ~170 KB），变的是**这笔 parse 不再算在 Worker 头上**。
+
+`json_valid(...)` 那几层不是多余的：`json_extract` 遇到坏 JSON 会**抛错**，一条坏数据就能让
+整个列表 500，而它本来只是「这一条的标记算不出来」。
+
+**第二处：给列表加 `ETag`**
+
+`/api/sources` 的输出只取决于 `sources` 表。这张表**没有 owner 列** —— 书源是全局的，不是
+每个用户一份 —— 所以一个部署级版本号就够当校验器。版本号存进通用键值表 `settings`
+（键名 `sources_rev`），跟着数据改动**进同一个 `batch`** 自增：分开写会留下「数据已改、
+ETag 还没变」的窗口，那期间浏览器拿到的 304 是过期的。自增放在 SQL 里做（而不是读出来 +1
+再写回），并发写才不会互相覆盖。
+
+会改变输出的写入就四处：**导入、启停、删除、登录态**（`login_header` / `login_info`）。
+另外三处写（健康度 `last_ok_at` / `fail_streak`、书源变量、cookie 罐）不进这个列表，不 bump ——
+把 bump 收在 `db.ts` 里、跟着各自的 `batch` 走，就是为了不漏。
+
+命中时直接 304，**那 816 行都不读**。`If-None-Match` 的比对抽在 `src/lib/etag.ts`：逗号分隔的
+一串、弱校验前缀 `W/`、`*` 三种形态都要认。它判错**不会报错**，只会让浏览器一直拿着旧列表
+（「导入了书源却看不见」），所以单独写了测试。
+
+**第三处：前端别重复拉**
+
+「发现」页与「书源」页各读一次 `/api/sources`，来回切就是反复拉同一份 ~170 KB。
+`public/js/sourcesCache.js` 挡这一层：并发调用共用同一趟、失败不入缓存、改过书源之后显式失效。
+用法与 `loadShelf` / `invalidateShelf` 一致，区别只在多一个兜底时限 —— 书源列表**全部署共用**，
+会话之外也会变（另一个标签页动了它，或者阅读时书源自己跑了 `putLoginHeader`）。
+
+失效**漏一次不会报错**，只会让用户看到过期的列表，所以四个改动点都显式调了
+`invalidateSources()`；单测把「失效之前发出的那趟回来了不许写缓存」这类边界也钉住了。
+
+**没做的：换平台的兼容层**
+
+本轮只压 CPU。换平台要抽的绑定面已经摸清：D1 的 API 面窄得只剩
+`prepare` / `bind` / `all` / `first` / `run` / `batch` / `meta.changes`（没有 `.exec` / `.raw`），
+静态资源是 `c.env.ASSETS.fetch`，WASM 是 Workers 专属的 `import ... from '*.wasm'`
+（运行时既禁止 `WebAssembly.compile`，也不允许按包路径去 fetch `.wasm`）。方向是各抽一个接口、
+再落第二个适配器，但**这一轮只抽接口、不落适配器**，留给下一轮。
+
+**验证**
+
+- 单测 **878 → 894**（`test/etag.test.ts` 八条、`test/sourcesCache.test.mjs` 八条）
+- 冒烟补三条：`/api/sources` 首次带 `ETag`、同一个 `ETag` 回 304 且**没有正文**、
+  对不上的 `ETag` 照旧回完整列表
+- 线上用 `wrangler tail` 对比改动前后的 `cpuTime` 与 `outcome`
+
 ## 验证
 
 ```bash
 npm install
 npm run db:migrate   # 建本地 D1 表（首次、以及每次新增迁移后）
-npm test             # 单元测试（878 项，Node 里毫秒级跑完；另有十八个默认跳过的全量扫描，见下）
+npm test             # 单元测试（894 项，Node 里毫秒级跑完；另有十八个默认跳过的全量扫描，见下）
 npm run dev          # 起本地服务，浏览器打开首页即可用；另开一个终端跑下面这条
-npm run smoke        # 端到端：链路 + 书源管理 + 静态资源 + 账号/书架/进度/书签 + 改显示名/改密码 + 导出导入备份 + 书签清单 + 替换净化同步 + 笔记 + 媒体 + 字段模板 + 选择器@js: + 空选择器取值 + 列表标记（+ / 顶格 <js>）+ 沙箱助手 + setContent/digestHex/UI 动作 + 节点级助手/加解密 + 连接式取网与 result.toArray() + 书源变量落库 + 书的上下文与书的变量 + JS 尾段列表规则保留节点 + 连接符切分 + 列表规则（末尾那个词 / CSS 首段的位置后缀 / `!` 排除下标）+ 字段规则（CSS 式多段 `@`）+ 变量指令（`@put:` / `@get:` 含**跨请求**那一半）+ `init`（铺变量与**换根**两种）+ `<js>` 段 + JSONPath 尾段（`$[*]` / `$[:n]`）+ 地址尾部的请求选项（`地址,{选项}` / 排成多行的那份选项块）+ URL 选项里 `body` 写对象（`application/json`）+ 展示用字段的容错与 `warnings` + 单斜杠 XPath（`/a/p[1]/text()` 相对当前条目）+ 防盗链封面走 `/api/media` 代取 + http 封面（混合内容）也代取 + `<script>` / `<style>` 也是元素（`java.getElement("script")` 那条路） + JSOUP 简写 `class.A B`（两个类都要有） + `source.getLoginInfoMap()` 的 Map 语义 + URL 字段 JS + 发现/首页 + cookie 罐（收 / 发 / 按源落库）+ 重定向自己跟（302 上的 `Set-Cookie` 与 `Location`）+ 目录里的 `isVip` / `isPay` / `isVolume` / `updateTime` + 登录态（跑一次 `loginUrl` → 落库 → 之后每趟请求都带上）+ 登录界面（读 `loginUi` → 渲染表单 → 界面上的按钮单独调得到）+ 沙箱里的取网跟着这次求值的预算走（列表规则里 / 搜索地址模板里，含「响应头回了、正文拖很久」那层兜底）+ 搜索 / 发现里的逐条字段走批量求值（批按 jsLib 分开，两源互不串味）+ PWA（`manifest.json` / 四张图标是真 PNG / `/sw.js` 的 JS 类型 / `/js/swPolicy.js` 可取 / head 里的 link）
+npm run smoke        # 端到端：链路 + 书源管理 + 静态资源 + 账号/书架/进度/书签 + 改显示名/改密码 + 导出导入备份 + 书签清单 + 替换净化同步 + 笔记 + 媒体 + 字段模板 + 选择器@js: + 空选择器取值 + 列表标记（+ / 顶格 <js>）+ 沙箱助手 + setContent/digestHex/UI 动作 + 节点级助手/加解密 + 连接式取网与 result.toArray() + 书源变量落库 + 书的上下文与书的变量 + JS 尾段列表规则保留节点 + 连接符切分 + 列表规则（末尾那个词 / CSS 首段的位置后缀 / `!` 排除下标）+ 字段规则（CSS 式多段 `@`）+ 变量指令（`@put:` / `@get:` 含**跨请求**那一半）+ `init`（铺变量与**换根**两种）+ `<js>` 段 + JSONPath 尾段（`$[*]` / `$[:n]`）+ 地址尾部的请求选项（`地址,{选项}` / 排成多行的那份选项块）+ URL 选项里 `body` 写对象（`application/json`）+ 展示用字段的容错与 `warnings` + 单斜杠 XPath（`/a/p[1]/text()` 相对当前条目）+ 防盗链封面走 `/api/media` 代取 + http 封面（混合内容）也代取 + `<script>` / `<style>` 也是元素（`java.getElement("script")` 那条路） + JSOUP 简写 `class.A B`（两个类都要有） + `source.getLoginInfoMap()` 的 Map 语义 + URL 字段 JS + 发现/首页 + cookie 罐（收 / 发 / 按源落库）+ 重定向自己跟（302 上的 `Set-Cookie` 与 `Location`）+ 目录里的 `isVip` / `isPay` / `isVolume` / `updateTime` + 登录态（跑一次 `loginUrl` → 落库 → 之后每趟请求都带上）+ 登录界面（读 `loginUi` → 渲染表单 → 界面上的按钮单独调得到）+ 沙箱里的取网跟着这次求值的预算走（列表规则里 / 搜索地址模板里，含「响应头回了、正文拖很久」那层兜底）+ 搜索 / 发现里的逐条字段走批量求值（批按 jsLib 分开，两源互不串味）+ PWA（`manifest.json` / 四张图标是真 PNG / `/sw.js` 的 JS 类型 / `/js/swPolicy.js` 可取 / head 里的 link）+ 书源列表的协商缓存（首次带 `ETag` / 同一个 `ETag` 回 304 且无正文 / 对不上的照旧回完整列表）
 ```
 
 另外还有一条**不进 CI 的**体检命令（它要打真实站点，默认打线上那台）：
