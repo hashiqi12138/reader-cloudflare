@@ -295,7 +295,20 @@ export async function searchBooks(
     ctx.source ??= source
 
     const page = ctx.page ?? 1
-    const plan = await buildPlan(source.searchUrl, source, { ...ctx, key: keyword, page })
+    /**
+     * 搜索地址（`searchUrl`）本身就是一段模板，里面也可能有 `java.ajax` ——
+     * 比如 📂新书本网 要先把首页抓回来读 `form[action]` 才知道真正的搜索页在哪。
+     * 这一层也得按搜索的预算走：`buildPlan` 只在 `ctx.http` 缺位时才自己造一个
+     * （那是**沙箱默认的 8 秒**），所以这里必须把预算先给它 —— 否则整页依旧要等 8 秒
+     * （第六十轮体检里 📂新书本网 报的正是 `请求超时（>8000ms）`）。
+     */
+    const pageBudget = sandboxHttp(source, source.bookSourceUrl, SEARCH_TIMEOUT_MS)
+    const plan = await buildPlan(source.searchUrl, source, {
+        ...ctx,
+        key: keyword,
+        page,
+        http: pageBudget,
+    })
     // 搜索用更短的超时：一页几个源并发，整页的等待等于最慢的那个源（见 lib/http.ts）
     const html = await fetchText({ ...plan, timeoutMs: SEARCH_TIMEOUT_MS })
 
