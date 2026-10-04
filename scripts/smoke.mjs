@@ -6484,6 +6484,85 @@ console.log('\n=== 45. 登录界面（loginUi）与界面上的按钮 ===')
     )
 }
 
+console.log('\n=== 46. 沙箱里的取网必须跟着这次求值的预算走 ===')
+
+/**
+ * 第六十轮抽样体检抽出来的两笔账：📂夜伴书屋 **21.4 秒**、🎨拷贝漫画 **20.8 秒** ——
+ * 而且两次都是**成功**的搜索，也就是说站点没坏，是我们的预算没传下去：
+ *
+ *   脚本里一句 `java.ajax(...)` 用的是取网层的默认 **20 秒**，而「整次求值」的预算
+ *   （沙箱默认 8 秒 / 搜索 6 秒）只在**发请求之前**被看过一眼，请求本身没人管。
+ *
+ * 而一页搜索是几个源并发、整页的等待等于**最慢的那个源** —— 所以一个源拖 20 秒，
+ * 整页就等 20 秒（见 ops.ts 里 `SEARCH_TIMEOUT_MS` 旁边那行注释）。
+ *
+ * 靶子是测试站点新加的 `/fixture/slow?ms=`：很慢才把正文吐出来。
+ */
+{
+    const slowId = `user:${BASE}/slow-46`
+    const okId = `user:${BASE}/slow-46-ok`
+    for (const one of [slowId, okId])
+        await call('DELETE', `/api/sources?id=${encodeURIComponent(one)}`)
+
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                // 列表规则里拖 12 秒的取网：搜索只有 6 秒预算，必须在那之内收场
+                bookSourceName: '慢取网（临时）',
+                bookSourceUrl: `${BASE}/slow-46`,
+                searchUrl: '/fixture/search?q={{key}}',
+                ruleSearch: {
+                    bookList: `@js:java.ajax('${BASE}/fixture/slow?ms=12000')`,
+                    name: '@css:h3.title@text',
+                    bookUrl: '@css:h3.title a@href',
+                },
+            },
+            {
+                // 对照：同样走 java.ajax，但立刻就回 —— 不能被预算误伤
+                bookSourceName: '快取网（临时）',
+                bookSourceUrl: `${BASE}/slow-46-ok`,
+                searchUrl: '/fixture/search?q={{key}}',
+                ruleSearch: {
+                    bookList: `@js:java.ajax('${BASE}/fixture/api/search?q=x')`,
+                    name: '@css:h3.title@text',
+                    bookUrl: '@css:h3.title a@href',
+                },
+            },
+        ]),
+    )
+
+    const searchOne = (sourceId) =>
+        call('POST', '/api/search', JSON.stringify({ keyword: '剑', sourceIds: [sourceId] }))
+
+    const started = Date.now()
+    const slow = await searchOne(slowId)
+    const elapsed = Date.now() - started
+    const slowHit = slow.json?.sources?.[0]
+    check(
+        elapsed < 9000 && slowHit?.ok !== true && String(slowHit?.error ?? '').includes('超时'),
+        '① 脚本里拖 12 秒的取网：整次搜索在 9 秒内收场、并且说的是「超时」',
+        `${elapsed}ms ${JSON.stringify(slowHit ?? slow.json).slice(0, 150)}`,
+    )
+
+    const fast = await searchOne(okId)
+    check(
+        fast.json?.sources?.[0]?.ok === true,
+        '② 对照：正常的一次 java.ajax 不被预算误伤（照样成功）',
+        JSON.stringify(fast.json?.sources?.[0] ?? {}).slice(0, 150),
+    )
+
+    for (const one of [slowId, okId])
+        await call('DELETE', `/api/sources?id=${encodeURIComponent(one)}`)
+    check(
+        !((await getJson('/api/sources')).json?.sources ?? []).some((s) =>
+            String(s.id).includes('slow-46'),
+        ),
+        '慢取网的两个测试源已清理',
+    )
+}
+
 console.log('\n=== 结果 ===')
 if (failures.length === 0) {
     console.log(
