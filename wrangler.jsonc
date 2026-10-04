@@ -7,12 +7,14 @@
     // 这里**不能**写 `limits.cpu_ms`：本账号是 Workers 免费计划，部署会直接失败
     // （`CPU limits are not supported for the Free plan`，code 100328），
     // 免费计划的 CPU 上限是硬性的 10 ms/请求，改不了。
-    // 一次搜索要把**全部**书源的规则求值塞进同一个请求，线上实测被掐断
-    // （日志：`outcome: exceededCpu` / `Worker exceeded CPU time limit.`，
-    // 浏览器拿到 503），而其他接口只处理一个源，所以只有搜索会挂。
-    // 出路三条：升到付费计划（CPU 可提到 5 分钟）、把搜索拆成多个小请求、
-    // 或只搜用户选中的书源。注意本地 wrangler dev 不设 CPU 限制，
-    // 所以这个问题只在线上出现。
+    // 超预算的请求会被 Cloudflare 掐断：日志里是 `outcome: exceededCpu` +
+    // `Worker exceeded CPU time limit.`，浏览器拿到 503（error code 1102）。
+    // 第六十四轮实测更正了旧认知：**不止搜索会挂** —— `/api/sources` 每次都要把
+    // 816 份书源的 payload 读出来逐条 parse（合计 4.5 MB），连打五次就挂一次。
+    // 已经做的：列表摘要的计算下推给 D1（D1 的查询 CPU 不计在这 10 ms 里），
+    // 以及给列表加 ETag / 304。要根治仍然是那三条路：升到付费计划（CPU 可提到 5 分钟）、
+    // 把搜索拆成多个小请求、或只搜用户选中的书源。
+    // 注意本地 wrangler dev 不设 CPU 限制，所以这个问题只在线上出现。
     "observability": {
         "enabled": true,
     },
@@ -26,7 +28,7 @@
         "run_worker_first": ["/api/*", "/fixture/*"],
     },
     "vars": {
-        "ENGINE_VERSION": "0.52.0",
+        "ENGINE_VERSION": "0.53.0",
         // 内置测试站点默认关闭，只在本地与 CI 打开
         "ENABLE_FIXTURE": "false",
     },
