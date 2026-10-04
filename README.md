@@ -32,8 +32,8 @@
 | 前端：书架 / 搜索 / 书源管理 / 阅读页                                                               | 已实现（书源与阅读进度都落 D1）                                                                                                                                                                                                                                                                                                                 |
 | **图片源 / 音频源 / 文件源**（`bookSourceType` 1 / 2 / 3）                                          | 已实现（见「媒体类书源」一节）                                                                                                                                                                                                                                                                                                                  |
 | 媒体代取（防盗链 / 混合内容 / 跨域）                                                                | 已实现（签名地址 + Range 透传；**防盗链封面**也走它 —— 带选项的封面签发 `coverProxyUrl`，见「第四十七轮」）                                                                                                                                                                                                                                     |
-| 沙箱里的 `source` / `book` / `chapter` / `cookie` / `cache` / `infoMap` 全局                        | 已实现（见「沙箱里的全局对象」；`source.getKey()` 线上用了 413 次；`getLoginInfoMap()` / `putLoginInfo` 给的是 Map 语义；这五个对象的**方法面**有一张登记表 `test/sandboxSurface.ts`、语料差集必须为空 —— 见「第五十一 / 五十三轮」）                                                                                                                                                                                                   |
-| **cookie 罐**（`enabledCookieJar` 的源：收 `Set-Cookie` / 请求自动带 `Cookie` / 按源落库）          | 已实现（816 条源里 457 条开着这个东西；「搜索那一趟拿到的会话 cookie 能不能带到详情那一趟」就靠它 —— 见「`cookie` 罐」与「第五十四轮」）                                                                                                                                                                                                                                                                    |
+| 沙箱里的 `source` / `book` / `chapter` / `cookie` / `cache` / `infoMap` 全局                        | 已实现（见「沙箱里的全局对象」；`source.getKey()` 线上用了 413 次；`getLoginInfoMap()` / `putLoginInfo` 给的是 Map 语义；这五个对象的**方法面**有一张登记表 `test/sandboxSurface.ts`、语料差集必须为空 —— 见「第五十一 / 五十三轮」）                                                                                                           |
+| **cookie 罐**（`enabledCookieJar` 的源：收 `Set-Cookie` / 请求自动带 `Cookie` / 按源落库）          | 已实现（816 条源里 457 条开着这个东西；「搜索那一趟拿到的会话 cookie 能不能带到详情那一趟」就靠它 —— 见「`cookie` 罐」与「第五十四轮」）                                                                                                                                                                                                        |
 | 书源自带的 `jsLib` 全局函数库                                                                       | 已实现（35 条源在用；作为沙箱前置脚本执行，失败不中断但会说明原因）                                                                                                                                                                                                                                                                             |
 | 沙箱里的 `book` / `chapter` 上下文与**书的变量**（`book.getVariable` / `putVariable`）              | 已实现（`book.name` 54 处 / 39 源、`chapter.title` 32 处 / 30 源；变量落 `book_variables`，见「第三十五轮」）                                                                                                                                                                                                                                   |
 | `org.jsoup.Jsoup` + Element/Elements API                                                            | 已实现（宿主桥 + cheerio 句柄；写操作是空操作，未实现的方法报出方法名；`<script>` / `<style>` 也是元素 —— 见「第四十九轮」）                                                                                                                                                                                                                    |
@@ -1095,11 +1095,11 @@ HTTP 请求，所以罐子必须落库。
 
 三件事，缺一件整个机制就是空转（实现在 `src/lib/cookies.ts`）：
 
-| | 在哪做 | 说明 |
-| --- | --- | --- |
-| 收 | `lib/http.ts` 的 `fetchDetailed` | 每个响应的 `Set-Cookie` 进罐（只留 `名字=值`，属性全丢；`Max-Age=0` / 已过期的 `Expires` 是站点在删） |
-| 发 | 同上 | 请求前按「目标主机 + 各级父域」拼 `Cookie` 头；**书源自己声明了 `Cookie` 就不覆盖** |
-| 存 | `data/db.ts` 的 `saveSourceCookies` | 罐子变了就写穿（`sources.cookies`），一次站点会话通常只写一两次 |
+|     | 在哪做                              | 说明                                                                                                  |
+| --- | ----------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| 收  | `lib/http.ts` 的 `fetchDetailed`    | 每个响应的 `Set-Cookie` 进罐（只留 `名字=值`，属性全丢；`Max-Age=0` / 已过期的 `Expires` 是站点在删） |
+| 发  | 同上                                | 请求前按「目标主机 + 各级父域」拼 `Cookie` 头；**书源自己声明了 `Cookie` 就不覆盖**                   |
+| 存  | `data/db.ts` 的 `saveSourceCookies` | 罐子变了就写穿（`sources.cookies`），一次站点会话通常只写一两次                                       |
 
 **只有 `enabledCookieJar === true` 的书源才建罐子**（816 条里 457 条开着、359 条作者明确
 关掉了）—— 关掉的源连罐子都不建，`cookie.*` 退回「只活本次求值」的老行为，与它们
@@ -4645,13 +4645,13 @@ this.classNames = className.trim().split("\\s+");   // 然后要求**每一个**
 **一、先量。** 816 条源全都有 `enabledCookieJar` 这个字段，**457 条是 true、359 条 false** ——
 是作者明确表过态的。`cookie.*` 的用量（按开关切开）：
 
-| | 开 | 关 | |
-| --- | --- | --- | --- |
-| `getKey` | 338 | 0 | 全在 🏷起点 的发现页模板里 |
-| `removeCookie` | 48 | 24 | 清会话 |
-| `getCookie` | 12 | 1 | |
-| `setCookie` | 8 | 2 | |
-| `replaceCookie` | 1 | 0 | |
+|                 | 开  | 关  |                           |
+| --------------- | --- | --- | ------------------------- |
+| `getKey`        | 338 | 0   | 全在 🏷起点 的发现页模板里 |
+| `removeCookie`  | 48  | 24  | 清会话                    |
+| `getCookie`     | 12  | 1   |                           |
+| `setCookie`     | 8   | 2   |                           |
+| `replaceCookie` | 1   | 0   |                           |
 
 还有一条更关键的判据：**只读不写**的源（只用 `getCookie` / `getKey`，从不写）——
 它们读的东西**不可能来自自己写的**，只能来自站点下发。这样的源有 **4 个**
@@ -4661,11 +4661,11 @@ this.classNames = className.trim().split("\\s+");   // 然后要求**每一个**
 
 **二、三件事一起做（缺一件整个机制就是空转）。**
 
-| | 落在哪 | 怎么做 |
-| --- | --- | --- |
+|        | 落在哪                           | 怎么做                                                                                                |
+| ------ | -------------------------------- | ----------------------------------------------------------------------------------------------------- |
 | **收** | `lib/http.ts` 的 `fetchDetailed` | 每个响应的 `Set-Cookie` 进罐；只留 `名字=值`，属性全丢；`Max-Age=0` / 已过期的 `Expires` 当作站点在删 |
-| **发** | 同上 | 请求前按「目标主机 + 各级父域」拼 `Cookie` 头；**书源自己声明了 `Cookie` 就不覆盖** |
-| **存** | `sources.cookies`（迁移 0014） | 罐子真的变了才写穿；一次站点会话通常只写一两次 |
+| **发** | 同上                             | 请求前按「目标主机 + 各级父域」拼 `Cookie` 头；**书源自己声明了 `Cookie` 就不覆盖**                   |
+| **存** | `sources.cookies`（迁移 0014）   | 罐子真的变了才写穿；一次站点会话通常只写一两次                                                        |
 
 **三、四个刻意的设计选择**（都写进了代码注释，因为它们都是「看起来可以更简单」的地方）。
 
@@ -4709,10 +4709,20 @@ this.classNames = className.trim().split("\\s+");   // 然后要求**每一个**
 **五、线上核验**（`/api/probe` 报 `0.44.0`）。用 httpbin 的两个端点做真站点对照
 （都是 200，不依赖重定向）：`/response-headers?Set-Cookie=rc54%3D1` 下发，`/cookies` 回显收到了什么。
 
-| 场景 | 改前（0.43.0） | 改后（0.44.0） |
-| --- | --- | --- |
+| 场景                                                     | 改前（0.43.0）                                 | 改后（0.44.0）                               |
+| -------------------------------------------------------- | ---------------------------------------------- | -------------------------------------------- |
 | 临时源：搜索那一趟下发 cookie，正文那一趟请求 `/cookies` | `/cookies` 回 `{"cookies":{}}`（会话没带过去） | `/cookies` 回 **`{"cookies":{"rc54":"1"}}`** |
-| 同一个源把 `enabledCookieJar` 关掉 | — | 回 `{"cookies":{}}`（对照仍在） |
+| 同一个源把 `enabledCookieJar` 关掉                       | —                                              | 回 `{"cookies":{}}`（对照仍在）              |
+
+两条源打的是同一个地址、同一套规则，唯一差别就是那个开关，跑出来的就是上面这两行：
+
+```
+[enabledCookieJar: true ] /api/content = { "cookies": { "rc54": "1" } }
+[enabledCookieJar: false] /api/content = { "cookies": {} }
+```
+
+（「改前」那一栏不是另跑一遍 0.43.0 得出的，而是**关掉开关这一条**等价于它 ——
+0.43.0 根本没有罐子，`Set-Cookie` 没人收、后面那一趟也就没得带。）
 
 **这一轮仍然没做完的**
 
@@ -4951,23 +4961,23 @@ B 导入 → B 的书架、阅读位置（含「停在第几页」）、书签�
 冒烟跑的是内置站点 —— 它证明「运行时可跑」，但证明不了「线上 800 多条书源里没有漏网的」。
 有些结论只能拿整份集合去量，现在有十六个扫描（各自独立，都默认跳过）：
 
-| 扫描                            | 量什么                                                                                   |
-| ------------------------------- | ---------------------------------------------------------------------------------------- |
-| `ruleSplitting.scan.test.ts`    | 有没有一个 JS 区域被连接符切开（切碎了**不报错**，只是结果悄悄不对）                     |
-| `rulePrefix.scan.test.ts`       | `@css:`/`@json:`/`@js:`/`@xpath:` 的大小写写法有没有漏认、有没有多认                     |
-| `xpathRule.scan.test.ts`        | 拆掉取值后缀之后每一段 XPath 是否都能解析；`/@属性` 有没有被误当成后缀                   |
-| `resultShape.scan.test.ts`      | 脚本在 `result` 上调字符串方法 / 做下标访问时，绑法判得对不对                            |
-| `ruleTail.scan.test.ts`         | 规则尾巴的三种语义：`@js:` 的位置、空选择器、`###` 的分布                                |
-| `listMarker.scan.test.ts`       | 列表规则开头的 `+`：落在哪些字段、剥完是什么形态（是不是 AllInOne）                      |
-| `resultHtml.scan.test.ts`       | 改用「节点 HTML」会波及多少规则（影响面 / 风险面各多少处、是不是都真的需要标记）         |
-| `jsTailList.scan.test.ts`       | 列表规则里「`<js>` 块 + 尾段选择器」有哪些形状、各自落到哪条路（第三十六轮）             |
-| `listExtract.scan.test.ts`      | 列表规则**取值位**上的词有没有没判过性质的（标签 / 属性 / 键名，第三十七轮）             |
-| `listCssHeadIndex.scan.test.ts` | CSS 式首段末尾的**位置后缀**：能当序号的拆得出来吗、不像序号的有没有被误吞（第三十七轮） |
-| `bangIndex.scan.test.ts`        | 规则里的 `!` **排除下标**：每一处引擎都解析得出来吗（第三十七轮）                        |
-| `fieldCssStops.scan.test.ts`    | 字段规则里 CSS 式**多段 `@`** 的每一段中间段都判过性质吗（第三十八轮）                   |
-| `putGet.scan.test.ts`           | `@get:` / `@put:` / `init` 的量级、单键形状、括号配平与写法分类（第三十九轮）            |
-| `javaSurface.scan.test.ts`      | 脚本用到的 `java.*` 名字表里都有登记吗（没登记就是 `not a function`，第五十二轮）        |
-| `sandboxObjects.scan.test.ts`   | `source`/`book`/`chapter`/`cookie`/`cache` 上用到的方法都在表里吗（同上，第五十三轮）    |
+| 扫描                            | 量什么                                                                                           |
+| ------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `ruleSplitting.scan.test.ts`    | 有没有一个 JS 区域被连接符切开（切碎了**不报错**，只是结果悄悄不对）                             |
+| `rulePrefix.scan.test.ts`       | `@css:`/`@json:`/`@js:`/`@xpath:` 的大小写写法有没有漏认、有没有多认                             |
+| `xpathRule.scan.test.ts`        | 拆掉取值后缀之后每一段 XPath 是否都能解析；`/@属性` 有没有被误当成后缀                           |
+| `resultShape.scan.test.ts`      | 脚本在 `result` 上调字符串方法 / 做下标访问时，绑法判得对不对                                    |
+| `ruleTail.scan.test.ts`         | 规则尾巴的三种语义：`@js:` 的位置、空选择器、`###` 的分布                                        |
+| `listMarker.scan.test.ts`       | 列表规则开头的 `+`：落在哪些字段、剥完是什么形态（是不是 AllInOne）                              |
+| `resultHtml.scan.test.ts`       | 改用「节点 HTML」会波及多少规则（影响面 / 风险面各多少处、是不是都真的需要标记）                 |
+| `jsTailList.scan.test.ts`       | 列表规则里「`<js>` 块 + 尾段选择器」有哪些形状、各自落到哪条路（第三十六轮）                     |
+| `listExtract.scan.test.ts`      | 列表规则**取值位**上的词有没有没判过性质的（标签 / 属性 / 键名，第三十七轮）                     |
+| `listCssHeadIndex.scan.test.ts` | CSS 式首段末尾的**位置后缀**：能当序号的拆得出来吗、不像序号的有没有被误吞（第三十七轮）         |
+| `bangIndex.scan.test.ts`        | 规则里的 `!` **排除下标**：每一处引擎都解析得出来吗（第三十七轮）                                |
+| `fieldCssStops.scan.test.ts`    | 字段规则里 CSS 式**多段 `@`** 的每一段中间段都判过性质吗（第三十八轮）                           |
+| `putGet.scan.test.ts`           | `@get:` / `@put:` / `init` 的量级、单键形状、括号配平与写法分类（第三十九轮）                    |
+| `javaSurface.scan.test.ts`      | 脚本用到的 `java.*` 名字表里都有登记吗（没登记就是 `not a function`，第五十二轮）                |
+| `sandboxObjects.scan.test.ts`   | `source`/`book`/`chapter`/`cookie`/`cache` 上用到的方法都在表里吗（同上，第五十三轮）            |
 | `cookieJar.scan.test.ts`        | 只读 cookie（靠站点下发）的源有没有关掉 `enabledCookieJar`；开关与各方法的用量分布（第五十四轮） |
 
 ```bash
