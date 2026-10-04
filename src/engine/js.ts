@@ -159,6 +159,46 @@ export interface SandboxSession {
      * **这次写出去的值**，不是布尔。
      */
     loginOut?: { header?: string; info?: string }
+    /**
+     * 一个**批量求值会话**（第五十九轮）
+     *
+     * 由 `openSandboxBatch` 装上、`closeSandboxBatch` 拆掉：装上之后这一批里的每次
+     * 求值都复用同一个 runtime + context（静态预置只解析一次）。生命周期刻意很短 ——
+     * 由调用方在循环外开、循环结束就关，**绝不留到请求之外**（否则 WASM 内存会漏）。
+     */
+    batch?: SandboxBatch
+}
+
+/**
+ * 一个请求内**复用**的沙箱执行环境（第五十九轮）
+ *
+ * 为什么值得单独做一层：一次求值的固定代价实测 5.64ms，其中 **5.3ms 是重新解析
+ * 那 52KB 预置**（runtime + context 只要 0.34ms），而同一段改成「复用 context 重跑」
+ * 只要 0.01ms 量级。目录里的「逐条字段」正是「一本书几千条、每条一次」那种写法，
+ * 于是被这个代价逼出了 `MAX_MARKED_CHAPTERS = 300` 这个有损上限 —— 这一层就是为它做的。
+ *
+ * 三条边界（分别靠 `PER_EVAL_PRELUDE` / 每次重建的宿主桥 / `closeSandboxBatch` 守住）：
+ *   - 静态预置与 jsLib **只跑一次**；每次求值只重跑 PER_EVAL_PRELUDE
+ *   - 宿主**每次求值仍建一套自己的桥**（它闭包着这一次的日志、取网与时限），
+ *     求值结束就摘掉 —— 复用上下文不会把上一次的日志与取网带过来
+ *   - runtime / context 只在 `closeSandboxBatch` 里销毁，且在 `delete __host` 之后
+ *     （顺序原因见 `releaseHostBridge` 的说明）
+ */
+export interface SandboxBatch {
+    runtime: QuickJSAsyncRuntime
+    vm: QuickJSAsyncContext
+    /** 静态预置与 jsLib 跑过了没有 */
+    ready: boolean
+    /** 这一次求值被 setProp 到全局的那些名字 —— 下次求值前要先删掉，否则会串味 */
+    injected: string[]
+    /** 只卡 VM 内代码的时限（复用时要每次重设） */
+    deadline: number
+    /** 卡整次求值（含宿主侧等待）的时限 */
+    hardDeadline: number
+    /** 这一批里最近一次求值是不是被超时中断的 */
+    timedOut: boolean
+    /** 这一批已经跑过多少次求值（调用方据此轮换 context，见 ops.ts） */
+    runs: number
 }
 
 export function createSandboxSession(): SandboxSession {
@@ -173,6 +213,73 @@ export function createSandboxSession(): SandboxSession {
         queue: Promise.resolve(),
         vars: {},
         bookVars: {},
+    }
+}
+
+/**
+ * 开一个批量求值会话（见 `SandboxBatch`）
+ *
+ * 只做**便宜**的那部分：建 runtime + context、装上中断回调（它读 `batch` 上的时限，
+ * 于是每次求值只要改那两个字段）。静态预置与 jsLib 留给这一批的**第一次求值**去跑 ——
+ * 那时宿主桥才装得上，而预置里 `Packages` 之类在定义期就可能碰 `__host`。
+ *
+ * 已经开着就直接复用（重复开等于把上一次那个漏掉）。
+ */
+export async function openSandboxBatch(
+    session: SandboxSession,
+    limits: { timeoutMs?: number; memoryLimitBytes?: number; stackLimitBytes?: number } = {},
+): Promise<void> {
+    if (session.batch) return
+    const QuickJS = await session.module
+    const runtime = QuickJS.newRuntime()
+    runtime.setMemoryLimit(limits.memoryLimitBytes ?? DEFAULT_MEMORY_LIMIT)
+    runtime.setMaxStackSize(limits.stackLimitBytes ?? DEFAULT_STACK_LIMIT)
+    const batch: SandboxBatch = {
+        runtime,
+        vm: runtime.newContext(),
+        ready: false,
+        injected: [],
+        deadline: Number.POSITIVE_INFINITY,
+        hardDeadline: Number.POSITIVE_INFINITY,
+        timedOut: false,
+        runs: 0,
+    }
+    // 整批共用一个中断回调：时限每次求值由 executeInSandbox 重设（不能摘掉，
+    // 摘掉之后这一批剩下的求值就再也没有超时保护了）
+    runtime.setInterruptHandler(() => {
+        if (Date.now() > batch.deadline || Date.now() > batch.hardDeadline) {
+            batch.timedOut = true
+            return true
+        }
+        return false
+    })
+    session.batch = batch
+}
+
+/**
+ * 关掉批量求值会话（**必须**在循环结束后调，否则 WASM 内存一直挂着）
+ *
+ * 顺序与 `releaseHostBridge` 一致：先 `delete __host` 再销毁 runtime，否则
+ * quickjs-emscripten 0.32.0 在 asyncify 变体上会抛
+ * 「not found when trying to free HostRef」（那里有详细说明）。
+ */
+export function closeSandboxBatch(session: SandboxSession): void {
+    const batch = session.batch
+    if (!batch) return
+    session.batch = undefined
+    try {
+        batch.runtime.setInterruptHandler(() => false)
+        const cleanup = batch.vm.evalCode('delete globalThis.__host')
+        if (cleanup.error) cleanup.error.dispose()
+        else cleanup.value.dispose()
+    } catch {
+        /* 清理阶段的问题不该让请求失败 */
+    }
+    try {
+        batch.vm.dispose()
+        batch.runtime.dispose()
+    } catch {
+        /* 同上：结果早已取到，VM 也不再复用 */
     }
 }
 
@@ -214,24 +321,30 @@ const JAVA_PRELUDE = `
 // source 那一段与 collectSourceVariable。
 //
 // 注意：这一段是模板字符串的一部分，注释里**不能写反引号**。
-var __varsOut = (function () {
-  try { return JSON.parse(String(globalThis.__sourceVars || '{}')) || {} } catch (e) { return {} }
-})()
-
-// ---------------------------------------------------------------- 书的变量
-//
-// book.putVariable(名字, 值) / book.getVariable(名字)（以及 chapter 上的同名方法）
-// 读写的这张表 —— 与上面那张会话变量表分开，因为它**跨请求**：语料里
-// 📂掌阅书城 / 📂就去看网 / 📂言情小说 的正文规则会探一次「第几个选择器能解析出来」，
-// 再 book.putVariable('序', i) 记下来，下一章先读它、就不必重探。
-//
-// 起点是库里存的那一份（宿主每次求值注入 __bookVars），下面 __bookVarsDirty 只记
-// **这次求值写过的名字** —— 没写过的原名回传没有意义，全量写回还会多打几条 UPDATE。
-// 注意：这一段是模板字符串的一部分，注释里**不能写反引号**。
-var __bookVarsOut = (function () {
-  try { return JSON.parse(String(globalThis.__bookVars || '{}')) || {} } catch (e) { return {} }
-})()
+var __varsOut = {}
+var __bookVarsOut = {}
 var __bookVarsDirty = {}
+
+/**
+ * 把这一次求值的两张表装进来（第五十九轮）
+ *
+ * 以前这里是两个 IIFE：预置文本每求值一次就重新解析一遍，那 52KB 的解析占了
+ * 一次求值 5.6ms 里的 5.3ms。现在预置在一个请求里只解析一次，每次求值改跑
+ * 下面这些 __refresh*（见 PER_EVAL_PRELUDE 与 README 第五十九轮）。
+ */
+function __refreshVars() {
+  __varsOut = __tableOf(globalThis.__sourceVars)
+  __bookVarsOut = __tableOf(globalThis.__bookVars)
+  // 「这次求值写过的名字」每次都是新的：不重置的话上一章写过的会被再回传一次
+  __bookVarsDirty = {}
+}
+
+/** 把一段注入的 JSON 解析成表；坏了就当空表（书源里的坏值不该让整次求值挂掉） */
+function __tableOf(text) {
+  try { return JSON.parse(String(text || '{}')) || {} } catch (e) { return {} }
+}
+
+__refreshVars()
 
 /**
  * 给一个对象挂上 Legado 的 StrResponse 方法（body / code / statusCode / header(s) / url / raw）
@@ -818,9 +931,9 @@ function __toJavaMap(text) {
 // （🏷晋江文学 写的是 (typeof result)=="string" ? this.M("账号") : result.get("账号")）。
 // 只在**跑登录脚本**那一次注入了 __loginFields、而且宿主没有另外给 result 时才生效，
 // 平时的规则求值完全不受影响。
-if (globalThis.__loginFields !== undefined && globalThis.result === undefined) {
-  globalThis.result = __toJavaMap(globalThis.__loginFields)
-}
+//
+// 它挪到 PER_EVAL_PRELUDE 里了（第五十九轮）：这一步**每次求值都要重来**，
+// 而它依赖的 __toJavaMap 是静态的，两边分开正好
 
 // ---------------------------------------------------------------- book / chapter
 //
@@ -831,7 +944,17 @@ if (globalThis.__loginFields !== undefined && globalThis.result === undefined) {
 // book.bookUrl 32/16、book.origin 13/10、chapter.title 32/30、chapter.index 4/4。
 // 在此之前 ctx.book 从来没人赋过值，于是 '【' + book.name + '】' 拼出「【undefined】」
 // —— 不报错，只是结果不对，比抛异常难查得多。
-var book = (function () {
+/**
+ * 造一个 book 全局对象
+ *
+ * 第五十九轮：从「每次求值都把整段预置重新解析一遍」改成「预置只解析一次、
+ * 每次求值**重新造一个对象**」—— 方法体写在这个函数里，于是也只解析一次，
+ * 而每次调用只是新建几个函数对象（0.01ms 量级，见 README 第五十九轮）。
+ *
+ * 必须是「造」而不是「改」：宿主每次求值会把**裸数据**注入成全局 book，
+ * 那个名字正好会盖掉这个对象 —— 所以只能等注入之后重新造一个，不能就地改。
+ */
+function __buildBook() {
   var data = globalThis.book || {}
   var obj = {}
   for (var k in data) obj[k] = data[k]
@@ -878,7 +1001,8 @@ var book = (function () {
     obj.customVariable = value === undefined || value === null ? '' : String(value)
   }
   return obj
-})()
+}
+var book = __buildBook()
 
 // 当前这一章（chapter.title 32 处 / 30 源、chapter.index 4 处 / 4 源）
 //
@@ -886,7 +1010,8 @@ var book = (function () {
 // chapter.getVariable 是 0 处、只有 📂就去看网 / 📂言情小说 写 chapter.putVariable("next", …)
 // （而且读回来用的是 java.get("next")，不是 chapter.getVariable）。各自一张的话，
 // 写进去的值没有任何人能读到；共表既不报错，也顺带让它跨请求留住。
-var chapter = (function () {
+/** 造一个 chapter 全局对象（理由同 __buildBook） */
+function __buildChapter() {
   var data = globalThis.chapter || {}
   var obj = {}
   for (var k in data) obj[k] = data[k]
@@ -906,11 +1031,13 @@ var chapter = (function () {
   // 节点集在宿主侧是共享的，改它会串到同一份文档的其它句柄上，所以是空实现。
   obj.putImgUrl = function () {}
   return obj
-})()
+}
+var chapter = __buildChapter()
 
 // ---------------------------------------------------------------- source
 
-var source = (function () {
+/** 造一个 source 全局对象（理由同 __buildBook） */
+function __buildSource() {
   var data = globalThis.__source || {}
   // 会话变量表：只给两参写法（source.setVariable(k, v)）与 source.get(k) 用，
   // 与 java.put / java.get(k) 共用同一张（两条路各存一份的话，脚本里 put 完
@@ -923,10 +1050,12 @@ var source = (function () {
     obj[k] = data[k]
   }
   obj.key = data.key === undefined || data.key === null ? '' : String(data.key)
+  obj.variable = data.variable === undefined || data.variable === null ? '' : String(data.variable)
+  obj.__loginHeader = String(globalThis.__loginHeader || '')
+  obj.__loginInfo = String(globalThis.__loginInfo || '')
 
   obj.getKey = function () { return String(obj.key || '') }
-  // 书源自己的 variable（Legado 的 BookSource.variable）。起点是空串，由书源自己填。
-  obj.variable = data.variable === undefined || data.variable === null ? '' : String(data.variable)
+  // 书源自己的 variable（Legado 的 BookSource.variable）：起点是空串，由书源自己填
 
   // 两种读法，按**参数个数**分派（与 java.get 同一套思路）：
   //   无参 -> 书源自己的 variable 字符串（Legado 的 getVariable()，线上 126 处）
@@ -967,8 +1096,6 @@ var source = (function () {
    * 线上 15 处 putLoginHeader / 8 处 putLoginInfo 写、30 处 getLoginHeader* / 28 处
    * getLoginInfo* 读，两边一直对不上（见「第五十七轮」）。
    */
-  obj.__loginHeader = String(globalThis.__loginHeader || '')
-  obj.__loginInfo = String(globalThis.__loginInfo || '')
   obj.getLoginHeader = function () { return String(obj.__loginHeader || '') }
   obj.getLoginHeaderMap = function () { return __toJavaMap(obj.__loginHeader) }
   obj.putLoginHeader = function (header) {
@@ -1021,7 +1148,8 @@ var source = (function () {
   obj.refreshExplore = function () { java.refreshExplore() }
   obj.setExploreScreen = function () {}
   return obj
-})()
+}
+var source = __buildSource()
 
 // ---------------------------------------------------------------- cookie / cache
 //
@@ -1105,7 +1233,8 @@ function __cookieMerge(existing, incoming) {
   return out.join('; ')
 }
 
-var cookie = (function () {
+/** 造一个 cookie 全局对象（理由同 __buildBook） */
+function __buildCookie() {
   var jar = {}
   var dirty = {}
   try {
@@ -1142,7 +1271,7 @@ var cookie = (function () {
     return out.join('; ')
   }
 
-  return {
+  var api = {
     getCookie: function (url) { return stored(url) },
     getCookieMap: function () { return jar },
     getKey: function (url, key) {
@@ -1175,9 +1304,12 @@ var cookie = (function () {
       touch(host)
     },
   }
-})()
+  return api
+}
+var cookie = __buildCookie()
 
-var cache = (function () {
+/** 造一个 cache 全局对象（理由同 __buildBook；它没有「站点下发」这个来源，每次都是空的） */
+function __buildCache() {
   var memory = {}
   return {
     get: function (name) { var v = memory[String(name)]; return v === undefined ? '' : v },
@@ -1192,7 +1324,8 @@ var cache = (function () {
     getFileUrl: function () { return '' },
     putFileUrl: function () {},
   }
-})()
+}
+var cache = __buildCache()
 
 /** 发现页筛选器的当前选择。我们不做那套交互界面，所以是空的，脚本会落到自己写的默认值 */
 var infoMap = globalThis.__infoMap || {}
@@ -1570,6 +1703,65 @@ var Packages = (function () {
 // 包成什么**看绑进来的类型**：
 //   - 字符串（命中 1 个、或脚本按字符串用）→ __boxHtml，一份文档 + jsoup 方法
 //   - 数组（多命中、脚本按 jsoup 用）      → __elemsFrom，N 个元素 + 集合级方法
+//
+// 这几句挪到 PER_EVAL_PRELUDE 里了（第五十九轮）：result 每次求值都不一样，
+// 而它用到的 org.jsoup 是静态的
+`
+
+/**
+ * **每次求值**要重跑的那一小段（第五十九轮）
+ *
+ * 背景：一次沙箱求值的固定代价约 5.6ms，其中 **5.3ms 是重新解析上面那 52KB 预置** ——
+ * 而目录里「逐条字段」那种规则（一本两千章的书 × 三条 `@js:` 字段 = 上万次求值）
+ * 正是它当年逼出了 `MAX_MARKED_CHAPTERS = 300` 那道有损上限（第五十九轮已经放开）
+ *
+ * 所以预置拆成两段：
+ *   - 静态段（JAVA_PRELUDE / GLOBALS_PRELUDE）：函数与对象定义，**一个请求只解析一次**
+ *   - 本段：每次都把「这次求值的数据」装进那几个全局对象，并清掉上一次的回传值
+ *
+ * 三条约束，缺一条就会出**静默错值**（而不是报错）：
+ *   1. **顺序**：两张变量表先换新（`__build*` 要读它们），再重新造那几个对象
+ *   2. **只清「回传值」**：`__xxxOut` 这些是宿主求值后读的，不清就会把上一次写过的
+ *      登录头 / 书变量 / cookie 改动再回传一遍；而 `result` / `book` / `__xxx` 这些
+ *      **输入**一个字都不能动（它们刚由宿主 setProp 注进来）
+ *   3. **必须是「造」而不是「改」**：宿主注入的裸数据用的名字正好是 `book` / `chapter`，
+ *      会直接把上一轮造好的对象盖掉 —— 于是只能重新造一个。这一条是冒烟第 43 段
+ *      逼出来的：第一版写成「就地刷新」，报的是 `book.__refresh` 不是函数
+ *
+ * 注意：这一段也是模板字符串的一部分，注释里**不能写反引号**。
+ */
+const PER_EVAL_PRELUDE_BASE = `
+// 1) 两张变量表换新（下面的 __build* 会读它们，所以必须最先）
+__refreshVars()
+// 2) 清掉上一次的回传值（宿主在这之后才读它们，见 collectSourceVariable / collectBookVars
+//    / collectCookies / collectLogin）。注意**不能**动 result / book / chapter / __xxx：
+//    那些是这次求值的输入，刚由宿主注入
+delete globalThis.__sourceVariableOut
+delete globalThis.__loginHeaderOut
+delete globalThis.__loginInfoOut
+delete globalThis.__cookieJarOut
+// 3) 重新造那几个全局对象。**必须是「造」而不是「改」**：宿主每次求值注入的是裸数据，
+//    而它注入的名字正好就是 book / chapter —— 会直接把上一轮造好的对象盖掉
+book = __buildBook()
+chapter = __buildChapter()
+source = __buildSource()
+cookie = __buildCookie()
+cache = __buildCache()
+infoMap = globalThis.__infoMap || {}
+`
+
+/**
+ * 两段预置**共用的尾段**（第五十九轮）
+ *
+ * 这两步依赖「这次求值的 result」，所以复用路径要重跑；而**单独求值那条路**
+ * （不开批的绝大多数求值）也必须跑 —— 第一版只把它放进 PER_EVAL_PRELUDE，
+ * 于是普通求值里 `result` 不再被包成 jsoup 对象、登录表单也不再铺进去，
+ * 冒烟第 40 段那几条与第 45 段第 ④ 条当场报出来。
+ * 所以它单独成一段，由两处**拼**上去（`GLOBALS_PRELUDE + PER_EVAL_TAIL`），
+ * 免得两边写法漂移。
+ */
+const PER_EVAL_TAIL = `
+// result 的两种语义（要用到静态段里的 org.jsoup）
 if (globalThis.__resultAsJsoup) {
   if (Array.isArray(globalThis.result)) {
     globalThis.result = __elemsFrom(globalThis.result)
@@ -1577,7 +1769,14 @@ if (globalThis.__resultAsJsoup) {
     globalThis.result = __boxHtml(globalThis.result)
   }
 }
+// 登录表单：把用户填的字段包成 result（只在跑登录脚本那一次注入）
+if (globalThis.__loginFields !== undefined && globalThis.result === undefined) {
+  globalThis.result = __toJavaMap(globalThis.__loginFields)
+}
 `
+
+/** 复用路径每次求值要重跑的那一段（见上面 `PER_EVAL_PRELUDE_BASE` 与 `PER_EVAL_TAIL`） */
+const PER_EVAL_PRELUDE = PER_EVAL_PRELUDE_BASE + PER_EVAL_TAIL
 
 /**
  * `java.getString(规则)` 的能力
@@ -1703,9 +1902,21 @@ async function executeInSandbox(
 
     const QuickJS = await modulePromise
 
-    const runtime = QuickJS.newRuntime()
-    runtime.setMemoryLimit(memoryLimit)
-    runtime.setMaxStackSize(stackLimit)
+    /**
+     * 复用同一个批量会话的 runtime + context（第五十九轮，见 `SandboxBatch`）
+     *
+     * `limits.session.batch` 有值说明调用方在循环外面开了批：静态预置与 jsLib 只在
+     * **这一批的第一次求值**里跑，之后每次只重跑 PER_EVAL_PRELUDE —— 省下的正是
+     * 「重新解析 52KB 预置」那 5.3ms（一次求值总共才 5.64ms）。
+     */
+    const batch = limits.session?.batch
+    const reuse = batch !== undefined
+
+    const runtime = reuse ? batch.runtime : QuickJS.newRuntime()
+    if (!reuse) {
+        runtime.setMemoryLimit(memoryLimit)
+        runtime.setMaxStackSize(stackLimit)
+    }
 
     // 两套时限：
     //   deadline  只卡 VM 里跑的代码（中断回调只管得到这里）
@@ -1715,15 +1926,27 @@ async function executeInSandbox(
     const hardDeadline = started + totalTimeoutMs
 
     let timedOut = false
-    runtime.setInterruptHandler(() => {
-        if (Date.now() > deadline || Date.now() > hardDeadline) {
-            timedOut = true
-            return true
-        }
-        return false
-    })
+    if (reuse) {
+        // 复用路径：中断回调是整批共用的那一个（见 openSandboxBatch），这里只重设时限。
+        // **不能**把它摘掉 —— 摘掉之后这一批剩下的求值就再也没有超时保护了。
+        batch.timedOut = false
+        batch.deadline = deadline
+        batch.hardDeadline = hardDeadline
+        batch.runs += 1
+    } else {
+        runtime.setInterruptHandler(() => {
+            if (Date.now() > deadline || Date.now() > hardDeadline) {
+                timedOut = true
+                return true
+            }
+            return false
+        })
+    }
 
-    const vm = runtime.newContext()
+    /** 「这次是不是被超时打断的」—— 复用与独享两条路把这个答案放在两个地方 */
+    const timedOutNow = () => (reuse ? batch.timedOut : timedOut)
+
+    const vm = reuse ? batch.vm : runtime.newContext()
     const logs: string[] = []
     let httpCalls = 0
 
@@ -1989,31 +2212,84 @@ async function executeInSandbox(
         vm.setProp(vm.global, '__host', host)
         host.dispose()
 
-        // 注入变量：走 JSON.parse，这样数组/对象/数字的类型都能保住
-        for (const [key, value] of Object.entries(globals)) {
-            if (value === undefined) continue
-            const json = JSON.stringify(value ?? null)
-            const handle = vm.evalCode(`JSON.parse(${JSON.stringify(json)})`)
-            if (handle.error) {
-                handle.error.dispose()
-                continue
-            }
-            vm.setProp(vm.global, key, handle.value)
-            handle.value.dispose()
+        /**
+         * 复用路径：先把**上一次**注入的那些名字删掉
+         *
+         * 不删就会串味：这一次没注入 `result`（比如一段不带 result 的代码）时，
+         * 上一次那个 `result` 还挂在全局上，规则会读到**上一次的值** —— 而且不报错。
+         * 这正是复用上下文最危险的那种错，所以删名单要跟着注入一起维护。
+         */
+        if (reuse && batch.injected.length > 0) {
+            const clear = vm.evalCode(
+                batch.injected.map((key) => `delete globalThis[${JSON.stringify(key)}]`).join(';'),
+            )
+            if (clear.error) clear.error.dispose()
+            else clear.value.dispose()
+            batch.injected = []
         }
 
-        // 两段预置：先 java（它要用 __host），再它依赖 java 的那几个全局对象
-        for (const [label, source] of [
-            ['java 助手', JAVA_PRELUDE],
-            ['全局对象', GLOBALS_PRELUDE],
-        ] as const) {
-            const prelude = vm.evalCode(source)
-            if (prelude.error) {
-                const msg = String(vm.dump(prelude.error))
-                prelude.error.dispose()
-                throw new SandboxError(`沙箱预置失败（${label}）：${msg}`)
+        /**
+         * 注入变量：走 JSON.parse，这样数组/对象/数字的类型都能保住
+         *
+         * 第五十九轮把它们**合成一次求值**：以前一个全局一次 `evalCode`，一批要过
+         * 十几次宿主↔VM 边界 —— 复用 context 之后那点开销反而成了大头。
+         * 一个值坏掉只跳过它（与以前一样，书源里的坏值不该让整次求值挂掉）。
+         */
+        const assignments: string[] = []
+        for (const [key, value] of Object.entries(globals)) {
+            if (value === undefined) continue
+            let json: string
+            try {
+                json = JSON.stringify(value ?? null)
+            } catch {
+                continue
             }
-            prelude.value.dispose()
+            assignments.push(
+                `globalThis[${JSON.stringify(key)}] = JSON.parse(${JSON.stringify(json)})`,
+            )
+            // 记下来，下一次求值前要删掉（见上面那段）
+            if (reuse) batch.injected.push(key)
+        }
+        if (assignments.length > 0) {
+            const injected = vm.evalCode(assignments.join(';'))
+            if (injected.error) injected.error.dispose()
+            else injected.value.dispose()
+        }
+
+        if (reuse && batch.ready) {
+            /**
+             * 复用路径的第 2..n 次：静态预置已经在 context 里了，只把**这次的数据**装进去
+             *
+             * 这一段是这一轮的关键：省掉「重新解析 52KB 预置」那 5.3ms，
+             * 只重跑 PER_EVAL_PRELUDE（实测 0.01ms 量级）。
+             */
+            const per = vm.evalCode(PER_EVAL_PRELUDE)
+            if (per.error) {
+                const dumped = vm.dump(per.error)
+                per.error.dispose()
+                // 用 describeSandboxError 而不是 String(dump)：后者对错误对象只会给
+                // 一句 [object Object]，而这一段出错的排查成本很高（只在复用路径上）
+                throw new SandboxError(
+                    `沙箱预置失败（每次求值那段）：${describeSandboxError(dumped)}`,
+                )
+            }
+            per.value.dispose()
+        } else {
+            // 两段预置：先 java（它要用 __host），再它依赖 java 的那几个全局对象
+            // （这两段各自的结尾都会把这次求值的数据装进那几个全局对象；
+            //  尾段是两段路径共用的，见 PER_EVAL_TAIL）
+            for (const [label, source] of [
+                ['java 助手', JAVA_PRELUDE],
+                ['全局对象', GLOBALS_PRELUDE + PER_EVAL_TAIL],
+            ] as const) {
+                const prelude = vm.evalCode(source)
+                if (prelude.error) {
+                    const msg = String(vm.dump(prelude.error))
+                    prelude.error.dispose()
+                    throw new SandboxError(`沙箱预置失败（${label}）：${msg}`)
+                }
+                prelude.value.dispose()
+            }
         }
 
         /**
@@ -2025,7 +2301,7 @@ async function executeInSandbox(
          * 失败不中断：库常常「前面定义函数、后面算常量」，中途失败时已定义的部分照样可用。
          * 把失败原因挂成全局，规则再失败时一并报出来，这样「缺的名字来自哪」一眼可见。
          */
-        if (limits.preludeJs && limits.preludeJs.trim() !== '') {
+        if ((!reuse || !batch.ready) && limits.preludeJs && limits.preludeJs.trim() !== '') {
             const lib = await vm.evalCodeAsync(limits.preludeJs)
             if (lib.error) {
                 const dumped = vm.dump(lib.error)
@@ -2039,6 +2315,12 @@ async function executeInSandbox(
                 lib.value.dispose()
             }
         }
+
+        /**
+         * 复用路径：静态预置与 jsLib 都跑完了，给这一批打上标记 ——
+         * 后面的求值直接走「只重跑 PER_EVAL_PRELUDE」那条路
+         */
+        if (reuse) batch.ready = true
 
         // evalCodeAsync 会在脚本调用 asyncify 函数时自动驱动挂起的任务，
         // 直到脚本跑完；不需要手工轮询 executePendingJobs
@@ -2058,7 +2340,7 @@ async function executeInSandbox(
         outcome.value.dispose()
         return value
     } catch (err) {
-        if (timedOut) {
+        if (timedOutNow()) {
             throw new SandboxError(`规则脚本超时（>${timeoutMs}ms），已中断`)
         }
         throw err
@@ -2078,7 +2360,8 @@ async function executeInSandbox(
          * 而它唯一的出口就是 toast。不留这一份，接口只能回一句「跑完了」。
          */
         session.lastLogs = logs
-        releaseHostBridge(vm, runtime)
+        // 复用路径下**不销毁** runtime / context（那是整批共用的，由 closeSandboxBatch 收尾）
+        releaseHostBridge(vm, runtime, batch)
     }
 }
 
@@ -2123,10 +2406,24 @@ function collectSourceVars(vm: QuickJSAsyncContext, session: SandboxSession): vo
  * 销毁路径随之恢复干净。实测：不摘会抛错；只调 vm.dispose() 也不抛但
  * 少释放一层；摘掉再按正常顺序销毁则完全正常。
  */
-function releaseHostBridge(vm: QuickJSAsyncContext, runtime: QuickJSAsyncRuntime): void {
+function releaseHostBridge(
+    vm: QuickJSAsyncContext,
+    runtime: QuickJSAsyncRuntime,
+    batch?: SandboxBatch,
+): void {
     try {
-        // 清理阶段不该再被超时打断（脚本可能因为超时才走到这里）
-        runtime.setInterruptHandler(() => false)
+        if (batch) {
+            /**
+             * 复用路径：清理阶段也别被超时打断 —— 但**不能**把中断回调摘掉，
+             * 那一个是整批共用的，摘掉之后这一批剩下的求值就没有超时保护了。
+             * 于是改成把两个时限推到无穷（下次求值会重新设）。
+             */
+            batch.deadline = Number.POSITIVE_INFINITY
+            batch.hardDeadline = Number.POSITIVE_INFINITY
+        } else {
+            // 清理阶段不该再被超时打断（脚本可能因为超时才走到这里）
+            runtime.setInterruptHandler(() => false)
+        }
 
         const cleanup = vm.evalCode('delete globalThis.__host')
         if (cleanup.error) cleanup.error.dispose()
@@ -2134,6 +2431,9 @@ function releaseHostBridge(vm: QuickJSAsyncContext, runtime: QuickJSAsyncRuntime
     } catch {
         // 脚本已经把 VM 弄坏了也不影响结果：下面照常销毁
     }
+
+    // 复用路径到此为止：runtime / context 是整批共用的，交给 closeSandboxBatch
+    if (batch) return
 
     try {
         vm.dispose()

@@ -964,9 +964,11 @@ export async function handleFixture(request: Request, url: URL): Promise<Respons
      *   `time` 一律有值，用来验更新时间的展示
      *
      * `?n=` 控制条数 —— 冒烟那边既用它验字段，也用它量「逐条字段要走沙箱时」的代价。
+     * 上限从 500 抬到 1600 是第五十九轮的事：那一轮要验「逐条标注的上限 1200」这道边界，
+     * 而边界本身在 1200 条上。
      */
     if (pathname === '/fixture/api/toc') {
-        const n = Math.max(1, Math.min(500, Number(url.searchParams.get('n') ?? '5') || 5))
+        const n = Math.max(1, Math.min(1600, Number(url.searchParams.get('n') ?? '5') || 5))
         const chapters: Record<string, unknown>[] = []
         for (let i = 1; i <= n; i++) {
             if (i === 3) {

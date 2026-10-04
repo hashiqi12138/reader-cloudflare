@@ -14,6 +14,7 @@ import {
     type Selection,
 } from '../engine/analyze'
 import { ruleHasJs } from '../engine/directives'
+import { closeSandboxBatch, openSandboxBatch, type SandboxSession } from '../engine/js'
 import type { BookSource, Chapter, RuleContext, SearchBook } from '../engine/types'
 import { SEARCH_TIMEOUT_MS, UpstreamError, fetchText } from '../lib/http'
 import { tocFlag, tocText } from './chapterFields'
@@ -491,10 +492,29 @@ const MAX_TOC_PAGES = 20
  *
  * 而它们都只是**标注**：没有它们目录照样能读，有它们更好。所以给一个上限，
  * 超过就停下、并在 `warning` 里说清楚（**不静默** —— 「少了一截」必须让用户看见）。
- * 300 覆盖得住绝大多数书的目录长度；真要读超长的书，该先解决的是
- * 「每次求值都要重新解析一遍预置脚本」这件事，而不是在这里赌平台会放过我们。
+ *
+ * **第五十九轮把这条上限按实测重定了：300 → 1200。** 根因查清并做掉了：一次求值
+ * 5.64ms 里有 5.3ms 是**重新解析那 52KB 预置**（runtime + context 只要 0.34ms），
+ * 而目录这一轮改成**批量求值**（同一个 context 里只重跑 PER_EVAL_PRELUDE，见
+ * `openSandboxBatch`）。冒烟第 43 段实测同一件事：**900 次求值 7484ms → 805ms**，
+ * 一次求值从 8.3ms 降到 0.9ms。
+ *
+ * 为什么不是彻底取消：剩下的 0.9ms 已经与预置无关，而是**每次求值都要过几趟
+ * 宿主↔VM 边界**（装一次宿主桥、注入全局、收回变量/书变量/cookie/登录态）——
+ * 想再往上抬就得把那条路也合起来（记在 README 第五十九轮的「还没做完」里）。
+ * 1200 条 × 四条逐条字段 ≈ 4800 次求值 ≈ 3.4 秒，这是当前愿意接受的单请求上限；
+ * 而**纯选择器 / 裸字段名**那一类（语料里过半）依旧不设限。
  */
-const MAX_MARKED_CHAPTERS = 300
+const MAX_MARKED_CHAPTERS = 1200
+
+/**
+ * 一批里求值多少次之后**换一个 context**
+ *
+ * 复用省时间，代价是「规则里新建的全局名」与垃圾都留在同一个 context 里（这是
+ * 这一轮明知的取舍，见 README 第五十九轮）。轮换让它定期归零：代价是每 400 次
+ * 多花一次 5.3ms 的预置解析，换的是「一本书一万次求值也不会把 8MB 内存吃满」。
+ */
+const BATCH_ROTATE_EVALS = 400
 
 /** 目录结果 */
 export interface TocResult {
@@ -531,108 +551,136 @@ export async function fetchChapters(
     const markRules = [rule.isVip, rule.isPay, rule.isVolume, rule.updateTime].filter(
         (r): r is string => typeof r === 'string' && r.trim() !== '',
     )
-    const markCap = markRules.some((r) => ruleHasJs(r)) ? MAX_MARKED_CHAPTERS : Infinity
+    const markHasJs = markRules.some((r) => ruleHasJs(r))
+    const markCap = markHasJs ? MAX_MARKED_CHAPTERS : Infinity
     /** 已经为多少条求过逐条标注了（跨页累计） */
     let markedCount = 0
     let marksTruncated = false
+
+    /**
+     * 要走沙箱的逐条字段 → 开一个**批量求值会话**（第五十九轮）
+     *
+     * 以前是「每条一次独立求值」，每次都要重新解析 52KB 预置（5.3ms）—— 上限就是这么来的。
+     * 现在同一个 context 里只重跑 PER_EVAL_PRELUDE（0.01ms 量级），于是上限可以放开。
+     *
+     * 开在循环外、`finally` 里关掉：batch 占着 WASM 内存，绝不能留到请求之外。
+     */
+    const session = ctx.sandbox as SandboxSession | undefined
+    let batchOpen = false
+    if (markHasJs && session) {
+        await openSandboxBatch(session)
+        batchOpen = true
+    }
 
     let currentUrl = tocUrl
     // 目录这一组里写的跨请求键（比如 `🏛名著阅读` 的 `img`，正文那次请求要读）：
     // 在循环外算一次；`writeInfoVar` 每个键一次请求只落一次，所以逐页求值也不会写爆
     const crossKeys = crossRequestInfoKeys(source, 'ruleToc')
-    for (let page = 0; page < MAX_TOC_PAGES; page += 1) {
-        if (visitedTocUrls.has(currentUrl)) break
-        visitedTocUrls.add(currentUrl)
+    try {
+        for (let page = 0; page < MAX_TOC_PAGES; page += 1) {
+            if (visitedTocUrls.has(currentUrl)) break
+            visitedTocUrls.add(currentUrl)
 
-        let plan
-        let html: string
-        try {
-            plan = await buildPlan(currentUrl, source, { ...ctx, baseUrl: currentUrl })
-            html = await fetchText(plan)
-        } catch (err) {
-            // 第一页就失败：手上没有任何章节，如实报错
-            if (chapters.length === 0) throw err
-            // 后续页失败：**保留已经拿到的章节**，只记一条说明。
-            // 真实站点上这很常见 —— 最后一页被删、或书源的翻页地址算错，
-            // 一次 404 就把前面几百章全丢掉，比「章节不全」更糟：
-            // 用户看到的是一个错误页，而其实书是能读的。
-            notes.push(
-                `翻页到第 ${page + 1} 页时中断：${err instanceof Error ? err.message : String(err)}`,
-            )
-            break
-        }
-
-        const sel = rootSelection(html)
-        const tocCtx: RuleContext = {
-            ...ctx,
-            baseUrl: plan.url,
-            http: sandboxHttp(source, plan.url),
-            infoVarCrossKeys: crossKeys,
-        }
-
-        const items = await analyzeSelections(sel, rule.chapterList, tocCtx)
-        for (const item of items) {
-            const name = await analyzeString(item, rule.chapterName ?? 'text', tocCtx)
-            if (!name) continue
-
-            /**
-             * 与 `chapterName` 同层的四条逐条字段（第五十六轮开始取）
-             *
-             * 它们以前整片丢掉 —— 目录里于是看不出哪一章要钱、也看不到卷与更新时间。
-             * 判据（`tocFlag`）在 `chapterFields.ts` 里写清楚了：语料里既有
-             * 「取到标记文本就算」的写法，也有「脚本回 true / false」的写法，
-             * 只按非空判会把脚本回的 `false` 当成要付费。
-             *
-             * 超过 `MAX_MARKED_CHAPTERS` 之后不再求值（代价见那个常量的说明），
-             * 并在 warning 里说出来。
-             */
-            const marked = markedCount < markCap
-            const hasMarks = markRules.length > 0
-            const isVolume =
-                rule.isVolume && marked
-                    ? tocFlag(await analyzeString(item, rule.isVolume, tocCtx))
-                    : false
-
-            const urlRaw = await analyzeAddress(item, rule.chapterUrl ?? 'tag.a@href', tocCtx)
-            const url = urlRaw ? resolveAddress(urlRaw, plan.url) : ''
-            /**
-             * 卷标题通常**没有正文地址**（`chapterUrl` 在那一行取到的是卷名那段文本），
-             * 但它要留在列表里当分组标题 —— 所以判据从「没地址就丢」改成
-             * 「既没地址又不是卷，才丢」。
-             */
-            if (url === '' && !isVolume) continue
-            // 去重只在有地址时做：卷标题多半都是空地址，按空串去重会把它们合并成一条
-            if (url !== '') {
-                if (seenChapterUrls.has(url)) continue
-                seenChapterUrls.add(url)
+            let plan
+            let html: string
+            try {
+                plan = await buildPlan(currentUrl, source, { ...ctx, baseUrl: currentUrl })
+                html = await fetchText(plan)
+            } catch (err) {
+                // 第一页就失败：手上没有任何章节，如实报错
+                if (chapters.length === 0) throw err
+                // 后续页失败：**保留已经拿到的章节**，只记一条说明。
+                // 真实站点上这很常见 —— 最后一页被删、或书源的翻页地址算错，
+                // 一次 404 就把前面几百章全丢掉，比「章节不全」更糟：
+                // 用户看到的是一个错误页，而其实书是能读的。
+                notes.push(
+                    `翻页到第 ${page + 1} 页时中断：${err instanceof Error ? err.message : String(err)}`,
+                )
+                break
             }
 
-            const chapter: Chapter = { name, url }
-            if (isVolume) chapter.isVolume = true
-            if (marked) {
-                if (rule.isVip)
-                    chapter.isVip = tocFlag(await analyzeString(item, rule.isVip, tocCtx))
-                if (rule.isPay)
-                    chapter.isPay = tocFlag(await analyzeString(item, rule.isPay, tocCtx))
-                if (rule.updateTime) {
-                    chapter.updateTime = tocText(await analyzeString(item, rule.updateTime, tocCtx))
+            const sel = rootSelection(html)
+            const tocCtx: RuleContext = {
+                ...ctx,
+                baseUrl: plan.url,
+                http: sandboxHttp(source, plan.url),
+                infoVarCrossKeys: crossKeys,
+            }
+
+            const items = await analyzeSelections(sel, rule.chapterList, tocCtx)
+            for (const item of items) {
+                // 每 BATCH_ROTATE_EVALS 次换一个 context：让规则留下的全局名与垃圾归零
+                if (batchOpen && session?.batch && session.batch.runs >= BATCH_ROTATE_EVALS) {
+                    closeSandboxBatch(session)
+                    await openSandboxBatch(session)
                 }
-                markedCount += 1
-            } else if (hasMarks) {
-                marksTruncated = true
+                const name = await analyzeString(item, rule.chapterName ?? 'text', tocCtx)
+                if (!name) continue
+
+                /**
+                 * 与 `chapterName` 同层的四条逐条字段（第五十六轮开始取）
+                 *
+                 * 它们以前整片丢掉 —— 目录里于是看不出哪一章要钱、也看不到卷与更新时间。
+                 * 判据（`tocFlag`）在 `chapterFields.ts` 里写清楚了：语料里既有
+                 * 「取到标记文本就算」的写法，也有「脚本回 true / false」的写法，
+                 * 只按非空判会把脚本回的 `false` 当成要付费。
+                 *
+                 * 超过 `MAX_MARKED_CHAPTERS` 之后不再求值（代价见那个常量的说明），
+                 * 并在 warning 里说出来。
+                 */
+                const marked = markedCount < markCap
+                const hasMarks = markRules.length > 0
+                const isVolume =
+                    rule.isVolume && marked
+                        ? tocFlag(await analyzeString(item, rule.isVolume, tocCtx))
+                        : false
+
+                const urlRaw = await analyzeAddress(item, rule.chapterUrl ?? 'tag.a@href', tocCtx)
+                const url = urlRaw ? resolveAddress(urlRaw, plan.url) : ''
+                /**
+                 * 卷标题通常**没有正文地址**（`chapterUrl` 在那一行取到的是卷名那段文本），
+                 * 但它要留在列表里当分组标题 —— 所以判据从「没地址就丢」改成
+                 * 「既没地址又不是卷，才丢」。
+                 */
+                if (url === '' && !isVolume) continue
+                // 去重只在有地址时做：卷标题多半都是空地址，按空串去重会把它们合并成一条
+                if (url !== '') {
+                    if (seenChapterUrls.has(url)) continue
+                    seenChapterUrls.add(url)
+                }
+
+                const chapter: Chapter = { name, url }
+                if (isVolume) chapter.isVolume = true
+                if (marked) {
+                    if (rule.isVip)
+                        chapter.isVip = tocFlag(await analyzeString(item, rule.isVip, tocCtx))
+                    if (rule.isPay)
+                        chapter.isPay = tocFlag(await analyzeString(item, rule.isPay, tocCtx))
+                    if (rule.updateTime) {
+                        chapter.updateTime = tocText(
+                            await analyzeString(item, rule.updateTime, tocCtx),
+                        )
+                    }
+                    markedCount += 1
+                } else if (hasMarks) {
+                    marksTruncated = true
+                }
+                chapters.push(chapter)
             }
-            chapters.push(chapter)
+
+            // 没有 nextTocUrl 规则就是单页目录，到此为止
+            if (!rule.nextTocUrl) break
+
+            const nextRaw = await analyzeAddress(sel, rule.nextTocUrl, tocCtx)
+            if (!nextRaw) break
+            const nextUrl = resolveAddress(nextRaw, plan.url)
+            // 指向自己或已经去过的页就停：写错规则的书源不该把 Worker 拖死
+            if (nextUrl === currentUrl || visitedTocUrls.has(nextUrl)) break
+            currentUrl = nextUrl
         }
-
-        // 没有 nextTocUrl 规则就是单页目录，到此为止
-        if (!rule.nextTocUrl) break
-
-        const nextRaw = await analyzeAddress(sel, rule.nextTocUrl, tocCtx)
-        if (!nextRaw) break
-        const nextUrl = resolveAddress(nextRaw, plan.url)
-        // 指向自己或已经去过的页就停：写错规则的书源不该把 Worker 拖死
-        if (nextUrl === currentUrl || visitedTocUrls.has(nextUrl)) break
-        currentUrl = nextUrl
+    } finally {
+        // 批量会话必须在这里收掉：它占着 WASM 内存，留到请求之外就是漏
+        if (batchOpen && session) closeSandboxBatch(session)
     }
 
     if (marksTruncated) {
