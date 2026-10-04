@@ -881,6 +881,79 @@ function sourceResultGlobals(code: string, source: unknown): Record<string, unkn
 }
 
 /**
+ * 按规则的「种类」在节点集上选出**节点**
+ *
+ * 与字段规则那条路（`evalSelector`）的区别：这里给的是节点本身，不是按取值方式抠出来的
+ * 字符串。列表规则要的是「条目」，后面还要拿字段规则在这些节点里继续筛。
+ * 返回 null 表示这一类（JSON / JS / AllInOne）给不出节点。
+ */
+function selectNodesByKind(
+    sel: Selection,
+    body: string,
+    kind: 'css' | 'jsoup' | 'json' | 'xpath' | 'allinone',
+): { nodes: any[]; reversed: boolean } | null {
+    if (kind === 'css') {
+        return { nodes: selectByCss(sel, splitCssExtract(body).css), reversed: false }
+    }
+    if (kind === 'xpath') {
+        // 列表规则同样要把 `//` 当相对路径用：目录规则要的是「本页里的章节项」，
+        // 而不是"全文档里的第一个"
+        //
+        // 末尾的取值后缀在这里**丢掉**：列表规则要的是节点本身，好让后续字段规则
+        // 继续在上面筛。留着它的话表达式会解析失败（`//div[@class='x']@html` 不是
+        // 合法 XPath），整条目录变成空的。
+        const expression = toRunnableXPath(body).expression
+        const collected: any[] = []
+        for (const node of sel.nodes) {
+            const outcome = runXPath(sel.$, expression, node)
+            if (outcome.kind === 'nodes') {
+                // 属性节点不能作为后续规则继续筛选的上下文，丢掉
+                collected.push(...outcome.nodes.filter((n) => !isAttributeView(n)))
+            }
+        }
+        return { nodes: collected, reversed: false }
+    }
+    if (kind === 'jsoup') {
+        const plan = parseJsoupRule(body)
+        return { nodes: selectNodes(sel.$, sel.nodes, plan.steps), reversed: plan.reverse }
+    }
+    return null
+}
+
+/** `<js>` 块的收尾标记（列表规则里用它切「脚本段」与「尾段选择器」） */
+const JS_BLOCK_CLOSE = '</js>'
+
+/**
+ * 列表规则的最后一段是不是「跟在 `<js>` 块后面的 HTML 选择器」
+ *
+ * 三个条件缺一不可：
+ *   1. 规则里有 `</js>`，且它后面还有非空文本 —— 是 `<js>` **块**，不是 `@js:` 尾巴
+ *      （`@js:` 会在 `splitJsTail` 那一层被切走，那条路上 JS 的输出**就是**条目本身）
+ *   2. 那段文本不是脚本（`@js:…`）
+ *   3. 那段文本是个 HTML 选择器（css / jsoup / xpath）—— JSONPath 的 `$.x` 与
+ *      AllInOne 的 `:正则` 不在此列：它们在 JS 输出上取的是 JSON / 正则，
+ *      给节点没有意义（线上这两类合计 39 处）
+ *
+ * **尾段写没写取值方式（`@href` / `@html`）不影响判断**：列表规则要的是**条目**，
+ * 而取值方式只对「抠一个值」有意义 —— Legado 的 `getElements(ruleStr)` 同样忽略它。
+ * 这一条是冒烟逼出来的：线上 46 处 HTML 尾段里有一大半写成 `.sp-chapter-grid@a`、
+ * `class.zj_list@dd` 这种形状，我们的 jsoup 文法会把末尾那个词读成「属性名」，
+ * 照「有没有写取值方式」去判就会把它们全部漏掉（而书源的本意是「标签 a / 标签 dd」）。
+ */
+export function trailingNodeSelector(
+    rule: string,
+): { body: string; kind: 'css' | 'jsoup' | 'xpath' } | null {
+    const index = rule.lastIndexOf(JS_BLOCK_CLOSE)
+    if (index < 0) return null
+    const tail = rule.slice(index + JS_BLOCK_CLOSE.length).trim()
+    if (tail === '') return null
+    if (matchDirective(tail)?.name === 'js') return null
+    const { kind, body } = detectKind(tail)
+    if (kind !== 'css' && kind !== 'jsoup' && kind !== 'xpath') return null
+    return { body, kind }
+}
+
+/**
  * 列表规则：返回每个条目的 Selection
  *
  * 返回的是**节点**而不是文本，这一点是关键：像 `@css:div.result-item` 这样的列表规则
@@ -993,35 +1066,9 @@ export async function analyzeSelections(
         /<js[\s>]/i.test(selector) ||
         splitJsTail(trimmed) !== null
 
-    let nodes: any[] | null = null
-    let reversed = false
-
-    if (!isJsRule) {
-        if (kind.kind === 'css') {
-            nodes = selectByCss(sel, splitCssExtract(kind.body).css)
-        } else if (kind.kind === 'xpath') {
-            // 列表规则同样要把 `//` 当相对路径用：目录规则要的是「本页里的章节项」，
-            // 而不是"全文档里的第一个"
-            //
-            // 末尾的取值后缀在这里**丢掉**：列表规则要的是节点本身，好让后续字段规则
-            // 继续在上面筛。留着它的话表达式会解析失败（`//div[@class='x']@html` 不是
-            // 合法 XPath），整条目录变成空的。
-            const expression = toRunnableXPath(kind.body).expression
-            const collected: any[] = []
-            for (const node of sel.nodes) {
-                const outcome = runXPath(sel.$, expression, node)
-                if (outcome.kind === 'nodes') {
-                    // 属性节点不能作为后续规则继续筛选的上下文，丢掉
-                    collected.push(...outcome.nodes.filter((n) => !isAttributeView(n)))
-                }
-            }
-            nodes = collected
-        } else if (kind.kind === 'jsoup') {
-            const plan = parseJsoupRule(kind.body)
-            nodes = selectNodes(sel.$, sel.nodes, plan.steps)
-            reversed = plan.reverse
-        }
-    }
+    const picked = isJsRule ? null : selectNodesByKind(sel, kind.body, kind.kind)
+    let nodes: any[] | null = picked?.nodes ?? null
+    const reversed = picked?.reversed ?? false
 
     if (nodes) {
         if (reversed) nodes = [...nodes].reverse()
@@ -1034,29 +1081,58 @@ export async function analyzeSelections(
         return nodes.map((node) => ({ $: sel.$, nodes: [node], source: sel.source }))
     }
 
+    /**
+     * **JS 列表规则后面还跟了一段 HTML 选择器**时，条目要给**节点**，不能给文本
+     *
+     * Legado 的 `getElements(ruleStr)` 是**按段分发**的：`<js>` 段跑脚本，
+     * 下一段选择器用 jsoup 的 `getElements` 在那段输出上重新解析 —— 于是条目是
+     * **Element**，后续字段规则（`chapterName` 里的 `@js:`、`chapterUrl` 里的
+     * `@href` + `src`）都在**那一个元素**上求值：`String(result)` / `String(src)`
+     * 拿到的是这一条自己的 outer HTML。
+     *
+     * 我们这条路上以前把尾段的**默认取值（文本）**直接当条目，于是：
+     *   - `chapterUrl: 'href'` / `a@href` 在文本条目上取不到任何属性 → 章节全被丢掉
+     *   - `chapterName` 里按 HTML 写的正则匹配不到 → `catch` 里再 `[1]` 就是
+     *     `cannot read property of null`（🔞PO5 那一族线上报的正是这句，指向第 6 行）
+     *
+     * 线上这个形状共 46 处（约 34 个源），集中在目录与搜索列表上。
+     */
+    const tailSelector = isJsRule ? trailingNodeSelector(trimmed) : null
+    if (tailSelector) {
+        const cut = trimmed.lastIndexOf(JS_BLOCK_CLOSE)
+        const head = trimmed.slice(0, cut + JS_BLOCK_CLOSE.length)
+        const produced = await analyzeStrings(sel, head, ctx)
+        const items: Selection[] = []
+        for (const html of produced) {
+            const inner = selectionFromText(html, html)
+            const hit = selectNodesByKind(inner, tailSelector.body, tailSelector.kind)
+            if (!hit) continue
+            const list = hit.reversed ? [...hit.nodes].reverse() : hit.nodes
+            for (const node of list) {
+                // 条目的 `source` 用**这一条自己的 HTML**：字段规则里的 `src` / `result`
+                // 在 Legado 里都指向「当前元素」，用它才能按条取到各自的属性
+                // （🔞PO5 的 chapterUrl 就是从 `src` 里抠出这一章自己的 base64 地址）
+                items.push({ $: inner.$, nodes: [node], source: inner.$.html(node) ?? html })
+            }
+        }
+        return items
+    }
+
     // JSONPath / JS 这类列表规则给不出节点，退化成「取字符串再各自解析」
     const values = await analyzeStrings(sel, isJsRule ? trimmed : selector, ctx)
 
-    if (isJsRule || kind.kind !== 'json') {
-        /**
-         * 条目的 `source` 必须是**条目自己的文本**，不能沿用整页。
-         *
-         * 后续字段规则（`$.name`、`@js:JSON.parse(result).name`）都在这份文本上求值：
-         * 沿用整页的话，`$.name` 是在整页 JSON 的根节点上找键 —— 根节点上没有 name，
-         * 于是**每个条目都取不到字段、全被丢掉**，表现就是「搜索 0 条、不报错」。
-         */
-        return values.map((text) => selectionFromText(text, text))
-    }
-
     /**
-     * JSON 列表规则有两个坑，都在这一层修；两个都会让**整个源搜不到书**，
-     * 而且全程不报错 —— 接口型书源（音频、漫画里的接口站）几乎都是这个形态。
+     * 两条纪律，对 JS 与 JSONPath **一视同仁**：
      *
-     *   1. `$.info.Datas` 这种写法命中的是**整个数组**。不摊平的话条目数恒为 1，
-     *      而条目的内容是一段数组 JSON。真实站点里这种写法极多。
-     *   2. 条目的 `source` 必须换成**条目自己的文本**。沿用整页的 source 的话，
-     *      后续按 `$.name` 取字段时是在整页 JSON 的根节点上取键 ——
-     *      根节点上当然没有 name，于是所有条目都取不到字段，全被丢掉。
+     *   1. **命中的是整个数组时要摊平**。`$.info.Datas`、或脚本直接返回一整段数组
+     *      JSON，这种写法极多；不摊平的话条目数恒为 1、内容是一整段数组 JSON，
+     *      后续 `$.name` 一个键都取不到 —— 表现是「搜不到书，全程不报错」。
+     *      Legado 那边 `getList()` 给出来的就是数组的元素。
+     *   2. **条目的 `source` 必须是条目自己的文本**，不能沿用整页：`$.name` 是在
+     *      条目的这份文本上求值的，沿用整页就变成在根节点上取键，同样什么都取不到。
+     *
+     * 这两条以前只写在 JSONPath 那一支上，而 JS 那一支（`<js>` 段 + `$.路径` 尾段，
+     * 线上 39 处）走的是另一支、没有摊平 —— 同一个坑在两支上都要填。
      */
     const items: string[] = []
     for (const value of values) {

@@ -4015,6 +4015,119 @@ console.log('\n=== 23. 书的上下文与书的变量（book.* / chapter.* / boo
     check(!left.some((s) => s.id === id), '书的上下文测试源已清理')
 }
 
+console.log('\n=== 24. 列表规则：`<js>` 块后面的选择器要保留节点 ===')
+{
+    /**
+     * 形状取自真实书源（🔞PO5 / 🔞新龙小说 / 📂废纸文学 / 📂️冷冷文学 / 📂海马书屋 /
+     * 📂海棠看书 这一族的 `chapterList`）：先选择器圈到一批 `li`，再用 `<js>` 排序，
+     * 最后一段选择器圈定条目。
+     *
+     * Legado 的 `getElements(ruleStr)` 是**按段分发**的：`<js>` 段跑脚本，下一段选择器
+     * 用 jsoup 的 `getElements` 在那段输出上重新解析 —— 条目是 **Element**。所以字段规则
+     * 能在**这一条**上取属性（`href`）、也能把 `String(result)` / `String(src)` 当 HTML 用。
+     * 我们以前把尾段的**默认取值（文本）**当条目，于是线上有两种症状：
+     *   - `chapterUrl: 'href'` 在文本条目上取不到属性 → 章节全被丢掉（目录 0 章、不报错）
+     *   - `chapterName` 里按 HTML 写的正则匹配不到 → catch 里再 `[1]` 抛
+     *     `cannot read property of null`（🔞PO5 报的正是这句，指向脚本第 6 行）
+     */
+    const id = `user:${BASE}`
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+
+    /** 尾段选择器 + 字段直接取属性（`href` / `text`）—— 这一种以前会得到 0 章 */
+    const attrFields = {
+        chapterName: 'text',
+        chapterUrl: 'href',
+    }
+    /** 字段把 `result` / `src` 当 HTML 用 —— 这一种就是 🔞PO5 那一族的写法 */
+    const htmlFields = {
+        chapterName:
+            '@js:(function(){var h=String(result);var m=h.match(/href="([^"]+)"/);' +
+            "return ['R='+(/<a/.test(h)?'HTML':'TEXT')," +
+            "'S='+(String(src).indexOf('</a>')>=0?'HAS':'NONE')," +
+            "'H='+(m?m[1]:'NONE')].join('|')})()",
+        chapterUrl:
+            '@js:(function(){var m=String(result).match(/href="([^"]+)"/);' +
+            "return 'https://example.com/x'+(m?m[1]:'/NONE')})()",
+    }
+    /**
+     * 尾段两种写法都用真实书源里出现过的：
+     *   - `li a` —— 裸 CSS（`📂少年小说网` / `⚡📂全本小说网` 那种）
+     *   - `tag.a` —— JSOUP 简写，🔞PO5 那一族用的就是它
+     * （尾段写成**单个裸词** `a` / `@li` 的那一类不在这里：我们的 jsoup 文法把末尾那个词
+     *  读成「属性名」，圈到的还是上一层 —— 那是 `jsoup.ts` 的取值判据问题，见 README）
+     */
+    const listRule = (tail) => `class.chapter-list@li
+<js>
+list = result.toArray();
+l = [];
+for (var i = 0; i < list.length; i++) l.push(list[i]);
+l.join("")
+</js>
+${tail}`
+
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: 'JS 尾段列表规则·属性字段（临时）',
+                bookSourceUrl: BASE,
+                ruleToc: { chapterList: listRule('li a'), ...attrFields },
+            },
+        ]),
+    )
+    const attrToc = await getJson(
+        `/api/toc?sourceId=${encodeURIComponent(id)}&url=${encodeURIComponent(`${BASE}/fixture/toc/1`)}`,
+    )
+    const attrChapters = attrToc.json?.chapters ?? []
+    check(
+        attrChapters.length === 3 &&
+            attrChapters.every((c) => /\/fixture\/chapter\/1\/\d+$/.test(c.url)) &&
+            attrChapters[0]?.name === '第一章 起风了',
+        '尾段选择器圈出来的条目标是**节点**：`text` / `href` 都能取到（以前是 0 章）',
+        attrToc.json?.error ?? JSON.stringify(attrChapters.slice(0, 2)),
+    )
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+
+    // 换一个书源地址，免得与上面那条撞 id（id 由地址派生）
+    const idB = `user:${BASE}/b`
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(idB)}`)
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: 'JS 尾段列表规则·HTML 字段（临时）',
+                bookSourceUrl: `${BASE}/b`,
+                ruleToc: { chapterList: listRule('tag.a'), ...htmlFields },
+            },
+        ]),
+    )
+    const htmlToc = await getJson(
+        `/api/toc?sourceId=${encodeURIComponent(idB)}&url=${encodeURIComponent(`${BASE}/fixture/toc/1`)}`,
+    )
+    const htmlChapters = htmlToc.json?.chapters ?? []
+    check(
+        htmlChapters.length === 3 &&
+            htmlChapters.every((c) =>
+                String(c.name).startsWith('R=HTML|S=HAS|H=/fixture/chapter/1/'),
+            ),
+        '`result` 与 `src` 都是**这一条自己的 HTML**（🔞PO5 那一族就是靠它抠地址的）',
+        htmlToc.json?.error ?? String(htmlChapters[0]?.name ?? ''),
+    )
+    check(
+        htmlChapters.every((c) =>
+            String(c.url).startsWith('https://example.com/x/fixture/chapter/1/'),
+        ),
+        '每一条取到的是**它自己**的地址（不是第一条的）',
+        JSON.stringify(htmlChapters.map((c) => c.url).slice(0, 3)),
+    )
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(idB)}`)
+
+    const left = (await getJson('/api/sources')).json?.sources ?? []
+    check(!left.some((s) => s.id === id || s.id === idB), 'JS 尾段列表规则测试源已清理')
+}
+
 console.log('\n=== 结果 ===')
 if (failures.length === 0) {
     console.log(
