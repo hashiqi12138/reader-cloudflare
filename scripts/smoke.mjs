@@ -819,6 +819,40 @@ console.log('\n=== 6. 前端静态资源 ===')
         homeHtml.includes('rel="manifest"') && homeHtml.includes('apple-touch-icon'),
         '首页 head 里挂了 manifest 与 apple-touch-icon',
     )
+
+    /**
+     * 书源列表的 `ETag` / 304
+     *
+     * `/api/sources` 要回**全部**书源（线上 816 条、约 130 KB），重复加载靠这一对
+     * 协商缓存省掉整份正文。判错**不会报错**：要么浏览器一直拿着过期的列表
+     * （「导入了书源却看不见」），要么白发一趟。所以两端都钉住。
+     */
+    const listFirst = await fetch(BASE + '/api/sources')
+    const listEtag = listFirst.headers.get('etag')
+    const listBody = await listFirst.text()
+    check(
+        listFirst.status === 200 && Boolean(listEtag),
+        '/api/sources 首次返回 200 并带上 ETag',
+        `status=${listFirst.status} etag=${listEtag} bytes=${listBody.length}`,
+    )
+
+    const listAgain = await fetch(BASE + '/api/sources', {
+        headers: { 'If-None-Match': listEtag ?? '' },
+    })
+    check(
+        listAgain.status === 304 && (await listAgain.text()) === '',
+        '/api/sources 带上同一个 ETag 时回 304 且没有正文',
+        `status=${listAgain.status}`,
+    )
+
+    const listStale = await fetch(BASE + '/api/sources', {
+        headers: { 'If-None-Match': '"src-stale-tag"' },
+    })
+    check(
+        listStale.status === 200 && (await listStale.text()).length > 1000,
+        '/api/sources 带上对不上的 ETag 时照旧回完整列表',
+        `status=${listStale.status}`,
+    )
 }
 
 console.log('\n=== 7. 账号、书架、阅读进度与书签 ===')
