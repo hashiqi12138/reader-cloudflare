@@ -871,6 +871,22 @@ console.log('\n=== 6. 前端静态资源 ===')
         '更新记录非空，且最新一条与当前版本号一致',
         `条数=${info.json?.changelog?.length ?? 0} 最新=${info.json?.changelog?.[0]?.version}`,
     )
+
+    /**
+     * 页脚在窄屏里没有被藏掉
+     *
+     * 页脚带着版本号与**源代码地址**（AGPL 第 13 条：通过网络使用本程序的人要能拿到源码）。
+     * 它一度在 `max-width: 720px` 那段里被整个 `display: none` 掉 —— 于是手机上既看不到
+     * 版本号、也没有进「关于」的路，而桌面端一切正常，所以不会有人发现。
+     * 只钉这一条：对 CSS 作文本级断言本来就脆，值一条。
+     */
+    const style = await (await fetch(BASE + '/style.css')).text()
+    const narrowAt = style.indexOf('@media (max-width: 720px)')
+    check(
+        narrowAt > 0 && !/^[ \t]*\.footer\s*\{[^}]*display:\s*none/m.test(style.slice(narrowAt)),
+        '窄屏那段没有把页脚藏掉（版本号与源代码地址在手机上也要在）',
+        narrowAt > 0 ? '' : '（style.css 里没找到 @media (max-width: 720px)）',
+    )
 }
 
 console.log('\n=== 7. 账号、书架、阅读进度与书签 ===')

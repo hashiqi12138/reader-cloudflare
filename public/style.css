@@ -2022,7 +2022,9 @@ body[data-reader='1'] main#view {
         display: none;
     }
     main#view {
-        padding: var(--sp-4) var(--sp-3) calc(var(--bnav-h) + var(--sp-5));
+        /* 底部那段留白交给页脚去顶（见下面的 `.footer`）：页脚永远排在 main 之后，
+           两处都留会白出一大块。 */
+        padding: var(--sp-4) var(--sp-3) var(--sp-4);
         gap: var(--sp-4);
     }
 
@@ -2065,8 +2067,20 @@ body[data-reader='1'] main#view {
         opacity: 1;
     }
 
+    /* 页脚在手机上也要在：它带着版本号与**源代码地址**（AGPL 第 13 条要求通过网络
+       使用本程序的人能拿到源码），而底部那条固定导航里没有等价的东西。
+       这里一度把它整个藏了 —— 结果手机上既看不到版本号，也没有进「关于」的路，
+       只剩桌面端能看到。 */
     .footer {
-        display: none;
+        display: flex;
+        flex-wrap: wrap;
+        /* 顶住底部那条固定导航 */
+        padding-bottom: calc(var(--bnav-h) + env(safe-area-inset-bottom) + var(--sp-3));
+    }
+    /* 手指点的东西不该只有一行字那么高 */
+    .footer > a,
+    .footer > .link {
+        padding: 6px 4px;
     }
     body[data-reader='1'] .footer {
         display: none;
