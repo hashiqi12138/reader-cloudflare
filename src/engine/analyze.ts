@@ -32,7 +32,13 @@ import {
 } from './template'
 import { splitJsTail, splitRuleText } from './ruleText'
 import { matchDirective, ruleHasJs } from './directives'
-import { resultWantsArray, resultWantsString } from './resultShape'
+import {
+    RESULT_AS_JSOUP,
+    resultWantsArray,
+    resultWantsString,
+    usesJsoupOnResult,
+    wantsJsoupResult,
+} from './resultShape'
 import { isAttributeView, normalizeXPathFunctions, runXPath, splitXPathExtract } from './xpath'
 
 /** 一次规则求值所面对的上下文：一个可继续筛选的节点集 */
@@ -548,11 +554,19 @@ async function evalRule(
         const bareJs = jsTail.before.trim() === ''
         const source = ctx.result ?? sel.source
 
-        // 前置那一段照旧求值：它可能是「选择器 + 自己的链」，也可能就是空的。
-        // 递归进来时 `@js:` 已经被切走了（`splitJsTail` 取的是**第一个**标记），不会转圈
+        /**
+         * 前置那一段照旧求值：它可能是「选择器 + 自己的链」，也可能就是空的。
+         * 递归进来时 `@js:` 已经被切走了（`splitJsTail` 取的是**第一个**标记），不会转圈
+         *
+         * 这里给的是 **HTML 还是文本**，判据是 `usesJsoupOnResult`（不看有没有同时按字符串用）：
+         * 脚本既然调了 `attr` / `select` / `toArray`，`result` 里就必须有标记 ——
+         * 只给文本的话 `toArray()` 会得到一个**空数组**（不报错，只是东西没了），
+         * 而海马书屋那类源正是拿 `toArray()` 的结果去 `attr('data-id')` 排序。
+         * `result` 最终绑成数组还是字符串由 `resultGlobals` 另判（字符串优先）。
+         */
         const values = bareJs
             ? []
-            : hasDefaultExtract(jsTail.before) && wantsJsoupResult(jsTail.code)
+            : hasDefaultExtract(jsTail.before) && usesJsoupOnResult(jsTail.code)
               ? await nodeHtmlOrValues(sel, jsTail.before, skeleton, ctx)
               : await evalRule(
                     sel,
@@ -632,13 +646,34 @@ async function evalSelectorChain(
     /** 前面有没有跑过选择器 —— 决定首个 `<js>` 块里的 `result` 是「页面原文」还是「空」 */
     let sawSelector = false
 
-    for (const part of jsBlocks) {
+    for (let index = 0; index < jsBlocks.length; index += 1) {
+        const part = jsBlocks[index]!
         if (part.kind === 'selector') {
             if (part.text === '') continue
             sawSelector = true
             const kind = detectKind(part.text)
+            /**
+             * 后面紧跟一个「把 `result` 当节点用」的 `<js>` 块时，这一段要给 **HTML**
+             *
+             * 判据与 `evalRule` 里那条一样是 `usesJsoupOnResult`（不看有没有同时按字符串用）：
+             * 脚本调了 `attr` / `select` / `toArray`，`result` 里就必须有标记。
+             * 线上最典型的是 6 条「海马书屋」形状的目录规则：
+             * `class.BCsectionTwo-top-chapter@li\n<js>list = result.toArray(); …</js>\ntag.a`
+             * —— 脚本要拿 `list[i].attr('data-id')` 排序，而默认那条路给的是**文本**，
+             * `toArray()` 于是解析出一堆没有标记的东西，得到**空数组**（不报错，只是目录空了）。
+             */
+            const next = jsBlocks[index + 1]
+            const wantHtml =
+                kind.kind !== 'allinone' &&
+                next !== undefined &&
+                next.kind === 'js' &&
+                next.text.trim() !== '' &&
+                usesJsoupOnResult(next.text)
             if (kind.kind === 'allinone') {
                 values = applyAllInOne(current.source, part.text)
+                current = selectionFromText(values.join('\n'), current.source)
+            } else if (wantHtml) {
+                values = await nodeHtmlOrValues(current, part.text, null, ctx)
                 current = selectionFromText(values.join('\n'), current.source)
             } else {
                 values = evalSelector(current, kind.body, kind.kind)
@@ -795,52 +830,6 @@ function baseGlobals(ctx: RuleContext): Record<string, unknown> {
         // `source` / `infoMap` 在沙箱预置里由这几个变量组装（见 engine/globals.ts）
         ...sourceGlobals(ctx),
     }
-}
-
-/**
- * 脚本是不是把 `result` 当 jsoup 对象用（`result.select('h3').text()`）
- *
- * Legado 里 `result` 同时可能是字符串也可能是 jsoup 对象，两种写法在**同一条书源里**
- * 都会出现。这里只按「真的调了 jsoup 方法」来判断，而不是一律包装 ——
- * 一律包装会把 `typeof result` 从 `'string'` 变成 `'object'`，
- * 而线上有 18 处脚本在判断这个类型。
- */
-const RESULT_AS_JSOUP =
-    /\bresult\s*\.\s*(select|attr|first|last|get|eq|size|isEmpty|textNodes|eachText|html|outerHtml|hasClass|children|not|filter|matches|matchesOwn|tagName|ownText)\s*\(/
-
-/**
- * 脚本在**迭代 `result` 的回调**里对条目调 jsoup 方法
- *
- *   `result.forEach(e => e.attr('href'))`   ← 🔞西瓜书屋 的目录规则就长这样
- *   `result.map(x => x.text())`
- *
- * 这类写法要的同样是**元素**：`attr` / `text` / `select` 只有节点才给得出来，
- * 给纯文本的话 `e.attr(...)` 恒为空串 —— 而且**不报错**。
- *
- * 认的是「回调参数上出现了一个**只有元素才有**的方法名」，方法名表刻意不含
- * `split` / `replace` / `trim` / `slice` 这些字符串方法，所以
- * 「迭代一串文本做字符串处理」的写法不会被误判。
- */
-const ITEM_AS_JSOUP =
-    /\bresult\s*\.\s*(?:map|forEach|filter|find|findIndex|some|every|flatMap|reduce)\s*\(\s*(?:function\s*)?\(?\s*([A-Za-z_$][\w$]*)\s*\)?\s*(?:=>)?[\s\S]{0,300}?\b\1\s*\.\s*(?:attr|select|text|html|outerHtml|ownText|tagName|hasClass|hasAttr|val|className|textNodes|eachText|matches|matchesOwn|children|first|last|get|eq|size|index|id)\s*\(/
-
-/**
- * 脚本是不是「**按节点用** `result`」
- *
- * 两种写法都算：直接调集合级方法（`result.size()` / `result.select(…)`），
- * 以及迭代回调里对条目调元素级方法（`result.forEach(e => e.attr('href'))`）。
- * 后者在字符串与字符串数组上同样不存在。
- *
- * 与 `resultShape.ts` 的优先级保持一致：**按字符串用优先**。
- * 两种写法写在同一条规则里时（`📂就去看网` 那种），只有「字符串 + jsoup 方法」
- * 那一份形态给得起，所以这时候按字符串算，`result` 的内容也不去换绑节点。
- *
- * 抽成函数是为了让 `evalRule`（决定**交给脚本什么内容**）与 `resultGlobals`
- * （决定**绑成数组还是字符串**）用的是同一个判据 —— 两处各写一遍必然跑偏。
- */
-function wantsJsoupResult(code: string): boolean {
-    if (resultWantsString(code)) return false
-    return RESULT_AS_JSOUP.test(code) || ITEM_AS_JSOUP.test(code)
 }
 
 /**

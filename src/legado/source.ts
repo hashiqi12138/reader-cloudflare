@@ -14,7 +14,7 @@ import { runInSandbox, sandboxResultToString } from '../engine/js'
 import { sourceGlobals, sourceLimits } from '../engine/globals'
 import type { BookSource, FetchPlan, RuleContext, SandboxHttp } from '../engine/types'
 import { parseLooseJson } from '../lib/json'
-import { defaultHeaders, fetchText, UpstreamError } from '../lib/http'
+import { defaultHeaders, fetchDetailed, fetchText, UpstreamError } from '../lib/http'
 import { applyOptionalSegments, findUrlJs } from './urlJs'
 
 /** 书源 URL 尾部可带的请求选项 */
@@ -316,23 +316,45 @@ export function mediaRequestHeaders(source: BookSource, mediaUrl: string): Recor
  * 请求次数与总时限的上限由沙箱统一控制（见 engine/js.ts）。
  */
 export function sandboxHttp(source: BookSource, baseUrl: string): SandboxHttp {
+    /** 「地址（可能带 `,{...}` 选项）+ 调用方选项」→ 一份取网计划 */
+    function buildPlan(
+        url: string,
+        options: { method?: string; body?: string; headers?: Record<string, string> } = {},
+    ): FetchPlan {
+        const { url: rawTarget, options: urlOptions } = splitUrlAndOptions(url)
+        const plan = planFromResolvedUrl(rawTarget, source, baseUrl)
+        return {
+            ...plan,
+            method: (options.method ?? urlOptions.method ?? 'GET').toUpperCase(),
+            body: options.body ?? urlOptions.body,
+            // 书源里 `,{"charset":"gbk"}` 指的是**响应编码**（见 Legado 的「URL 参数详解」），
+            // 这里以前漏掉了它，凡是走 java.ajax/java.post 的 GBK 站点都会拿到乱码
+            charset: urlOptions.charset ?? plan.charset,
+            headers: {
+                ...plan.headers,
+                ...(urlOptions.headers ?? {}),
+                ...(options.headers ?? {}),
+            },
+        }
+    }
+
     return {
         async fetchText(url, options = {}) {
-            const { url: rawTarget, options: urlOptions } = splitUrlAndOptions(url)
-            const plan = planFromResolvedUrl(rawTarget, source, baseUrl)
-            return fetchText({
-                ...plan,
-                method: (options.method ?? urlOptions.method ?? 'GET').toUpperCase(),
-                body: options.body ?? urlOptions.body,
-                // 书源里 `,{"charset":"gbk"}` 指的是**响应编码**（见 Legado 的「URL 参数详解」），
-                // 这里以前漏掉了它，凡是走 java.ajax/java.post 的 GBK 站点都会拿到乱码
-                charset: urlOptions.charset ?? plan.charset,
-                headers: {
-                    ...plan.headers,
-                    ...(urlOptions.headers ?? {}),
-                    ...(options.headers ?? {}),
-                },
-            })
+            return fetchText(buildPlan(url, options))
+        },
+        // java.connect(...) 要「把响应原样交给脚本」，所以非 2xx 不抛错（见 fetchDetailed）
+        async fetchResponse(url, options = {}) {
+            return fetchDetailed(buildPlan(url, options))
+        },
+        // java.connect(url).raw().request().url()：只解析地址，不发请求
+        resolveUrl(url) {
+            try {
+                const { url: rawTarget } = splitUrlAndOptions(String(url))
+                if (rawTarget.trim() === '') return ''
+                return planFromResolvedUrl(rawTarget, source, baseUrl).url
+            } catch {
+                return String(url)
+            }
         },
     }
 }

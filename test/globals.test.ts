@@ -34,30 +34,45 @@ describe('sourcePayload', () => {
     })
 
     it('带上脚本常用的那几个字段', () => {
-        const payload = sourcePayload(source, '斗破') as Record<string, unknown>
+        const payload = sourcePayload(source) as Record<string, unknown>
         expect(payload.bookSourceUrl).toBe('https://example.com')
         expect(payload.bookSourceComment).toBe('备注')
         expect(payload.header).toBe('{"User-Agent":"ua"}')
         expect(payload.loginUrl).toBe('https://example.com/login')
     })
 
-    it('key 是**当前搜索词**，取自上下文而不是书源本身', () => {
-        expect((sourcePayload(source, '斗破') as Record<string, unknown>).key).toBe('斗破')
-        expect((sourcePayload(source, '') as Record<string, unknown>).key).toBe('')
+    /**
+     * `key` 是**书源地址**，不是搜索词
+     *
+     * 这条以前写反了：`key` 取自 `ctx.key`（搜索词），于是 122 个源、206 处
+     * `source.getKey()` / `source.key` 拿到一个搜索词，而它们在书源里全是当**站点地址**用的
+     * （`source.key + "/search.html"`、`java.connect(source.getKey())`、
+     * `cookie.removeCookie(source.getKey())`）。搜索词有单独的 `key` 全局。
+     */
+    it('key 是**书源地址**（`BaseSource.getKey()` 的形状），不是搜索词', () => {
+        expect((sourcePayload(source) as Record<string, unknown>).key).toBe('https://example.com')
+        // 上下文里带着搜索词也不该串进来
+        expect((sourcePayload(source) as Record<string, unknown>).key).not.toBe('斗破')
+    })
+
+    it('书源没有地址时 key 是空串，而不是 undefined', () => {
+        expect(
+            (sourcePayload({ bookSourceName: 'x' } as BookSource) as Record<string, unknown>).key,
+        ).toBe('')
     })
 
     it('不透传规则文本：整份书源里带着所有规则，逐次求值序列化它是纯浪费', () => {
-        const payload = sourcePayload(source, 'k') as Record<string, unknown>
+        const payload = sourcePayload(source) as Record<string, unknown>
         expect(payload.ruleSearch).toBeUndefined()
         expect(payload.ruleContent).toBeUndefined()
         expect(payload.ruleToc).toBeUndefined()
     })
 
     it('undefined 字段不进 payload（进沙箱会变成 null，脚本判断会走错分支）', () => {
-        const payload = sourcePayload(
-            { bookSourceName: 'x', bookSourceUrl: 'https://a.com' },
-            '',
-        ) as Record<string, unknown>
+        const payload = sourcePayload({
+            bookSourceName: 'x',
+            bookSourceUrl: 'https://a.com',
+        }) as Record<string, unknown>
         expect('bookSourceGroup' in payload).toBe(false)
         expect('loginUrl' in payload).toBe(false)
     })

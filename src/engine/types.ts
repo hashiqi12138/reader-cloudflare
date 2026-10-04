@@ -114,6 +114,29 @@ export interface SandboxHttp {
         url: string,
         options?: { method?: string; body?: string; headers?: Record<string, string> },
     ): Promise<string>
+    /**
+     * 取回**响应本身**（状态码 + 响应头 + 正文）；HTTP 非 2xx **不抛错**
+     *
+     * `java.connect(...)` 要的是这一份：书源拿它的 `code()` / `raw().headers(...)` 做判断，
+     * 「不是 2xx 就抛错」会把判断变成异常。可选 —— 没接取的平台走不到这条路。
+     */
+    fetchResponse?(
+        url: string,
+        options?: { method?: string; body?: string; headers?: Record<string, string> },
+    ): Promise<{
+        url: string
+        status: number
+        headers: Record<string, string[]>
+        body: string
+    }>
+    /**
+     * 把一个（可能相对的、可能带 `,{...}` 请求选项的）地址解析成**绝对地址**
+     *
+     * 同步，不做网络请求。`java.connect(url).raw().request().url()` 要的就是它 ——
+     * Legado 的 `AnalyzeUrl` 在发请求**之前**就把地址定下来了，所以这里不该为了拿一个
+     * 地址去多打一次网络。
+     */
+    resolveUrl?(url: string): string
     /** 单次规则求值里最多允许几次网络请求，防止脚本把一只 Worker 拖死 */
     maxCalls?: number
     /** 整次求值的总时限（毫秒），超出后连网络请求一起中止 */

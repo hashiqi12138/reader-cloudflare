@@ -356,32 +356,67 @@ var java = {
     if (joined === '') return []
     return String(joined).split('\\n')
   },
-  // 连接式取网。Legado 的形状是 java.connect(url).header(k,v).get().body()
-  connect: function (url) {
-    var self = { url: String(url), method: 'GET', headers: {}, bodyText: null }
-    var api = {
-      url: function (u) { self.url = String(u); return api },
-      header: function (k, v) { self.headers[String(k)] = String(v); return api },
-      headers: function (o) { for (var k in o) { self.headers[k] = String(o[k]) } return api },
-      method: function (m) { self.method = String(m).toUpperCase(); return api },
-      timeout: function () { return api },
-      get: function () { return result() },
-      post: function (body) {
-        self.method = 'POST'
-        self.bodyText = body === undefined || body === null ? '' : String(body)
-        return result()
-      },
+  // 连接式取网。Legado 的 java.connect(url, header) **当场发请求**，返回 StrResponse：
+  //
+  //   res.url()                    请求地址（AnalyzeUrl 解析后的绝对地址）
+  //   res.body()                   响应正文
+  //   res.code()                   HTTP 状态码
+  //   res.isSuccessful()           2xx
+  //   res.raw().request().url()    同一个地址（OkHttp 的形状）
+  //   res.raw().headers(name)      响应头（**数组**，Set-Cookie 靠它）
+  //
+  // 语料上 22 个源在用，其中 9 个只写 {{java.connect(source.getKey()).raw().request().url()}}
+  // —— 它们要的**只是那个地址**。所以这里的 url() / raw().request().url() 走同步桥
+  // 解析地址、**不发请求**（Legado 也是在发请求之前就把地址定下来的）；
+  // 只有真要 body() / code() / raw().headers() 时才发那一次，且只发一次（结果缓存）。
+  //
+  // 一个刻意的取舍：上游失败时 raw 是 null（脚本随即 NPE），这里始终给一个形状完整的
+  // 对象，headers() 取不到就给空数组 —— 半条信息总比一个 NPE 好查。
+  //
+  // 另一个与上游不同的地方：header 参数上游是 **JSON 字符串**（GSON.fromJsonObject），
+  // 📚聚合书库 却直接传了一个对象；两种都收，否则那个源的头会**静默**失效。
+  connect: function (url, header) {
+    var opts = { url: String(url) }
+    var parsed = header
+    if (typeof header === 'string') {
+      try { parsed = JSON.parse(header) } catch (e) { parsed = null }
+    }
+    if (parsed && typeof parsed === 'object') {
+      var map = {}
+      for (var k in parsed) map[k] = String(parsed[k])
+      opts.headers = map
+    }
+    var requestUrl = __host.resolveUrl(opts.url)
+    var cached = null
+    function detail() {
+      if (cached === null) cached = JSON.parse(__host.fetchFull(JSON.stringify(opts)))
+      return cached
+    }
+    var response = {
+      url: function () { return requestUrl },
       body: function () {
-        return java.__req({
-          url: self.url,
-          method: self.method,
-          body: self.bodyText === null ? undefined : self.bodyText,
-          headers: self.headers,
-        })
+        var d = detail()
+        return d.ok ? String(d.body === undefined || d.body === null ? '' : d.body) : String(d.error || '')
+      },
+      code: function () { var d = detail(); return d.ok ? Number(d.status) : 0 },
+      isSuccessful: function () { var c = response.code(); return c >= 200 && c < 300 },
+      raw: function () {
+        return {
+          request: function () { return { url: function () { return requestUrl } } },
+          code: function () { return response.code() },
+          headers: function (name) {
+            var d = detail()
+            if (!d.ok) return []
+            var all = d.headers || {}
+            var list = all[String(name).toLowerCase()]
+            return list === undefined || list === null ? [] : list
+          },
+        }
       },
     }
-    function result() { return api }
-    return api
+    // 规则直接把响应对象返回时（result = java.connect(url)），串化要给出正文而不是 {}
+    response.toString = function () { return response.body() }
+    return response
   },
   // 中文数字转阿拉伯数字（toNumChapter('第一百二十三章') -> 123）。纯计算，无需桥
   toNumChapter: function (text) {
@@ -827,6 +862,17 @@ function __htmlApi(html) {
     })(methods[i])
   }
   api.toString = function () { return html }
+  // toArray()：把这份文档的**顶层元素**取成数组
+  //
+  // 走这里的是「result 被绑成字符串、脚本却又要 result.toArray()」那一种 ——
+  // 脚本里同时出现 String(result) 时字符串优先（见 analyze.ts 的 resultGlobals），
+  // 于是 result 是**盒装字符串**而不是数组。🔞PO5 / 新龙小说 / 废纸文学 / 冷冷文学 /
+  // 海马书屋 / 海棠看书 六个源的 chapterList 都是这个形状：选择器取到一串 li，
+  // 脚本要 list[i].attr('data-id') 拿去排序。
+  //
+  // 给的是**顶层元素**（body > *）：拼起来的那串 HTML 解析后，body 的孩子正好就是
+  // 选择器命中的那些节点，与 Legado 里 Elements.toArray() 拿到的是同一批。
+  api.toArray = function () { return run('select', 'body > *') }
   return api
 }
 
@@ -883,6 +929,13 @@ function __attachList(handle, out) {
     })(methods[i])
   }
   out.toString = function () { return String(__jsoupCall('toString', handle, []).value) }
+  // toArray()：jsoup 的 Elements.toArray() 返回的是**纯数组**
+  //
+  // 必须返回不带附加方法的纯数组：书源会写 for (i in list) 遍历它
+  // （📂文学小说 就是），而 for...in 会把挂在数组上的那批集合级方法名
+  // 一起枚举出来 —— 那样 list[i] 拿到的是函数，html += list[i] 就把**函数源码**
+  // 拼进了结果里（不报错，只是正文变成一堆 JS 代码）。
+  out.toArray = function () { return Array.prototype.slice.call(out) }
   return out
 }
 
@@ -1419,25 +1472,57 @@ async function executeInSandbox(
         vm.setProp(host, 'hash', hashFn)
         hashFn.dispose()
 
+        const takeCall = () => {
+            httpCalls += 1
+            if (httpCalls > maxHttpCalls) {
+                throw new SandboxError(`单次规则最多允许 ${maxHttpCalls} 次网络请求，已超出`)
+            }
+        }
+
         const requestFn = vm.newAsyncifiedFunction('request', async (arg) => {
             const optionsJson = String(vm.dump(arg))
             const response = await handleHttpRequest(optionsJson, {
                 http,
                 now: () => Date.now(),
                 hardDeadline,
-                takeCall: () => {
-                    httpCalls += 1
-                    if (httpCalls > maxHttpCalls) {
-                        throw new SandboxError(
-                            `单次规则最多允许 ${maxHttpCalls} 次网络请求，已超出`,
-                        )
-                    }
-                },
+                takeCall,
             })
             return vm.newString(response)
         })
         vm.setProp(host, 'request', requestFn)
         requestFn.dispose()
+
+        /**
+         * 同步桥：把地址解析成**绝对地址**（`java.connect(...).raw().request().url()`）
+         *
+         * 同步、且**不发请求** —— 那 9 个只在 URL 模板里取地址的源，不该为拿一个地址
+         * 多打一次网络（Legado 的 AnalyzeUrl 也是发请求之前就把地址定下来的）。
+         */
+        const resolveUrlFn = vm.newFunction('resolveUrl', (arg) => {
+            const url = String(vm.dump(arg))
+            return vm.newString(resolveSandboxUrl(url, http))
+        })
+        vm.setProp(host, 'resolveUrl', resolveUrlFn)
+        resolveUrlFn.dispose()
+
+        /**
+         * 异步桥：取回**响应本身**（状态码 + 响应头 + 正文），HTTP 非 2xx **不抛错**
+         *
+         * `java.connect` 用它 —— 书源要做 `res.code() == 403`、`res.raw().headers('Set-Cookie')`
+         * 这类判断，抛错等于把「判断」变成了「异常」。
+         */
+        const fetchFullFn = vm.newAsyncifiedFunction('fetchFull', async (arg) => {
+            const optionsJson = String(vm.dump(arg))
+            const response = await handleHttpResponse(optionsJson, {
+                http,
+                now: () => Date.now(),
+                hardDeadline,
+                takeCall,
+            })
+            return vm.newString(response)
+        })
+        vm.setProp(host, 'fetchFull', fetchFullFn)
+        fetchFullFn.dispose()
 
         vm.setProp(vm.global, '__host', host)
         host.dispose()
@@ -1717,6 +1802,95 @@ async function handleHttpRequest(
             ok: false,
             error: err instanceof Error ? err.message : String(err),
         })
+    }
+}
+
+/**
+ * 沙箱内 `java.connect` 的实际执行：取回**响应本身**（状态码 / 响应头 / 正文）
+ *
+ * 与上面那条的关键差别只有一个，但它是这一条存在的全部理由：**HTTP 非 2xx 不当成失败**。
+ * 书源用 `res.code() == 403` 判断要不要换 cookie、用 `res.raw().headers('Set-Cookie')`
+ * 取新 cookie（📂天籁小说 整条 searchUrl 就是干这个），抛错会把判断变成异常。
+ *
+ * 网络层真失败（超时、连不上）仍然报 `ok:false`，脚本那侧 `.body()` 拿到错误文本、
+ * `.code()` 拿到 0 —— 与 Legado 失败时返回 `StrResponse(url, 错误信息)` 一致。
+ */
+async function handleHttpResponse(
+    optionsJson: string,
+    ctx: {
+        http?: SandboxHttp
+        now: () => number
+        hardDeadline: number
+        takeCall: () => void
+    },
+): Promise<string> {
+    let options: { url?: string; method?: string; body?: string; headers?: Record<string, string> }
+    try {
+        options = JSON.parse(optionsJson) as typeof options
+    } catch {
+        return JSON.stringify({
+            ok: false,
+            error: `请求参数不是合法 JSON：${optionsJson.slice(0, 80)}`,
+        })
+    }
+
+    if (!ctx.http?.fetchResponse) {
+        return JSON.stringify({
+            ok: false,
+            error: '当前上下文未提供取网能力（java.connect 不可用）',
+        })
+    }
+
+    if (ctx.now() > ctx.hardDeadline) {
+        return JSON.stringify({ ok: false, error: '整次求值已超时，请求被中止' })
+    }
+
+    try {
+        ctx.takeCall()
+    } catch (err) {
+        return JSON.stringify({
+            ok: false,
+            error: err instanceof Error ? err.message : String(err),
+        })
+    }
+
+    const url = String(options.url ?? '')
+    if (url === '') return JSON.stringify({ ok: false, error: '请求缺少 url' })
+
+    try {
+        const response = await ctx.http.fetchResponse(url, {
+            method: options.method,
+            body: options.body,
+            headers: options.headers,
+        })
+        return JSON.stringify({
+            ok: true,
+            url: response.url,
+            status: response.status,
+            headers: response.headers,
+            body: response.body,
+        })
+    } catch (err) {
+        return JSON.stringify({
+            ok: false,
+            error: err instanceof Error ? err.message : String(err),
+        })
+    }
+}
+
+/**
+ * 沙箱内 `java.connect(...).url()` 用的地址解析（同步、不发请求）
+ *
+ * 拿不到取网能力时原样返回：宁可能得到一个相对地址，也不要让规则在这里报错 ——
+ * `{{java.connect(source.getKey()).raw().request().url()}}` 那条路上的失败
+ * 会直接让整条 searchUrl 变成一句错误信息。
+ */
+function resolveSandboxUrl(url: string, http?: SandboxHttp): string {
+    if (!http?.resolveUrl) return String(url)
+    try {
+        return String(http.resolveUrl(String(url)))
+    } catch {
+        return String(url)
     }
 }
 

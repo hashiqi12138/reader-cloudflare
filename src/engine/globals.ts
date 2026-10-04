@@ -43,13 +43,11 @@ const SCALAR_FIELDS = [
 /**
  * 组装给沙箱 `source` 用的数据
  *
- * `key` 是**当前搜索关键字**：Legado 把 `source.key` 当作本次搜索的词，
- * 大量规则靠 `source.getKey()` 拼地址（`Search_()` 那类函数都这么写）。
+ * `key` 是**书源自己的地址**（`bookSourceUrl`），不是当前搜索词 —— 这一条以前写错了，
+ * 见下面 `out.key` 处的说明。本次搜索的词有**单独的 `key` 全局**（`{{key}}`、
+ * `@js:key`），不需要也不应该从这里拿。
  */
-export function sourcePayload(
-    source: BookSource | undefined,
-    key = '',
-): Record<string, unknown> | null {
+export function sourcePayload(source: BookSource | undefined): Record<string, unknown> | null {
     if (!source) return null
     const record = source as unknown as Record<string, unknown>
     const out: Record<string, unknown> = {}
@@ -58,7 +56,23 @@ export function sourcePayload(
         if (value === undefined || value === null) continue
         out[field] = value
     }
-    out.key = key
+    /**
+     * `source.getKey()` / `source.key` = `bookSourceUrl`
+     *
+     * 以前这里放的是**本次搜索关键字**，于是全量 816 条源里 **122 个源、206 处**
+     * `source.getKey()` / `source.key` 全部拿到一个搜索词，而书源把它们当**站点地址**用：
+     *
+     *   - `source.getKey() + "/search.html"`（📂天悦小说）→ 拼出 `斗破苍穹/search.html`
+     *   - `java.connect(source.getKey())`（📂八一中文 / ⚡📂三五中文 / ⚡📂香书小说 … 9 处）
+     *     → 去连一个叫「斗破苍穹」的主机
+     *   - `cookie.removeCookie(source.getKey())`（📂一本阁 / 📂小书本网 / 🔞爱丽丝书屋 …）
+     *     → 清的是另一个 key，等于没清
+     *   - `java.ajax(source.key)`（⚡📂九九藏书 / 📂冰清阁小说 / ⚡📂全本小说 …）→ 请求一个搜索词
+     *
+     * 它们在 Legado 那边都对：`BaseSource.getKey()` 返回的就是 `bookSourceUrl`
+     * （书源的身份、cookie 与缓存的 tag 都用它）。搜索词在 Legado 里是**单独的 `key`**。
+     */
+    out.key = String(record.bookSourceUrl ?? '')
     return out
 }
 
@@ -66,7 +80,7 @@ export function sourcePayload(
 export function sourceGlobals(ctx: RuleContext): Record<string, unknown> {
     const variables = { ...sessionVars(ctx), ...(ctx.vars ?? {}) }
     return {
-        __source: sourcePayload(ctx.source, ctx.key ?? ''),
+        __source: sourcePayload(ctx.source),
         __sourceVars: JSON.stringify(variables),
         __infoMap: ctx.infoMap ?? {},
     }

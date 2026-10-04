@@ -16,6 +16,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
  * （沙箱侧再包成「数组形态的 Elements」）。**取值方式是显式写的（`@href` / `@html`）
  * 就不动它** —— 那已经是一份能用的 HTML/属性值了。
  *
+ * 后来又把**形态**与**内容**拆成两个判据（见 `resultShape.ts` 的 `wantsJsoupResult`
+ * 与 `usesJsoupOnResult`）：形态仍按「字符串优先」，但内容只要调了节点方法就给 HTML。
+ * 合在一起用的时候，「同时按字符串用」的那批会拿到纯文本，`result.select(...)` 恒为 0。
+ * 另外 `<js>` 块那条路（不是 `@js:` 尾巴）以前也走的是默认取值（文本），
+ * 线上 6 条 `ruleToc.chapterList` 因此丢目录 —— 这两处都在下面有专门的用例。
+ *
  * 沙箱在 Node 里跑不起来（QuickJS 的 `.wasm`），所以换成**回显型替身**：
  * 于是「脚本看到的是什么内容、什么形态」成了可断言的东西。
  *
@@ -95,6 +101,26 @@ describe('按 jsoup 用 result：绑节点本身的 HTML', () => {
         for (const item of result as string[]) expect(item).toContain('<a href="/')
     })
 
+    it('多命中 + `result.toArray()` —— 也算「按节点用」（线上 20 个源 28 处在用）', async () => {
+        // 📂文学小说 的 `list = result.toArray()` 就是这个形状。
+        // 漏认它的后果：把节点集当纯文本，`result.toArray` 直接 not a function
+        const result = await seen('div.row@js:result.toArray().length')
+        expect(Array.isArray(result)).toBe(true)
+        const list = result as string[]
+        expect(list).toHaveLength(2)
+        expect(list[0]).toContain('<a href="/a">甲</a>')
+    })
+
+    it('`<js>` 块里调 `toArray()` —— 块前面那段选择器同样给节点 HTML', async () => {
+        // 6 条「海马书屋」形状的目录规则走的是 `<js>` 块这条路（不是 `@js:` 尾巴），
+        // 而这条路以前**不看**脚本要什么，一律给默认取值（文本）
+        const result = await seen('div.row<js>list = result.toArray(); result = list.length</js>')
+        expect(Array.isArray(result)).toBe(true)
+        const list = result as string[]
+        expect(list).toHaveLength(2)
+        for (const item of list) expect(item).toContain('class="row"')
+    })
+
     it('单命中 —— 也是数组（只装一个元素），`forEach` / `[i]` 照样可用', async () => {
         const result = await seen('div.one@js:result.size() > 0 ? result : ""')
         expect(Array.isArray(result)).toBe(true)
@@ -125,14 +151,27 @@ describe('显式写了取值方式就不动它', () => {
     })
 })
 
-describe('优先级：按字符串用 > 按 jsoup 用', () => {
-    it('两种写法混在一起时按字符串算，**内容也不换绑节点**', async () => {
-        // `String(result)` 与 `result.split` 是字符串写法 → result 是取值结果（纯文本）
+describe('优先级：按字符串用 > 按 jsoup 用（**形态**按字符串，**内容**仍是节点 HTML）', () => {
+    it('两种写法混在一起时按字符串算，但交给脚本的仍是节点 HTML', async () => {
+        /**
+         * 两件事要分开看，它们由两个判据分别决定：
+         *
+         *   - **形态**：`String(result)` 是字符串写法 → 绑成字符串而不是数组
+         *     （见 `resultGlobals` 的 `wantsJsoupResult`）
+         *   - **内容**：脚本调了 `result.select(...)` → 里面必须有标记 → 给节点 HTML
+         *     （见 `evalRule` 的 `usesJsoupOnResult`）
+         *
+         * 以前这两件事共用一个判据，于是「同时按字符串用」时内容退回**纯文本**，
+         * `result.select("a").size()` 恒为 0 —— 不报错，只是查询永远查不到东西。
+         * 线上 6 条 `ruleToc.chapterList`（🔞PO5 / 📂海马书屋 那一族）就是这么丢目录的。
+         */
         const result = await seen(
             'div.row@js:String(result).split("甲").length + result.select("a").size()',
         )
         expect(typeof result).toBe('string')
-        expect(result).toBe('甲\n乙')
+        expect(result).toBe(
+            '<div class="row"><a href="/a">甲</a></div>\n<div class="row"><a href="/b">乙</a></div>',
+        )
     })
 
     it('顶格 `@js:` 仍然绑页面原文（前面没有选择器）', async () => {

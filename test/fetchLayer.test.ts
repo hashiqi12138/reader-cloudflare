@@ -18,7 +18,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { createServer, type IncomingMessage, type Server } from 'node:http'
 
-import { SEARCH_TIMEOUT_MS, fetchText } from '../src/lib/http'
+import { SEARCH_TIMEOUT_MS, fetchDetailed, fetchText } from '../src/lib/http'
 import type { FetchPlan } from '../src/engine/types'
 
 interface Seen {
@@ -46,6 +46,14 @@ beforeAll(async () => {
             })
             // `/stall` 故意不响应：用来量超时
             if (req.url === '/stall') return
+            // `/forbidden` 演一出「非 2xx + 带 Set-Cookie」：java.connect 的 code()/headers() 靠它
+            if (req.url === '/forbidden') {
+                res.setHeader('Content-Type', 'text/plain; charset=utf-8')
+                res.setHeader('Set-Cookie', 'rc_connect=fake; Path=/')
+                res.statusCode = 403
+                res.end('connect-error-403')
+                return
+            }
             res.setHeader('Content-Type', 'text/html; charset=utf-8')
             res.end('<html><body>好了</body></html>')
         })
@@ -113,5 +121,38 @@ describe('上游超时', () => {
         // 这条钉的是**取向**：搜索的时限必须短。默认那个（20 秒）用在读正文上没问题，
         // 放在搜索上就是「点一次继续加载等 20 秒」。
         expect(SEARCH_TIMEOUT_MS).toBeLessThanOrEqual(8_000)
+    })
+})
+
+/**
+ * `fetchDetailed`：`java.connect` 的那条路
+ *
+ * 它与 `fetchText` 的**全部差别**就是这一点：HTTP 非 2xx **不当成失败**。
+ * 书源用 `res.code() == 403` 决定要不要换 cookie、用 `res.raw().headers('Set-Cookie')`
+ * 取新 cookie（📂天籁小说 整条 searchUrl 就是干这个），抛错会把判断变成异常。
+ *
+ * 所以这里必须真的收到一个 403 才能断言 —— 用一个只会回 200 的服务，这条路一行都测不到。
+ * 两条一起验：`fetchDetailed` 拿到 403 不抛错、而 `fetchText` 对同一个地址照样抛错
+ * （否则「不抛错」会被写进所有链路，搜索就会把错误页当成正文）。
+ */
+describe('fetchDetailed 与 fetchText 的分工', () => {
+    it('HTTP 403 时 fetchDetailed 不抛错，把状态码与响应头原样交出', async () => {
+        const response = await fetchDetailed(plan({ url: `${base}/forbidden` }))
+        expect(response.status).toBe(403)
+        expect(response.body).toContain('connect-error-403')
+        // 响应头名字要小写成可查的键，且 Set-Cookie 是**数组**（可能有多条）
+        expect(response.headers['set-cookie']).toEqual(['rc_connect=fake; Path=/'])
+    })
+
+    it('同一个 403 地址，fetchText 仍然抛错（链路不能把错误页当成正文）', async () => {
+        await expect(fetchText(plan({ url: `${base}/forbidden` }))).rejects.toThrowError(
+            /上游返回 HTTP 403/,
+        )
+    })
+
+    it('2xx 时两者给出同一份正文', async () => {
+        const detailed = await fetchDetailed(plan({}))
+        expect(detailed.status).toBe(200)
+        expect(detailed.body).toBe(await fetchText(plan({})))
     })
 })

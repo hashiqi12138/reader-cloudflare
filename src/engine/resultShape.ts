@@ -124,3 +124,69 @@ export function resultWantsArray(code: string): boolean {
     if (resultWantsString(code)) return false
     return returnsResultBare(code)
 }
+
+/**
+ * 脚本是不是把 `result` 当 jsoup 对象用
+ *
+ *   `result.select('h3').text()`   集合级方法
+ *   `result.toArray()`             集合级方法（jsoup 的 `Elements.toArray()`）
+ *
+ * Legado 里 `result` 同时可能是字符串也可能是 jsoup 对象，两种写法在**同一条书源里**
+ * 都会出现。这里只按「真的调了只有节点才有的方法」来判断，而不是一律包装 ——
+ * 一律包装会把 `typeof result` 从 `'string'` 变成 `'object'`，
+ * 而线上有 18 处脚本在判断这个类型。
+ *
+ * `toArray` 必须算在内：它是**元素级**的方法，字符串上没有。线上 20 个源 28 处在用
+ * （📂文学小说 的 `list = result.toArray()` 是最典型的一条）—— 漏掉它，
+ * 那条规则会把节点集当成一串文本，然后在 `result.toArray` 上 `TypeError: not a function`。
+ */
+export const RESULT_AS_JSOUP =
+    /\bresult\s*\.\s*(select|attr|first|last|get|eq|size|isEmpty|textNodes|eachText|html|outerHtml|hasClass|children|not|filter|matches|matchesOwn|tagName|ownText|toArray)\s*\(/
+
+/**
+ * 脚本在**迭代 `result` 的回调**里对条目调 jsoup 方法
+ *
+ *   `result.forEach(e => e.attr('href'))`   ← 🔞西瓜书屋 的目录规则就长这样
+ *   `result.map(x => x.text())`
+ *
+ * 这类写法要的同样是**元素**：`attr` / `text` / `select` 只有节点才给得出来，
+ * 给纯文本的话 `e.attr(...)` 恒为空串 —— 而且**不报错**。
+ *
+ * 认的是「回调参数上出现了一个**只有元素才有**的方法名」，方法名表刻意不含
+ * `split` / `replace` / `trim` / `slice` 这些字符串方法，所以
+ * 「迭代一串文本做字符串处理」的写法不会被误判。
+ */
+export const ITEM_AS_JSOUP =
+    /\bresult\s*\.\s*(?:map|forEach|filter|find|findIndex|some|every|flatMap|reduce)\s*\(\s*(?:function\s*)?\(?\s*([A-Za-z_$][\w$]*)\s*\)?\s*(?:=>)?[\s\S]{0,300}?\b\1\s*\.\s*(?:attr|select|text|html|outerHtml|ownText|tagName|hasClass|hasAttr|val|className|textNodes|eachText|matches|matchesOwn|children|first|last|get|eq|size|index|id)\s*\(/
+
+/**
+ * 脚本里出现了「只有节点才有的方法」（**不看**是不是同时按字符串用）
+ *
+ * 与 `wantsJsoupResult` 的差别就是那一条「字符串优先」：两个函数服务两件事 ——
+ * `wantsJsoupResult` 决定 `result` **绑成数组还是字符串**（两种都按字符串算时字符串能
+ * 同时满足两种写法）；而这个决定**交给脚本的内容是 HTML 还是文本**：
+ * 脚本既然调了 `attr` / `select` / `toArray`，那 `result` 里就必须有标记，
+ * 只给文本的话这些方法拿不到任何东西（`toArray()` 会得到一个空数组，**不报错**）。
+ */
+export function usesJsoupOnResult(code: string): boolean {
+    return RESULT_AS_JSOUP.test(code) || ITEM_AS_JSOUP.test(code)
+}
+
+/**
+ * 脚本是不是「**按节点用** `result`」
+ *
+ * 两种写法都算：直接调集合级方法（`result.size()` / `result.select(…)`），
+ * 以及迭代回调里对条目调元素级方法（`result.forEach(e => e.attr('href'))`）。
+ * 后者在字符串与字符串数组上同样不存在。
+ *
+ * 与上面的优先级保持一致：**按字符串用优先** —— 两种写法写在同一条规则里时，
+ * 只有 `__boxHtml` 给的「字符串 + jsoup 方法」那一份形态两种都能满足，
+ * 所以这时候按字符串算，`result` 也不去换绑节点数组。
+ *
+ * 抽成函数是为了让 `evalRule`（决定**交给脚本什么内容**）与 `resultGlobals`
+ * （决定**绑成数组还是字符串**）用的是同一个判据 —— 两处各写一遍必然跑偏。
+ */
+export function wantsJsoupResult(code: string): boolean {
+    if (resultWantsString(code)) return false
+    return usesJsoupOnResult(code)
+}

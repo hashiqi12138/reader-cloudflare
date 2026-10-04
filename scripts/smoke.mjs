@@ -3657,6 +3657,111 @@ console.log('\n=== 20. 节点级助手与对称加解密（java.getElements / cr
     check(!left.some((s) => s.id === id), '节点级与加解密测试源已清理')
 }
 
+console.log('\n=== 21. 连接式取网（java.connect）与 result.toArray() ===')
+{
+    /**
+     * 两条都是「线上在用、本引擎只会说 `TypeError: not a function`」的老账：
+     *
+     *   1. `java.connect(url)` 返回的是 Legado 的 `StrResponse` —— 脚本用
+     *      `res.code()` / `res.body()` / `res.url()` / `res.raw().request().url()` /
+     *      `res.raw().headers(name)` 取东西。22 个源在用，其中 9 个把
+     *      `.raw().request().url()` 写进 `searchUrl` 模板（📂八一中文 / ⚡📂三五中文 /
+     *      ⚡📂香书小说 / 📂福书小说 …）。
+     *   2. `result.toArray()`（jsoup 的 `Elements.toArray()`）—— 20 个源 28 处在用：
+     *      📂文学小说 的 `list = result.toArray()` 在 `@js:` 尾巴那条路上，
+     *      6 条「海马书屋」形状的目录规则在 `<js>` 块那条路上。
+     *
+     * 这一节两种取网形态、两条 `toArray` 路径都走一遍 —— 这些只有进真沙箱才跑得出来。
+     */
+    const id = `user:${BASE}`
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: '连接式取网与 toArray 测试源',
+                bookSourceUrl: BASE,
+                // ⚡📂三五中文 那一批的形状：先 connect 拿到站点地址，再拼出真正的搜索地址。
+                // 这一段能跑通，就说明「只取地址、不发请求」这条同步桥接上了
+                searchUrl: `{{java.connect(source.getKey()).raw().request().url()}}fixture/search?q={{key}}&p={{page}}`,
+                ruleSearch: {
+                    bookList: '@css:div.result-item',
+                    name: '@css:h3.title@text',
+                    bookUrl: '@css:h3.title a@href',
+                    // 📂文学小说 的形状（`@js:` 尾巴那条路）
+                    author: "@css:h3.title a@js:result.toArray().length + '篇'",
+                    // 6 条「海马书屋」形状（`<js>` 块那条路）：块里的 result 必须是**节点**
+                    kind: "@css:h3.title a<js>list = result.toArray(); result = 'BLK-' + list.length + '-' + String(list[0].attr('href'))</js>",
+                    // StrResponse 的各个形状：url / raw().request().url() / code / body / headers
+                    // 其中 body() 连调两次必须**一模一样** —— 测试站点的正文带随机串，
+                    // 发两次请求会得到两个不同的串（这就是「同一个响应只发一次」的判据）
+                    lastChapter:
+                        "@js:(function(){var r = java.connect('" +
+                        BASE +
+                        "/fixture/connect');var u = r.url(),u2 = r.raw().request().url(),c = r.code(),b1 = r.body(),b2 = r.body(),h = r.raw().headers('Set-Cookie');return [u === u2, c, b1 === b2, (h && h.length) ? h[0] : 'NONE', r.isSuccessful()].join('|')})()",
+                    // 非 2xx **不能抛错**：📂天籁小说 整条 searchUrl 就是靠 code()==403 判断换 cookie
+                    wordCount:
+                        "@js:(function(){var r = java.connect('" +
+                        BASE +
+                        "/fixture/connect?status=403');return r.code() + '|' + (String(r.body()).indexOf('connect-error-403') >= 0 ? 'ERRBODY' : 'WRONG')})()",
+                    // `source.getKey()` 必须是**书源地址**：122 个源、206 处都把它当站点地址用
+                    intro:
+                        "@js:source.getKey() === '" +
+                        BASE +
+                        "' ? 'KEY-OK' : ('KEY-BAD:' + source.getKey())",
+                },
+            },
+        ]),
+    )
+
+    const search = await call('POST', '/api/search', { keyword: '测试', sourceIds: [id] })
+    const per = search.json?.sources?.[0]
+    const books = per?.books ?? []
+    // 模板里那条 `java.connect(...).raw().request().url()` 拼出来的地址必须真能搜到书
+    check(
+        books.length === 2,
+        '把 `java.connect(...).raw().request().url()` 写进 searchUrl 能搜到书',
+        per?.error ?? `count=${books.length}`,
+    )
+
+    const kinds = books.map((b) => String(b.kind ?? ''))
+    // 每本书取到的是**它自己**那条链接，所以这里断的是形状而不是固定值
+    check(
+        kinds.length === 2 && kinds.every((k) => /^BLK-1-\/fixture\/book\/\d+$/.test(k)),
+        '`<js>` 块里 `result.toArray()` 拿到节点、`list[0].attr(...)` 取到地址',
+        JSON.stringify(kinds),
+    )
+    const authors = books.map((b) => String(b.author ?? ''))
+    check(
+        authors.every((a) => a === '1篇'),
+        '`@js:` 尾巴里 `result.toArray()` 同样可用（📂文学小说 的形状）',
+        JSON.stringify(authors),
+    )
+
+    const last = books.map((b) => String(b.lastChapter ?? ''))
+    check(
+        last.length > 0 &&
+            last.every((v) => v.startsWith('true|200|true|rc_connect=fake; Path=/|true')),
+        '`url()`/`raw().request().url()`/`code()`/`isSuccessful()` 与响应头都对，且同一个响应只发一次请求',
+        JSON.stringify(last[0] ?? ''),
+    )
+    const words = books.map((b) => String(b.wordCount ?? ''))
+    check(
+        words.length > 0 && words.every((v) => v === '403|ERRBODY'),
+        'HTTP 403 时 `java.connect` **不抛错**，`code()` 给 403、`body()` 给错误页',
+        JSON.stringify(words),
+    )
+    const intros = books.map((b) => String(b.intro ?? ''))
+    check(
+        intros.length > 0 && intros.every((v) => v === 'KEY-OK'),
+        '`source.getKey()` 给的是**书源地址**（122 个源、206 处都这么用）',
+        JSON.stringify(intros),
+    )
+
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+}
+
 console.log('\n=== 结果 ===')
 if (failures.length === 0) {
     console.log(

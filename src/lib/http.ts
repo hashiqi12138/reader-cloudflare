@@ -173,8 +173,42 @@ function isTimeout(err: unknown): boolean {
     return name === 'TimeoutError' || name === 'AbortError'
 }
 
-/** 按计划取回文本 */
-export async function fetchText(plan: FetchPlan): Promise<string> {
+/**
+ * 一次请求的完整结果
+ *
+ * 存在的理由是 `java.connect(...)`：它返回 Legado 的 `StrResponse`，书源会拿它做
+ * `res.code() == 403`、`res.raw().headers('Set-Cookie')`、`res.raw().request().url()`
+ * 这类判断与取值 —— 只给正文是不够的，而「不是 2xx 就抛错」恰恰把这类判断变成了异常。
+ */
+export interface FetchedResponse {
+    /** 实际请求的地址（跟随重定向之后的那一个） */
+    url: string
+    status: number
+    /** 响应头，名字已小写；同一个名字可能有多条（`Set-Cookie` 就靠这个） */
+    headers: Record<string, string[]>
+    body: string
+}
+
+/** 把响应头收成「小写名 → 值数组」；`Set-Cookie` 单独取，避免被合并成一条 */
+function collectHeaders(headers: Headers): Record<string, string[]> {
+    const out: Record<string, string[]> = {}
+    headers.forEach((value, name) => {
+        const key = name.toLowerCase()
+        const list = out[key] ?? (out[key] = [])
+        list.push(value)
+    })
+    const cookies = (headers as { getSetCookie?: () => string[] }).getSetCookie?.()
+    if (Array.isArray(cookies) && cookies.length > 0) out['set-cookie'] = cookies
+    return out
+}
+
+/**
+ * 取回文本**与响应元信息**；HTTP 非 2xx **不抛错**，由调用方自己看 `status`
+ *
+ * 与 `fetchText` 的分工：搜索 / 目录 / 正文这些链路要的是「不是 2xx 就是失败」，
+ * 所以 `fetchText` 仍然抛错；而 `java.connect` 要的是「把响应原样交给脚本」。
+ */
+export async function fetchDetailed(plan: FetchPlan): Promise<FetchedResponse> {
     const method = plan.method.toUpperCase()
     const body = isBodyless(method) ? undefined : plan.body
     const timeoutMs = plan.timeoutMs ?? DEFAULT_TIMEOUT_MS
@@ -196,10 +230,6 @@ export async function fetchText(plan: FetchPlan): Promise<string> {
         )
     }
 
-    if (!response.ok) {
-        throw new UpstreamError(`上游返回 HTTP ${response.status}：${plan.url}`, response.status)
-    }
-
     const buffer = await readBounded(response)
 
     let charset = normalizeCharset(plan.charset)
@@ -214,5 +244,19 @@ export async function fetchText(plan: FetchPlan): Promise<string> {
         charset = normalizeCharset(sniffCharset(probe)) ?? 'utf-8'
     }
 
-    return decode(buffer, charset)
+    return {
+        url: response.url || plan.url,
+        status: response.status,
+        headers: collectHeaders(response.headers),
+        body: decode(buffer, charset),
+    }
+}
+
+/** 按计划取回文本；非 2xx 抛错 */
+export async function fetchText(plan: FetchPlan): Promise<string> {
+    const { status, body, url } = await fetchDetailed(plan)
+    if (status < 200 || status >= 300) {
+        throw new UpstreamError(`上游返回 HTTP ${status}：${url}`, status)
+    }
+    return body
 }

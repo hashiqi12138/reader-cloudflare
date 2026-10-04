@@ -583,6 +583,47 @@ export async function handleFixture(request: Request, url: URL): Promise<Respons
     // POST 表单搜索：照 PHP 的行为写，见 formSearchPage 的说明
     if (pathname === '/fixture/search-post') return html(await formSearchPage(request))
 
+    /**
+     * `java.connect` 的靶子：一个**能被断言状态码与响应头**的端点
+     *
+     * 书源拿 connect 的返回值做 `res.code() == 403`、`res.raw().headers('Set-Cookie')`
+     * 这类判断，所以这里必须能演一出「非 2xx + 带 Set-Cookie」——
+     * 只用 200 的端点，`code()` 与 `headers()` 两条路都测不到。
+     */
+    if (pathname === '/fixture/connect') {
+        const status = Number(url.searchParams.get('status') ?? '200')
+        /**
+         * 正文里带一个**每次请求都不同**的随机串：这是「同一个响应对象只发一次请求」的判据
+         *
+         * 光断言 `code()` 与 `body()` 都能取到值，证明不了两者来自同一次请求 ——
+         * 发两次请求也同样能过。带上随机串之后，`r.body() === r.body()` 是同一份缓存，
+         * 而「请求了两次」会得到两个不同的串。
+         */
+        const nonce = crypto.randomUUID()
+        return new Response(
+            status >= 400 ? `connect-error-${status}:${nonce}` : `connect-ok:${nonce}`,
+            {
+                status,
+                headers: {
+                    'Content-Type': 'text/plain; charset=utf-8',
+                    'Set-Cookie': 'rc_connect=fake; Path=/',
+                    'X-Fixture': 'connect',
+                },
+            },
+        )
+    }
+
+    /**
+     * 把**实际请求到的地址**回显成页面内容
+     *
+     * `searchUrl` 里那一堆 `{{}}` / `@js:` 拼到最后到底是哪个地址，从外面看不见 ——
+     * 而拼错的后果往往只是「搜到 0 条、不报错」。所以给一个能把地址读出来的靶子，
+     * 断言就能直接对着**最终地址**下结论，而不是对着「搜到没搜到」猜。
+     */
+    if (pathname === '/fixture/echo-url') {
+        return html(`<html><body><div id="echo">${escapeHtml(url.href)}</div></body></html>`)
+    }
+
     const book = /^\/fixture\/book\/(\w+)$/.exec(pathname)
     if (book) return html(fixtureBookPage(book[1]!))
 
