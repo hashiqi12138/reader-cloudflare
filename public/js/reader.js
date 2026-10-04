@@ -1634,6 +1634,9 @@ export async function viewRead(host) {
                         measure()
                         page = Math.min(page, pageCount - 1)
                         applyPage(false)
+                        // 刚加上 `.paged` 时列还没分好（与改字号同一个时序问题），
+                        // 追到稳定为止 —— 不然页数会停在「还没分列」那一下量到的数
+                        settlePageCount()
                     }),
                     segmented('滚动', mode === 'scroll', () => {
                         mode = 'scroll'
