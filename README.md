@@ -4815,6 +4815,16 @@ res.header('Location')  → 书源那次请求自己拿到的那一跳
 | 搜索地址就是 `/cookies/set?rc55=1`（302 → `/cookies`）         | 落地页回 `{"cookies":{}}` —— 302 上那个 cookie 在中间响应里，被 `follow` 吃掉了 | 落地页回 **`{"cookies":{"rc55":"1"}}`**（跟到了，且第二跳就带着它） |
 | 书源写 `java.get('<…>/cookies/set?rc55=2').header('Location')` | `Location` 是空串（书源拿不到真地址）                                           | 拿到 `https://httpbin.org/cookies`                                  |
 
+跑出来的两行（同一个临时源，`searchUrl` 就是那个 302）：
+
+```
+java.get(url, {}).header('Location')        = https://httpbin.org/cookies
+另一个请求（/api/content）里 /cookies 的回显 = { "cookies": { "rc55": "1" } }
+```
+
+（探针第一次写成 `java.get(url)` 拿到空串 —— 那是**一参读变量**那条重载（第三十三轮记的），
+线上那 11 个源也都是两参写法 `java.get(su, {})`。是探针自己写错，不是引擎的事。）
+
 **这一轮仍然没做完的**
 
 - **重定向之后没换 `Referer`**：整条链共用最初那套请求头。浏览器会把 Referer 换成
