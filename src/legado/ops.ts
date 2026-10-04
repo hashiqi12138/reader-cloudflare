@@ -14,6 +14,7 @@ import {
     type Selection,
 } from '../engine/analyze'
 import { ruleHasJs } from '../engine/directives'
+import { sourceLimits } from '../engine/globals'
 import { closeSandboxBatch, openSandboxBatch, type SandboxSession } from '../engine/js'
 import type { BookSource, Chapter, RuleContext, SearchBook } from '../engine/types'
 import { SEARCH_TIMEOUT_MS, UpstreamError, fetchText } from '../lib/http'
@@ -327,8 +328,26 @@ export async function searchBooks(
         infoVarCrossKeys: crossRequestInfoKeys(source, 'ruleSearch'),
     }
     const sel = rootSelection(html)
-    const items = await analyzeSelections(sel, rule.bookList, searchCtx)
-    return booksFromItems(source, items, rule, searchCtx, base, warnings)
+    /**
+     * 逐条字段也开一个**批量求值会话**（第六十一轮）
+     *
+     * 搜索里「一页 N 本书 × 每条几个 `@js:` 字段」与目录里「一本书几千条」是同一种形状，
+     * 代价也是实打实的：实测 200 本书 × 3 条 `@js:`（600 次求值）要 **7 秒** ——
+     * 而搜索这一趟的预算（6 秒）只管取网与**单次**求值，管不到「一页几百次」的总量，
+     * 于是它能悄悄超出自己那份预算。
+     *
+     * 键（`preludeJs`）交给 `sourceLimits`：一页三个源共享一个 session，而一份上下文
+     * 只能给**同一份 jsLib** 的源用（见 `SandboxBatch.jsLib`）。
+     */
+    const session = searchCtx.sandbox as SandboxSession | undefined
+    const batchLimits = sourceLimits(searchCtx)
+    if (session) await openSandboxBatch(session, batchLimits)
+    try {
+        const items = await analyzeSelections(sel, rule.bookList, searchCtx)
+        return await booksFromItems(source, items, rule, searchCtx, base, warnings)
+    } finally {
+        if (session) closeSandboxBatch(session, batchLimits)
+    }
 }
 
 /** 搜索与「发现」用的是同一套字段规则，只是分组名不同 */
@@ -514,22 +533,12 @@ const MAX_TOC_PAGES = 20
  * `openSandboxBatch`）。冒烟第 43 段实测同一件事：**900 次求值 7484ms → 805ms**，
  * 一次求值从 8.3ms 降到 0.9ms。
  *
- * 为什么不是彻底取消：剩下的 0.9ms 已经与预置无关，而是**每次求值都要过几趟
- * 宿主↔VM 边界**（装一次宿主桥、注入全局、收回变量/书变量/cookie/登录态）——
- * 想再往上抬就得把那条路也合起来（记在 README 第五十九轮的「还没做完」里）。
- * 1200 条 × 四条逐条字段 ≈ 4800 次求值 ≈ 3.4 秒，这是当前愿意接受的单请求上限；
- * 而**纯选择器 / 裸字段名**那一类（语料里过半）依旧不设限。
+ * 为什么不是彻底取消：剩下的开销与预置无关了（第六十轮量过：边界往返只占 0.08ms，
+ * 其余是**内生的** —— 重新造那五个全局对象、解析规则里的动态脚本、`JSON.parse` 注入
+ * 进来的数据），那个天花板不高。1200 条 × 四条逐条字段 ≈ 4800 次求值，这是当前愿意
+ * 接受的单请求代价；而**纯选择器 / 裸字段名**那一类（语料里过半）依旧不设限。
  */
 const MAX_MARKED_CHAPTERS = 1200
-
-/**
- * 一批里求值多少次之后**换一个 context**
- *
- * 复用省时间，代价是「规则里新建的全局名」与垃圾都留在同一个 context 里（这是
- * 这一轮明知的取舍，见 README 第五十九轮）。轮换让它定期归零：代价是每 400 次
- * 多花一次 5.3ms 的预置解析，换的是「一本书一万次求值也不会把 8MB 内存吃满」。
- */
-const BATCH_ROTATE_EVALS = 400
 
 /** 目录结果 */
 export interface TocResult {
@@ -579,11 +588,15 @@ export async function fetchChapters(
      * 现在同一个 context 里只重跑 PER_EVAL_PRELUDE（0.01ms 量级），于是上限可以放开。
      *
      * 开在循环外、`finally` 里关掉：batch 占着 WASM 内存，绝不能留到请求之外。
+     * `limits` 与求值那边用**同一份**（`sourceLimits(ctx)`）—— 批是按 jsLib 分的，
+     * 给出同一份才找得回自己那一批（见 `SandboxBatch.jsLib`）。
+     * 轮换（每 400 次换 context）第六十一轮搬进沙箱层了，这里不用管。
      */
     const session = ctx.sandbox as SandboxSession | undefined
+    const batchLimits = sourceLimits(ctx)
     let batchOpen = false
     if (markHasJs && session) {
-        await openSandboxBatch(session)
+        await openSandboxBatch(session, batchLimits)
         batchOpen = true
     }
 
@@ -624,11 +637,6 @@ export async function fetchChapters(
 
             const items = await analyzeSelections(sel, rule.chapterList, tocCtx)
             for (const item of items) {
-                // 每 BATCH_ROTATE_EVALS 次换一个 context：让规则留下的全局名与垃圾归零
-                if (batchOpen && session?.batch && session.batch.runs >= BATCH_ROTATE_EVALS) {
-                    closeSandboxBatch(session)
-                    await openSandboxBatch(session)
-                }
                 const name = await analyzeString(item, rule.chapterName ?? 'text', tocCtx)
                 if (!name) continue
 
@@ -695,7 +703,7 @@ export async function fetchChapters(
         }
     } finally {
         // 批量会话必须在这里收掉：它占着 WASM 内存，留到请求之外就是漏
-        if (batchOpen && session) closeSandboxBatch(session)
+        if (batchOpen && session) closeSandboxBatch(session, batchLimits)
     }
 
     if (marksTruncated) {

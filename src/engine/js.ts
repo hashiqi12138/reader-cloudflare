@@ -160,13 +160,15 @@ export interface SandboxSession {
      */
     loginOut?: { header?: string; info?: string }
     /**
-     * 一个**批量求值会话**（第五十九轮）
+     * **批量求值会话**（第五十九轮；第六十一轮起按 jsLib 分开成多份）
      *
      * 由 `openSandboxBatch` 装上、`closeSandboxBatch` 拆掉：装上之后这一批里的每次
      * 求值都复用同一个 runtime + context（静态预置只解析一次）。生命周期刻意很短 ——
      * 由调用方在循环外开、循环结束就关，**绝不留到请求之外**（否则 WASM 内存会漏）。
+     *
+     * 键是「这份上下文是用**哪份 jsLib** 预热的」，见 `SandboxBatch.jsLib`。
      */
-    batch?: SandboxBatch
+    batches: Map<string, SandboxBatch>
 }
 
 /**
@@ -187,6 +189,24 @@ export interface SandboxSession {
 export interface SandboxBatch {
     runtime: QuickJSAsyncRuntime
     vm: QuickJSAsyncContext
+    /**
+     * 这份上下文是用**哪份 jsLib** 预热的（`''` = 没有 jsLib）
+     *
+     * 为什么要记它：`closeSandboxBatch` 之后要按同一份 jsLib 找回自己那一批；更要紧的是
+     * **同一份上下文不能给两个 jsLib 不同的书源共用** —— 静态预置与 jsLib 只跑一次
+     * （见下面那段「只跑一次」的说明），共用了 `GetUL()` / `host()` 这类名字就会**漏**到
+     * 另一个源里，而且不报错。第六十一轮把批量求值接到搜索上时，一页三个源共享一个
+     * session，这个漏点才第一次真正暴露出来（见 `openSandboxBatch`）。
+     */
+    jsLib: string
+    /**
+     * 有几个调用方正拿着它
+     *
+     * 同一份 jsLib 的多个源可以共用同一批（引用计数到 0 才真的销毁）——
+     * 于是「一页三个都没 jsLib 的源」共享一份上下文，而「一个带 jsLib 的混在里头」
+     * 也不会串味，只是那一份自己单独一批。
+     */
+    holders: number
     /** 静态预置与 jsLib 跑过了没有 */
     ready: boolean
     /** 这一次求值被 setProp 到全局的那些名字 —— 下次求值前要先删掉，否则会串味 */
@@ -197,9 +217,21 @@ export interface SandboxBatch {
     hardDeadline: number
     /** 这一批里最近一次求值是不是被超时中断的 */
     timedOut: boolean
-    /** 这一批已经跑过多少次求值（调用方据此轮换 context，见 ops.ts） */
+    /** 这一批已经跑过多少次求值（够了就轮换 context，见 `rotateSandboxBatch`） */
     runs: number
 }
+
+/**
+ * 一批里求值多少次之后**换一个 context**
+ *
+ * 复用省时间，代价是「规则里新建的全局名」与垃圾都留在同一个 context 里（第五十九轮
+ * 明知的取舍）。轮换让它定期归零：代价是每 400 次多花一次 5.3ms 的预置解析，
+ * 换的是「一本书一万次求值也不会把 8MB 内存吃满」。
+ *
+ * 时机判断第六十一轮搬进了沙箱层（`executeInSandbox`）：搜索那条路也开批之后，
+ * 轮换不该只挂在目录那一个调用方上。
+ */
+const BATCH_ROTATE_EVALS = 400
 
 export function createSandboxSession(): SandboxSession {
     let module: Promise<QuickJSAsyncWASMModule> | null = null
@@ -213,6 +245,7 @@ export function createSandboxSession(): SandboxSession {
         queue: Promise.resolve(),
         vars: {},
         bookVars: {},
+        batches: new Map(),
     }
 }
 
@@ -223,13 +256,27 @@ export function createSandboxSession(): SandboxSession {
  * 于是每次求值只要改那两个字段）。静态预置与 jsLib 留给这一批的**第一次求值**去跑 ——
  * 那时宿主桥才装得上，而预置里 `Packages` 之类在定义期就可能碰 `__host`。
  *
- * 已经开着就直接复用（重复开等于把上一次那个漏掉）。
+ * **一批绑一份 jsLib**（第六十一轮）：`limits` 就是给 `runInSandbox` 的那一份，
+ * 于是键与求值那边的查表用的是同一个字段（`preludeJs`）。理由见 `SandboxBatch.jsLib` ——
+ * 一页三个源共享一个 session，jsLib 不同的源共用一份上下文会**静默**串味。
+ *
+ * 同一份 jsLib 已经开着就**记一笔**并复用（重复开要配对重复关，引用计数到 0 才销毁）——
+ * 所以调用方**必须**把 `openSandboxBatch` / `closeSandboxBatch` 配成对，放在 try/finally 里。
  */
 export async function openSandboxBatch(
     session: SandboxSession,
-    limits: { timeoutMs?: number; memoryLimitBytes?: number; stackLimitBytes?: number } = {},
+    limits: {
+        preludeJs?: string
+        memoryLimitBytes?: number
+        stackLimitBytes?: number
+    } = {},
 ): Promise<void> {
-    if (session.batch) return
+    const key = limits.preludeJs ?? ''
+    const existing = session.batches.get(key)
+    if (existing) {
+        existing.holders += 1
+        return
+    }
     const QuickJS = await session.module
     const runtime = QuickJS.newRuntime()
     runtime.setMemoryLimit(limits.memoryLimitBytes ?? DEFAULT_MEMORY_LIMIT)
@@ -237,6 +284,8 @@ export async function openSandboxBatch(
     const batch: SandboxBatch = {
         runtime,
         vm: runtime.newContext(),
+        jsLib: key,
+        holders: 1,
         ready: false,
         injected: [],
         deadline: Number.POSITIVE_INFINITY,
@@ -253,20 +302,17 @@ export async function openSandboxBatch(
         }
         return false
     })
-    session.batch = batch
+    session.batches.set(key, batch)
 }
 
 /**
- * 关掉批量求值会话（**必须**在循环结束后调，否则 WASM 内存一直挂着）
+ * 真的销毁一份上下文
  *
  * 顺序与 `releaseHostBridge` 一致：先 `delete __host` 再销毁 runtime，否则
  * quickjs-emscripten 0.32.0 在 asyncify 变体上会抛
  * 「not found when trying to free HostRef」（那里有详细说明）。
  */
-export function closeSandboxBatch(session: SandboxSession): void {
-    const batch = session.batch
-    if (!batch) return
-    session.batch = undefined
+function disposeSandboxBatch(batch: SandboxBatch): void {
     try {
         batch.runtime.setInterruptHandler(() => false)
         const cleanup = batch.vm.evalCode('delete globalThis.__host')
@@ -281,6 +327,41 @@ export function closeSandboxBatch(session: SandboxSession): void {
     } catch {
         /* 同上：结果早已取到，VM 也不再复用 */
     }
+}
+
+/**
+ * 关掉批量求值会话（**必须**在循环结束后调，否则 WASM 内存一直挂着）
+ *
+ * `limits` 要与 `openSandboxBatch` 那一次**给出同一份 jsLib** —— 拿错键就关不掉
+ * （那是内存泄漏，不是报错）。引用计数没到 0 时只减一笔，上下文留给还在用的那边。
+ */
+export function closeSandboxBatch(
+    session: SandboxSession,
+    limits: { preludeJs?: string } = {},
+): void {
+    const key = limits.preludeJs ?? ''
+    const batch = session.batches.get(key)
+    if (!batch) return
+    batch.holders -= 1
+    if (batch.holders > 0) return
+    session.batches.delete(key)
+    disposeSandboxBatch(batch)
+}
+
+/**
+ * 一批跑够 `BATCH_ROTATE_EVALS` 次就换一个 context（第六十一轮从目录那条路搬进来）
+ *
+ * 引用计数与 jsLib 都照搬过去 —— 换的是上下文，不是「这一批」的账。
+ */
+async function rotateSandboxBatch(session: SandboxSession, key: string): Promise<void> {
+    const old = session.batches.get(key)
+    if (!old) return
+    const { holders, jsLib } = old
+    session.batches.delete(key)
+    disposeSandboxBatch(old)
+    await openSandboxBatch(session, { preludeJs: jsLib })
+    const fresh = session.batches.get(key)
+    if (fresh) fresh.holders = holders
 }
 
 /** 在会话内串行执行；闸门不会因为某次失败而断掉 */
@@ -1903,11 +1984,22 @@ async function executeInSandbox(
     /**
      * 复用同一个批量会话的 runtime + context（第五十九轮，见 `SandboxBatch`）
      *
-     * `limits.session.batch` 有值说明调用方在循环外面开了批：静态预置与 jsLib 只在
-     * **这一批的第一次求值**里跑，之后每次只重跑 PER_EVAL_PRELUDE —— 省下的正是
-     * 「重新解析 52KB 预置」那 5.3ms（一次求值总共才 5.64ms）。
+     * 调用方在循环外面开了批的话，这里就能按**这一份 jsLib** 找回那一批（第六十一轮
+     * 起一批绑一份 jsLib）：静态预置与 jsLib 只在**这一批的第一次求值**里跑，之后每次
+     * 只重跑 PER_EVAL_PRELUDE —— 省下的正是「重新解析 52KB 预置」那 5.3ms（一次求值
+     * 总共才 5.64ms）。
+     *
+     * 查表用的键与 `openSandboxBatch` 建批时用的是**同一个字段**（`preludeJs`）：
+     * 拿不到就是没开批（比如这一份 jsLib 没人在外面开），照旧走独享路径。
      */
-    const batch = limits.session?.batch
+    const batchKey = limits.preludeJs ?? ''
+    // 够次数就换一个 context（见 `BATCH_ROTATE_EVALS`）—— 换在求值**之前**，
+    // 不能换在求值中间
+    const current = session.batches.get(batchKey)
+    if (current && current.runs >= BATCH_ROTATE_EVALS) {
+        await rotateSandboxBatch(session, batchKey)
+    }
+    const batch = session.batches.get(batchKey)
     const reuse = batch !== undefined
 
     const runtime = reuse ? batch.runtime : QuickJS.newRuntime()

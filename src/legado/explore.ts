@@ -14,9 +14,14 @@
  * 与 searchUrl 完全同一套处理，不另开一条路。
  */
 
-import { analyzeSelections, rootSelection } from '../engine/analyze'
+import { analyzeSelections, rootSelection, type Selection } from '../engine/analyze'
 import { sourceGlobals, sourceLimits } from '../engine/globals'
-import { runInSandbox } from '../engine/js'
+import {
+    closeSandboxBatch,
+    openSandboxBatch,
+    runInSandbox,
+    type SandboxSession,
+} from '../engine/js'
 import type { BookSource, RuleContext, SearchBook } from '../engine/types'
 import { UpstreamError, fetchText } from '../lib/http'
 import { parseExploreCategories, type ExploreCategory } from './exploreParse'
@@ -111,17 +116,33 @@ export async function exploreBooks(
     }
 
     const sel = rootSelection(html)
-    const items = await analyzeSelections(sel, rule.bookList, listCtx)
-    const books = await booksFromItems(source, items, rule as BookListRule, listCtx, base, warnings)
+    /**
+     * 逐条字段也开一个批量求值会话（第六十一轮）
+     *
+     * 与搜索那条路同一个道理（见 `searchBooks`）：发现页一页也可能十几二十本书，
+     * 每条几个 `@js:` 字段就是几十次求值。首页那几个推荐位是**几个源并发**取回来的，
+     * 所以这里的批必须按 jsLib 分开才不会串味（见 `SandboxBatch.jsLib`）。
+     */
+    const session = listCtx.sandbox as SandboxSession | undefined
+    const batchLimits = sourceLimits(listCtx)
+    if (session) await openSandboxBatch(session, batchLimits)
+    let items: Selection[]
+    let books: SearchBook[]
+    let nextRaw = ''
+    try {
+        items = await analyzeSelections(sel, rule.bookList, listCtx)
+        books = await booksFromItems(source, items, rule as BookListRule, listCtx, base, warnings)
+
+        if (rule.nextPageUrl) nextRaw = await analyzeAddress(sel, rule.nextPageUrl, listCtx)
+    } finally {
+        if (session) closeSandboxBatch(session, batchLimits)
+    }
 
     let nextUrl: string | null = null
-    if (rule.nextPageUrl) {
-        const rawNext = await analyzeAddress(sel, rule.nextPageUrl, listCtx)
-        if (rawNext) {
-            const resolved = resolveAddress(rawNext, base)
-            // 指向自己的「下一页」会被当成无底洞，挡掉
-            if (resolved !== base) nextUrl = resolved
-        }
+    if (nextRaw) {
+        const resolved = resolveAddress(nextRaw, base)
+        // 指向自己的「下一页」会被当成无底洞，挡掉
+        if (resolved !== base) nextUrl = resolved
     }
 
     return {
