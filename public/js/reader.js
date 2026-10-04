@@ -33,6 +33,7 @@ import {
     skeletonBlock,
     toast,
 } from './core.js'
+import { pageCountOf, pagePitch as pitchOf } from './pagination.js'
 import { applyRules, loadRules, PRESET_RULES, saveRules, makeRule } from './replace.js'
 import {
     describeRules,
@@ -345,6 +346,8 @@ export async function viewRead(host) {
     const flow = el('div', { class: 'reader-flow' })
     let pageCount = 1
     let page = 0
+    /** 「再量一帧」那件事的句柄（0 = 没有排着，见 `relayout`） */
+    let relayoutAgain = 0
 
     /**
      * 正文净化
@@ -450,6 +453,32 @@ export async function viewRead(host) {
     const PAGE_MARGIN = 22
     const PAGE_GAP = PAGE_MARGIN * 2
 
+    /** 翻一页的实际步长（列宽 + 列间距）—— 从布局里量，见 `pagination.js` 的说明 */
+    function pagePitch() {
+        return pitchOf(flow)
+    }
+
+    /**
+     * 页数 = 布局里**现在**有几列
+     *
+     * 不是开机算一次就不动的常数：工具条高度、字体度量、旋屏都会让列重新流动，
+     * 而 `scrollWidth` 是**静悄悄**变的 —— 不会派发 `window.resize`。早先只在
+     * `measure()` 里算一次，于是「第一遍量的时候盒子还没定型」会让页数比真实列数多几页：
+     * 翻到最后几页是**空白**的，计数器却还在往前走（第六十二轮在 1083×838 下复现过
+     * —— 11 页 vs 8 列，点一次「行距」让它重量之后才对上）。
+     */
+    function refreshPageCount(pitch) {
+        pageCount = pageCountOf(flow.scrollWidth, pitch)
+        if (page > pageCount - 1) page = pageCount - 1
+        return pageCount
+    }
+
+    /** 页码与进度条的显示：`measure()` 与 `applyPage()` 共用，免得计数器落伍 */
+    function renderPageUi() {
+        pageLabel.textContent = `${page + 1} / ${pageCount}`
+        updateProgressBar((page + 1) / pageCount)
+    }
+
     function measure() {
         if (mode !== 'page') {
             pageCount = 1
@@ -464,9 +493,9 @@ export async function viewRead(host) {
         flow.style.padding = `0 ${PAGE_MARGIN}px`
         flow.style.columnGap = `${PAGE_GAP}px`
         flow.style.columnWidth = `${columnWidth}px`
-        // 这样每列都正好占一个可视宽：scrollWidth = n * 可视宽（末列右侧的留白不计入溢出）
-        pageCount = Math.max(1, Math.round(flow.scrollWidth / width))
-        page = Math.min(page, pageCount - 1)
+        // 这样每列都正好占一个可视宽：scrollWidth = n * 列距 - 留白
+        refreshPageCount(pagePitch())
+        renderPageUi()
     }
 
     function applyPage(animate, direction) {
@@ -474,15 +503,20 @@ export async function viewRead(host) {
             updateProgressBar(1)
             return
         }
-        flow.style.transform = `translateX(${-page * body.clientWidth}px)`
+        /**
+         * 步长与页数都按**当前**布局重算（见 `pagePitch` / `refreshPageCount`）：
+         * 页面内部的布局变了不派发 `window.resize`，只靠 `measure()` 那几处调用会落伍
+         */
+        const pitch = pagePitch()
+        refreshPageCount(pitch)
+        flow.style.transform = `translateX(${-page * pitch}px)`
         if (animate) {
             body.classList.remove('turn-next', 'turn-prev')
             void body.offsetWidth
             body.classList.add(direction === 'prev' ? 'turn-prev' : 'turn-next')
             setTimeout(() => body.classList.remove('turn-next', 'turn-prev'), 340)
         }
-        pageLabel.textContent = `${page + 1} / ${pageCount}`
-        updateProgressBar((page + 1) / pageCount)
+        renderPageUi()
         scheduleSave()
     }
 
@@ -496,6 +530,9 @@ export async function viewRead(host) {
             body.scrollBy({ top: step * body.clientHeight * 0.9, behavior: 'smooth' })
             return
         }
+        // 「末页在哪」得按**当前**布局问一次：页数要是落伍了，翻到最后一页会多出
+        // 一两下空翻（第二次才换章），或者干脆把最后几页当成还没到（见 `refreshPageCount`）
+        refreshPageCount(pagePitch())
         const next = page + step
         if (next < 0) {
             if (index > 0) openChapter(index - 1, 'last')
@@ -846,8 +883,9 @@ export async function viewRead(host) {
      * 折叠 Range 量的是「这个字符站在哪一列」，正是要问的问题。
      */
     function columnOf(node) {
-        const width = body.clientWidth
-        if (width <= 0) return page
+        // 与翻页共用同一个「一列有多宽」：两处各算一份的话，跳过去的页码会差一列
+        const width = pagePitch()
+        if (!(width > 0)) return page
         const anchor = node.nodeType === 3 || node.firstChild === null ? node : node.firstChild
         let left
         try {
@@ -891,6 +929,7 @@ export async function viewRead(host) {
 
         if (mode === 'page') {
             // 翻页模式不能靠 scrollIntoView 定位：正文是横向多列，纵向滚动根本不动
+            refreshPageCount(pagePitch())
             const previous = page
             page = Math.max(0, Math.min(pageCount - 1, columnOf(node)))
             applyPage(previous !== page, page < previous ? 'prev' : 'next')
@@ -2226,12 +2265,45 @@ export async function viewRead(host) {
         relayout()
     }
 
+    /**
+     * 把页数追到「稳定」为止（最多三帧）
+     *
+     * 字号/行距写在 `<html>` 的自定义属性上，而**列的重排要等这一帧渲染完**
+     * 才落进布局 —— 实测同一台机器上 16ms 时量到的还是旧列数、40ms 才是新的，
+     * 所以「补一帧」不够：计数器会停在旧页数上（第六十二轮）。
+     * 这里改成盯 `scrollWidth`：变了就重量、连续一帧没变就停，最多三帧。
+     * 捏合改字号是每帧一次，靠 `relayoutAgain` 合并，同一时间只跑一条。
+     */
+    function settlePageCount() {
+        if (relayoutAgain !== 0) return
+        let tries = 0
+        let seen = flow.scrollWidth
+        const step = () => {
+            relayoutAgain = requestAnimationFrame(() => {
+                if (mode !== 'page' || tries >= 3) {
+                    relayoutAgain = 0
+                    return
+                }
+                tries += 1
+                const now = flow.scrollWidth
+                if (now !== seen) {
+                    seen = now
+                    measure()
+                    applyPage(false)
+                }
+                step()
+            })
+        }
+        step()
+    }
+
     /** 改了字号/行距之后重新分页，并尽量停在原来的位置 */
     function relayout() {
         const ratio = pageCount > 0 ? page / pageCount : 0
         measure()
         page = Math.min(pageCount - 1, Math.round(ratio * pageCount))
         applyPage(false)
+        settlePageCount()
     }
 
     shell.append(sheetHost)
@@ -2260,6 +2332,14 @@ export async function viewRead(host) {
             }
         }
         void saveProgress()
+
+        /**
+         * 开头这几帧里**盒子还没定型**：页面级滚动条的有无、上下工具条的最终高度
+         * 都是在这之后才落定的，而列会跟着盒子重新流动 —— 第一遍量出来的页数会比
+         * 真实列数多几页（1083×838 下量到 11，实际 8），翻到末尾就是空白页。
+         * 交给 `settlePageCount()` 追到稳定（第六十二轮）。
+         */
+        if (mode === 'page') settlePageCount()
     })
 
     void append
