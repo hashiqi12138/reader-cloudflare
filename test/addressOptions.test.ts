@@ -27,7 +27,9 @@ vi.mock('../src/engine/js', () => ({
     sandboxResultToStrings: (value: unknown) => [String(value ?? '')],
 }))
 
-const { resolveAddress, resolveCoverAddress, resolveUrl } = await import('../src/legado/ops')
+const { analyzeAddress, resolveAddress, resolveCoverAddress, resolveUrl } =
+    await import('../src/legado/ops')
+const { rootSelection } = await import('../src/engine/analyze')
 const { splitUrlAndOptions } = await import('../src/legado/urlOptions')
 
 const BASE = 'https://guiwb.nnmh.info/comic/1.html'
@@ -85,6 +87,29 @@ describe('resolveAddress：先拆选项，再补全地址，再把选项接回�
         const wrong = resolveUrl(`/cover/1.jpg${COVER_OPTIONS}`, BASE)
         expect(wrong).toContain('%7B') // 花括号被百分号编码
         expect(splitUrlAndOptions(wrong).options).toEqual({}) // 下游再也拆不出来
+    })
+})
+
+describe('模板拼出来的字面地址 + 选项（`⚡📂新小书亭` 的形状）', () => {
+    /**
+     * 这条链**依赖展开顺序**：先由字段规则那一层把 `{{$.bookId}}` 展开成数字，
+     * 再交给 `resolveAddress` 拆选项 —— 展开之后 `{"bookId":7}` 才是合法 JSON。
+     * 顺序反了（先解析选项）就会报「请求选项不是合法 JSON」，而这正是书源原文的样子：
+     * 它写的是 `"bookId": {{$.bookId}}`，**不加引号**。
+     */
+    it('选项里不加引号的模板，展开成数字之后能被拆开', async () => {
+        const item = rootSelection('{"id":7}')
+        const raw = await analyzeAddress(
+            item,
+            'http://app.1001p.com/api/book/bookDetail,{"body":{"bookId":{{$.id}}},"method":"POST"}',
+            { baseUrl: 'http://app.1001p.com' },
+        )
+        expect(raw).toBe(
+            'http://app.1001p.com/api/book/bookDetail,{"body":{"bookId":7},"method":"POST"}',
+        )
+        const split = splitUrlAndOptions(raw)
+        expect(split.url).toBe('http://app.1001p.com/api/book/bookDetail')
+        expect(split.options.body).toBe('{"bookId":7}')
     })
 })
 

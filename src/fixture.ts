@@ -625,18 +625,21 @@ export async function handleFixture(request: Request, url: URL): Promise<Respons
     }
 
     /**
-     * 把**这次请求是怎么发的**回显成页面：方法、几个关心的请求头
+     * 把**这次请求是怎么发的**回显成页面：方法、几个关心的请求头、请求体
      *
-     * 书源给一条地址写 `,{"method":"POST","headers":{…}}` 时，从外面看不见这些选项有没有
-     * 真的生效 —— 而失效的后果只是「取回一个别的页面」，不报错。有了这个靶子，
-     * 冒烟就能对着「请求本身」下结论（§31）。
+     * 书源给一条地址写 `,{"method":"POST","headers":{…},"body":…}` 时，从外面看不见这些
+     * 选项有没有真的生效 —— 而失效的后果只是「取回一个别的页面」，不报错。有了这个靶子，
+     * 冒烟就能对着「请求本身」下结论（§31 / §32）。
      */
     if (pathname === '/fixture/echo-request') {
+        const rawBody = await request.text()
         return html(
             `<html><body>` +
                 `<div id="method">${escapeHtml(request.method)}</div>` +
                 `<div id="probe">${escapeHtml(request.headers.get('X-RC-Probe') ?? '')}</div>` +
                 `<div id="referer">${escapeHtml(request.headers.get('Referer') ?? '')}</div>` +
+                `<div id="ctype">${escapeHtml(request.headers.get('content-type') ?? '')}</div>` +
+                `<div id="rawbody">${escapeHtml(rawBody)}</div>` +
                 `<div id="url">${escapeHtml(url.href)}</div>` +
                 `</body></html>`,
         )

@@ -77,4 +77,43 @@ describe('splitUrlAndOptions', () => {
             /请求选项不是合法 JSON/,
         )
     })
+
+    /**
+     * `body` 写成 **JSON 对象**是 Legado 支持的写法（⚡📂新小书亭 的四个字段、
+     * 📂全本小说 的目录都是它）。以前对象会一路传到 `resolveOptionsTemplate`，
+     * 那里写着 `out.body.includes('{{')` → 整条源报 `out.body.includes is not a function`。
+     */
+    it('body 写成 JSON 对象：序列化成字符串，并把 Content-Type 定成 application/json', () => {
+        const out = splitUrlAndOptions(
+            'http://app.1001p.com/api/book/bookSearch,{"body":{"searchTerms":"{{key}}","pageNum":"{{page}}"},"method":"POST"}',
+        )
+        expect(out.url).toBe('http://app.1001p.com/api/book/bookSearch')
+        expect(out.options.method).toBe('POST')
+        expect(out.options.body).toBe('{"searchTerms":"{{key}}","pageNum":"{{page}}"}')
+        expect(out.options.headers).toEqual({ 'Content-Type': 'application/json' })
+    })
+
+    it('body 是对象但书源自己声明了 Content-Type 时不覆盖', () => {
+        const out = splitUrlAndOptions(
+            'https://a.com/x,{"body":{"a":1},"headers":{"content-type":"text/plain"}}',
+        )
+        expect(out.options.body).toBe('{"a":1}')
+        expect(out.options.headers).toEqual({ 'content-type': 'text/plain' })
+    })
+
+    it('body 是字符串时一个字都不动，也不加 Content-Type（走表单那条默认）', () => {
+        const out = splitUrlAndOptions('https://a.com/x,{"body":"k={{key}}&p=1"}')
+        expect(out.options.body).toBe('k={{key}}&p=1')
+        expect(out.options.headers).toBeUndefined()
+    })
+
+    it('body 是数字 / 布尔这种「既不是字符串也不是对象」的写法，按字面发出去', () => {
+        expect(splitUrlAndOptions('https://a.com/x,{"body":123}').options.body).toBe('123')
+        expect(splitUrlAndOptions('https://a.com/x,{"body":false}').options.body).toBe('false')
+    })
+
+    it('body 是 null / 没写，都当作「没有请求体」', () => {
+        expect(splitUrlAndOptions('https://a.com/x,{"body":null}').options.body).toBeUndefined()
+        expect(splitUrlAndOptions('https://a.com/x,{"method":"GET"}').options.body).toBeUndefined()
+    })
 })

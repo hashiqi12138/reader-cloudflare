@@ -4928,6 +4928,74 @@ console.log('\n=== 31. 地址类字段里的请求选项（`地址,{选项}`） 
     )
 }
 
+console.log('\n=== 32. URL 选项里的 `body` 写成 JSON 对象 ===')
+{
+    /**
+     * `⚡📂新小书亭` 的四个字段（线上 5 处 / 2 个源）把 `body` 写成 **JSON 对象**：
+     *
+     *   http://…/bookSearch,{ "body": { "searchTerms": "{{key}}", "pageNum": "{{page}}" },
+     *                         "method": "POST" }
+     *
+     * 这个对象以前会一路传到 `resolveOptionsTemplate`，那里写着 `out.body.includes('{{')`
+     * → 整条源当场报 `out.body.includes is not a function`（一个指向引擎内部、
+     * 与书源毫不相干的错）。现在 `splitUrlAndOptions` 就把它序列化成字符串了。
+     *
+     * 这里验三件事：① 搜索不再报错 ② Content-Type 是 `application/json`
+     * ③ 体里的 `{{key}}` / `{{page}}` 展开成了关键字与页码
+     */
+    const id = `user:${BASE}/json-body`
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: 'URL 选项 body 写对象（临时）',
+                bookSourceUrl: `${BASE}/json-body`,
+                searchUrl:
+                    '/fixture/echo-request,{"body":{"searchTerms":"{{key}}","pageNum":"{{page}}"},"method":"POST"}',
+                ruleSearch: {
+                    bookList: 'body',
+                    name: '#ctype@text',
+                    author: '#rawbody@text',
+                    bookUrl: '#url@text',
+                },
+            },
+        ]),
+    )
+
+    const res = await fetch(`${BASE}/api/search`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ keyword: '测试', sourceIds: [id] }),
+    })
+    const per = (await res.json()).sources?.[0]
+    const book = per?.books?.[0]
+    check(
+        per?.ok === true && Boolean(book),
+        '搜索不再报 `out.body.includes is not a function`',
+        per?.error ?? `count=${per?.count}`,
+    )
+    check(
+        String(book?.name ?? '').startsWith('application/json'),
+        '对象 body 按 JSON 发出去（Content-Type 是 application/json，不是表单）',
+        String(book?.name ?? ''),
+    )
+    check(
+        String(book?.author ?? '') === '{"searchTerms":"测试","pageNum":"1"}',
+        '体里的 `{{key}}` / `{{page}}` 也展开成了关键字与页码',
+        String(book?.author ?? ''),
+    )
+
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+    check(
+        !((await getJson('/api/sources')).json?.sources ?? []).some((s) =>
+            String(s.id).includes('json-body'),
+        ),
+        'JSON body 的测试源已清理',
+    )
+}
+
 console.log('\n=== 结果 ===')
 if (failures.length === 0) {
     console.log(

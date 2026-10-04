@@ -16,9 +16,54 @@ export interface UrlOptions {
     method: string
     charset: string
     headers: Record<string, string>
+    /**
+     * 请求体。书源可以写成**字符串**（`"searchkey={{key}}&page={{page}}"`），
+     * 也可以写成**JSON 对象**（`"body": {"bookId": 123}`）—— 后者在
+     * `splitUrlAndOptions` 里就被序列化成字符串，所以走到下游的**永远是字符串**。
+     */
     body?: string
     /** 需要 WebView 渲染的站点本引擎不支持，必须显式拒绝 */
     webView: boolean
+}
+
+/** 请求头里有没有 Content-Type（大小写不敏感） */
+function hasContentType(headers: Record<string, string> | undefined): boolean {
+    return Object.keys(headers ?? {}).some((name) => name.toLowerCase() === 'content-type')
+}
+
+/**
+ * 把选项里的 `body` 规整成字符串
+ *
+ * 书源把 `body` 写成 **JSON 对象**是 Legado 支持的写法（`⚡📂新小书亭` 四个字段、
+ * `📂全本小说` 的目录都是它），这时要按 JSON 发出去。不在这一层规整的话，对象会一路传到
+ * `resolveOptionsTemplate` —— 那里写着 `out.body.includes('{{')`，整条源当场报
+ * `out.body.includes is not a function`，一个指向引擎内部、与书源毫不相干的错。
+ *
+ * 顺便把 Content-Type 定成 `application/json`：字符串 body 的默认是表单
+ * （见 `lib/http.ts` 的 requestHeaders），而 JSON 体配表单类型，PHP 之外的服务端多半不认。
+ * 书源自己声明了 Content-Type 就不动它。
+ *
+ * 数字 / 布尔这种「不是字符串也不是对象」的写法同样按字面发出去，不留对象在下面。
+ */
+function normalizeBody(options: Partial<UrlOptions>): Partial<UrlOptions> {
+    const body: unknown = options.body
+    // 字符串照原样；`null` 与没写都当「没有请求体」—— 留着 `null` 会在下游
+    // `body.includes(…)` 上炸，而它表达的意思本来就只是「没有体」
+    if (typeof body === 'string' || body === undefined) return options
+    if (body === null) return { ...options, body: undefined }
+
+    const serialized = typeof body === 'object' ? JSON.stringify(body) : String(body)
+    const headers = options.headers
+    const nextHeaders =
+        headers !== null && typeof headers === 'object' ? headers : ({} as Record<string, string>)
+
+    return {
+        ...options,
+        body: serialized,
+        headers: hasContentType(nextHeaders)
+            ? nextHeaders
+            : { ...nextHeaders, 'Content-Type': 'application/json' },
+    }
 }
 
 /**
@@ -41,6 +86,8 @@ export interface UrlOptions {
  * 不排除的话它会被当成选项段的开头，URL 被切成 `<` + `{{page}}>`，
  * 报出来的是「请求选项不是合法 JSON」—— 一个指向错误方向的错误信息。
  * 所以只认**前面不是 `<`** 的那个 `,`。
+ *
+ * 解析出来的 `body` 一律规整成字符串（见 `normalizeBody`）—— 下游只认字符串。
  */
 export function splitUrlAndOptions(raw: string): { url: string; options: Partial<UrlOptions> } {
     const trimmed = raw.trim()
@@ -52,7 +99,7 @@ export function splitUrlAndOptions(raw: string): { url: string; options: Partial
     const jsonText = trimmed.slice(index + 1).trim()
     try {
         const parsed = parseLooseJson<Partial<UrlOptions>>(jsonText)
-        return { url, options: parsed }
+        return { url, options: normalizeBody(parsed) }
     } catch {
         throw new UpstreamError(
             `书源 URL 的请求选项不是合法 JSON，无法确定该请求哪里：${jsonText.slice(0, 80)}`,
