@@ -5155,6 +5155,87 @@ console.log('\n=== 33. 展示用字段的规则坏掉，不该让整条源搜不
     )
 }
 
+console.log('\n=== 34. 单斜杠开头的 XPath（飘天文学那一族的字段规则） ===')
+{
+    /**
+     * 第四十六轮从「静默 0 条」里挖出来的：`📂飘天文学手机版` 的五个字段写的是
+     * `/a/p[1]/text()`（**单斜杠**）—— 意思是「这一条里的 a」。早先只认 `//` 开头的
+     * XPath，这些规则被当 **CSS** 交给 cheerio，抛「CSS 选择器无效」→
+     * **整条源一本书都搜不到**（不是取空，是整条失败）。
+     *
+     * 用 fixture 里同形状的页面（列表外的文档层级还故意放了个 `<a href="/NOPE">`），
+     * 验三件事：
+     *   ① 单斜杠字段规则被当 XPath（不再抛 CSS 错）
+     *   ② 取到的是**这一条**里的 a（书名/作者/简介/地址/封面都对）
+     *   ③ 不是「整页第一个 a」——地址里不能出现 `/NOPE`
+     */
+    const id = `user:${BASE}/slash-xpath`
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: '单斜杠 XPath（临时）',
+                bookSourceUrl: `${BASE}/slash-xpath`,
+                searchUrl: '/fixture/slash-xpath',
+                ruleSearch: {
+                    bookList: "//div[@class='hot_sale']",
+                    name: '/a/p[1]/text()',
+                    author: '/a/p[2]/text()',
+                    intro: '/a/p[3]/text()',
+                    bookUrl: '/a/@href',
+                    coverUrl: '/a/img/@src',
+                },
+            },
+        ]),
+    )
+
+    const res = await fetch(`${BASE}/api/search`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ keyword: '测试', sourceIds: [id] }),
+    })
+    const one = (await res.json()).sources?.[0]
+    const book = one?.books?.[0]
+
+    check(
+        one?.ok === true && (one?.count ?? 0) > 0,
+        '单斜杠 XPath 的源能搜到书（不再是「CSS 选择器无效」）',
+        one?.error ?? `count=${one?.count}`,
+    )
+    check(book?.name === '测试小说·甲', '`/a/p[1]/text()` 取到这一条的书名', String(book?.name))
+    check(
+        String(book?.author ?? '').includes('作者甲'),
+        '`/a/p[2]/text()` 取到这一条的作者',
+        String(book?.author ?? ''),
+    )
+    check(Boolean(book?.intro), '`/a/p[3]/text()` 取到这一条的简介', String(book?.intro ?? ''))
+    check(
+        book?.bookUrl === `${BASE}/fixture/book/1`,
+        '`/a/@href` 取到这一条的地址（相对当前条目）',
+        String(book?.bookUrl ?? ''),
+    )
+    check(
+        book?.coverUrl === `${BASE}/fixture/media/page-1.png`,
+        '`/a/img/@src` 取到这一条的封面',
+        String(book?.coverUrl ?? ''),
+    )
+    check(
+        !String(book?.bookUrl ?? '').includes('/NOPE'),
+        '取到的是这一条里的 a，不是整页第一个 a',
+        String(book?.bookUrl ?? ''),
+    )
+
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+    check(
+        !((await getJson('/api/sources')).json?.sources ?? []).some((s) =>
+            String(s.id).includes('slash-xpath'),
+        ),
+        '单斜杠 XPath 的测试源已清理',
+    )
+}
+
 console.log('\n=== 结果 ===')
 if (failures.length === 0) {
     console.log(

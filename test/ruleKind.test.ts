@@ -58,4 +58,17 @@ describe('规则方言判定', () => {
             expect(detectKind(rule).kind, rule).toBe('json')
         }
     })
+
+    it('`/` 开头的都是 XPath —— 单斜杠也算（飘天文学那一族字段）', () => {
+        // 单斜杠以前没被认成 XPath（只认 `//`），于是 `/a/p[1]/text()` 落到 CSS 上，
+        // cheerio 抛「CSS 选择器无效，无法解析」→ **整条源一本书都搜不到**。
+        // 线上这一族是 📂飘天文学手机版 的 name/author/intro/bookUrl/coverUrl 五个字段：
+        //   `/a/p[1]/text()`  `/a/p[2]/text()`  `/a/p[3]/text()`  `/a/@href`  `/a/img/@src`
+        for (const rule of ['/a/p[1]/text()', '/a/@href', '/a/img/@src', '/html/body/div']) {
+            expect(detectKind(rule).kind, rule).toBe('xpath')
+        }
+        // `//` 与 `(/` 不受影响
+        expect(detectKind('//div[@class="hot_sale"]').kind).toBe('xpath')
+        expect(detectKind('(/html/body)/div').kind).toBe('xpath')
+    })
 })

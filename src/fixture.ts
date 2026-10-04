@@ -111,6 +111,34 @@ ${items}
 }
 
 /**
+ * **单斜杠 XPath** 的靶子：结构照搬 `⚡📂飘天文学` / `📂飘天文学手机版`
+ *
+ * 那两家的搜索结果里，条目是 `<div class="hot_sale"><a><img><p>…</p></a></div>`，
+ * 而字段规则写的是 `/a/p[1]/text()` / `/a/@href` 这种**单斜杠**路径 ——
+ * 意思是「**这一条里的** a」，不是「文档根下的 a」。早先单斜杠没被认成 XPath，
+ * 整条规则落到 CSS 上、cheerio 抛「CSS 选择器无效」→ 整条源一本书都搜不到
+ * （见 scripts/smoke.mjs §34）。
+ *
+ * 页面里**故意**在列表外再放一个文档层级的 `<a href="/NOPE">`：若单斜杠被当成
+ * 文档级路径，就会先撞上它 —— 用例能因此区分「取到这一条」与「取到整页第一个」。
+ */
+export function fixtureSlashXPathPage(): string {
+    const items = BOOKS.map(
+        (b) => `<div class="hot_sale">
+    <a href="/fixture/book/${b.id}"><img src="/fixture/media/page-1.png"><p>${escapeHtml(b.name)}</p><p>作 者 ：${escapeHtml(b.author)}</p><p>简介：${escapeHtml(b.intro)}</p></a>
+</div>`,
+    ).join('\n')
+
+    return page(
+        '搜索结果',
+        `<a href="/NOPE" id="doc-level"><p>整页第一个 a</p></a>
+<div class="hot_sale-list">
+${items}
+</div>`,
+    )
+}
+
+/**
  * **POST 表单搜索**：专门守住「带请求体必须声明 Content-Type」这一条
  *
  * 真实站点绝大多数是 PHP，而 PHP 只在 `application/x-www-form-urlencoded`（或
@@ -582,6 +610,9 @@ export async function handleFixture(request: Request, url: URL): Promise<Respons
 
     // POST 表单搜索：照 PHP 的行为写，见 formSearchPage 的说明
     if (pathname === '/fixture/search-post') return html(await formSearchPage(request))
+
+    // 单斜杠 XPath 的靶子（见 fixtureSlashXPathPage 的说明）
+    if (pathname === '/fixture/slash-xpath') return html(fixtureSlashXPathPage())
 
     /**
      * `java.connect` 的靶子：一个**能被断言状态码与响应头**的端点

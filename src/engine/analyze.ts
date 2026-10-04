@@ -144,6 +144,26 @@ export function detectKind(rule: string): {
         return { kind: 'jsoup', body: t }
     }
     if (t.startsWith('//') || t.startsWith('(/')) return { kind: 'xpath', body: t }
+    /**
+     * **单个 `/` 开头也是 XPath**
+     *
+     * 书源里 `⚡📂飘天文学` / `📂飘天文学手机版` 的五个字段是这么写的：
+     *
+     *   bookList: `//div[@class='hot_sale']`
+     *   name:     `/a/p[1]/text()`      bookUrl: `/a/@href`
+     *   author:   `/a/p[2]/text()`      coverUrl: `/a/img/@src`
+     *
+     * 意思很清楚：**这一条里的 `a`，再取它的 p[1]** —— 是相对当前条目的路径，
+     * 不是「文档根下的 a」。以前这里不认它，整条规则落到 CSS 上 → cheerio 抛
+     * 「CSS 选择器无效」→ **整条源一本书都搜不到**（第四十五轮的体检里就有这一条）。
+     *
+     * 为什么敢把所有 `/` 开头都当 XPath：**规则字段里没有第二种以 `/` 开头的东西**。
+     * 相对地址（`/book/1.html`）只会出现在 URL 字段，那条路根本不经过 `detectKind`；
+     * 带模板的相对地址（`/api/{{$.id}}`）走的是「展开后是字面文本」那条路
+     * （判据在 `hasRuleSyntax`，那里**没有**改，所以模板那条路一个字没动）。
+     * CSS 选择器也不会以 `/` 开头。
+     */
+    if (t.startsWith('/')) return { kind: 'xpath', body: t }
     // `$[` 与 `$.` 都是 JSONPath：`$[*]`（根数组通配）、`$[:10]`（前 10 个）在语言里
     // 与 `$.a[*]` 地位相同。只认 `$.` 的话它们会被当成 **CSS** 去 cheerio 里找一个叫
     // `$[*]` 的元素 —— 静默 0 条。线上这一类共 4 源 5 处，全都长在 `<js>` 块之后
@@ -268,7 +288,11 @@ function bareJsonField(rule: string, source: string): string | null {
  * 本身就是文档级的，保持原样。
  */
 function toRelativeXPath(body: string): string {
-    return body.startsWith('//') ? `.${body}` : body
+    // `//x` 与 `/x` **都**按「相对当前节点」处理：书源里 `/a/p[1]/text()`
+    // （⚡📂飘天文学 / 📂飘天文学手机版）的意思就是「这一条里的 a > p[1]」，
+    // 不是「文档根下的 a」。当绝对路径的话一条都取不到，而且**不报错**，
+    // 只是整列字段空着 —— 静默错值里最难查的那一种。
+    return body.startsWith('/') ? `.${body}` : body
 }
 
 /**
