@@ -4436,6 +4436,105 @@ console.log('\n=== 27. `@put:` / `@get:` 与 `ruleBookInfo.init` ===')
     )
 }
 
+console.log('\n=== 28. `init` 换掉求值的根 ===')
+{
+    /**
+     * `ruleBookInfo.init` 的另一半（线上 42 处 / 约 41 个源）：它不是往变量表里写东西，
+     * 而是**换掉后面那些字段的求值根**。两个方向各验一次：
+     *
+     *   ① **JSON**：`init: $.data` + 字段 `$.title` / `$.author` —— 接口返回的是
+     *      `{code:0, data:{title:…}}`（`/fixture/api/book/1` 就是照这个形状造的靶子）。
+     *      不换根的话每条规则都差一层，`$.title` 取到空，而且不报错。
+     *   ② **DOM**：`init: .book-info` + 字段 `.book-name@text` —— 选中的节点成为新根，
+     *      后续选择器都在它**里面**找。
+     *
+     * 两个方向都拿同一个「期望值」来断言（测试小说·甲 / 作者甲 / 简介原文），
+     * 所以「换没换对根」一眼就能看出来。
+     */
+    const expect = { name: '测试小说·甲', author: '作者甲', intro: '这是一本用于验证链路的小说。' }
+
+    const cases = [
+        {
+            id: `user:${BASE}/init-json`,
+            url: `${BASE}/fixture/api/book/1`,
+            name: 'init 换根·JSON（临时）',
+            rule: { init: '$.data', name: '$.title', author: '$.author', intro: '$.intro' },
+        },
+        {
+            id: `user:${BASE}/init-dom`,
+            url: `${BASE}/fixture/book/1`,
+            name: 'init 换根·DOM（临时）',
+            rule: {
+                init: '.book-info',
+                name: '.book-name@text',
+                author: '.book-author@text',
+                intro: '.book-intro@text',
+            },
+        },
+    ]
+
+    for (const c of cases) {
+        await call('DELETE', `/api/sources?id=${encodeURIComponent(c.id)}`)
+        await call(
+            'POST',
+            '/api/sources',
+            JSON.stringify([
+                {
+                    bookSourceName: c.name,
+                    bookSourceUrl: c.id.replace(/^user:/, ''),
+                    ruleBookInfo: c.rule,
+                },
+            ]),
+        )
+        const res = await getJson(
+            `/api/book?sourceId=${encodeURIComponent(c.id)}&url=${encodeURIComponent(c.url)}`,
+        )
+        const got = res.json ?? {}
+        check(
+            got.name === expect.name && got.author === expect.author && got.intro === expect.intro,
+            `${c.name}：${c.rule.init} 换根之后三个字段都对`,
+            res.json?.error ??
+                JSON.stringify({ name: got.name, author: got.author, intro: got.intro }),
+        )
+        await call('DELETE', `/api/sources?id=${encodeURIComponent(c.id)}`)
+    }
+
+    const leftInit = (await getJson('/api/sources')).json?.sources ?? []
+    check(
+        !leftInit.some((s) => String(s.id).startsWith(`user:${BASE}/init-`)),
+        'init 换根的测试源已清理',
+    )
+
+    /**
+     * `init` 自己写坏时**不能连累整页**：那些 `@get:{键}` 空着就行
+     *
+     * 这条是补第三十九轮的一个隐患：`init` 从「被忽略」变成「要跑」之后，
+     * 一条 init 脚本抛错就会把整个 `/api/book` 变成报错 —— 而它本来只是给别的字段铺变量。
+     */
+    const idBadInit = `user:${BASE}/init-bad`
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(idBadInit)}`)
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: 'init 写坏（临时）',
+                bookSourceUrl: `${BASE}/init-bad`,
+                ruleBookInfo: { init: '@js:throw new Error("boom")', name: '.book-name@text' },
+            },
+        ]),
+    )
+    const badInit = await getJson(
+        `/api/book?sourceId=${encodeURIComponent(idBadInit)}&url=${encodeURIComponent(`${BASE}/fixture/book/1`)}`,
+    )
+    check(
+        badInit.json?.name === '测试小说·甲',
+        '`init` 抛错时后面的字段照常取到值（不是整页报错）',
+        badInit.json?.error ?? JSON.stringify(badInit.json?.name),
+    )
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(idBadInit)}`)
+}
+
 console.log('\n=== 结果 ===')
 if (failures.length === 0) {
     console.log(

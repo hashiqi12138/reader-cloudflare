@@ -627,6 +627,33 @@ export async function handleFixture(request: Request, url: URL): Promise<Respons
     const book = /^\/fixture\/book\/(\w+)$/.exec(pathname)
     if (book) return html(fixtureBookPage(book[1]!))
 
+    /**
+     * 书籍详情的 **JSON** 接口，形状照抄真实的接口型源
+     *
+     * 那几家（⚡📂米读小说 的 `init: $.data`、⚡📂茄子免费小说 的 `$.data.book`）都把书
+     * 包在 `{code:0, data:{…}}` 里，而 `ruleBookInfo` 的字段写成**相对** `data` 的路径
+     * （`$.title` / `$.author`）—— 这正是 `init`「换根」要解决的那件事。
+     * 没有这个靶子，「换根」就只能靠线上源去验，本地冒烟看不见。
+     */
+    const jsonBook = /^\/fixture\/api\/book\/(\w+)$/.exec(pathname)
+    if (jsonBook) {
+        const one = BOOKS.find((x) => x.id === jsonBook[1])
+        return new Response(
+            JSON.stringify({
+                code: 0,
+                data: one
+                    ? {
+                          title: one.name,
+                          author: one.author,
+                          intro: one.intro,
+                          cover: `/fixture/cover/${one.id}.jpg`,
+                      }
+                    : {},
+            }),
+            { headers: { 'Content-Type': 'application/json; charset=utf-8' } },
+        )
+    }
+
     const explore = /^\/fixture\/explore\/([\w-]+)$/.exec(pathname)
     if (explore) {
         return html(fixtureExplorePage(explore[1]!, Number(url.searchParams.get('p') ?? '1')))

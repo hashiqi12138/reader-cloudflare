@@ -9,6 +9,7 @@ import {
     analyzeSelections,
     analyzeString,
     analyzeStrings,
+    resolveInitSelection,
     rootSelection,
     type Selection,
 } from '../engine/analyze'
@@ -175,26 +176,33 @@ export async function fetchBookInfo(
     }
 
     /**
-     * **`init` 先跑，只取其副作用**
+     * **`init` 先跑，它决定两件事**
      *
-     * 线上 116 处 / 109 个源的 `ruleBookInfo.init` 是「一次性把字段算好存进变量表」：
-     * 顶格 `@put:{…}`（23 处）或脚本里的 `java.put`（47 处），其余字段写成 `@get:{键}`
-     * 直接读回来。`init` 不跑的话，这些源的 name / author / kind / intro … **整片空着**，
-     * 而且不报错。
+     * 线上 116 处 / 109 个源的 `ruleBookInfo.init`，分两类：
      *
-     * 顺序要紧：它必须与后面的字段共用同一个 `infoCtx`（同一张会话变量表），
-     * 否则 `@get:{n}` 读的是另一个请求里的空表。返回值本身丢掉 —— `init` 的作用就是副作用。
+     *   1. **只取副作用**（70 处）：顶格 `@put:{…}`（23）或脚本里的 `java.put`（47）。
+     *      「求值一次、把值写进变量表」，其余字段用 `@get:{键}` 读回来。`init` 不跑的话，
+     *      这些源的 name / author / kind / intro … **整片空着**，而且不报错。
+     *   2. **换掉求值的根**（42 处）：`$.data`、`data.book`、`class.menu`、`.book` 这类。
+     *      `⚡📂米读小说` 的 init 是 `$.data`、字段是 `$.title` / `$.author`，接口返回的
+     *      却是 `{code:0, data:{title:…}}` —— 不换根每条规则都差一层，全部取空。
+     *
+     * 两类的判定与求值都在 `resolveInitSelection` 里（一看形状就知道是哪一类）。
+     * 返回非 null 时，后面所有字段都在**那个根**上求值。**只影响 `ruleBookInfo`**：
+     * 同一个源里 `ruleToc` 的 `$.data.chapter_lists[*]` 是绝对路径，`⚡📂米读小说`
+     * 的搜索规则 `$.data[*]` 也是绝对路径 —— 与 `init` 只挂在这个字段下正好一致。
      */
-    if (rule.init) await analyzeString(sel, rule.init, infoCtx)
+    const initSel = rule.init ? await resolveInitSelection(sel, rule.init, infoCtx) : null
+    const infoSel = initSel ?? sel
 
-    const tocUrlRaw = await analyzeAddress(sel, rule.tocUrl ?? '', infoCtx)
+    const tocUrlRaw = await analyzeAddress(infoSel, rule.tocUrl ?? '', infoCtx)
 
     return {
         tocUrl: tocUrlRaw ? resolveUrl(tocUrlRaw, plan.url) : plan.url,
-        name: await analyzeString(sel, rule.name ?? '', infoCtx),
-        author: await analyzeString(sel, rule.author ?? '', infoCtx),
-        intro: await analyzeString(sel, rule.intro ?? '', infoCtx),
-        coverUrl: resolveUrl(await analyzeAddress(sel, rule.coverUrl ?? '', infoCtx), plan.url),
+        name: await analyzeString(infoSel, rule.name ?? '', infoCtx),
+        author: await analyzeString(infoSel, rule.author ?? '', infoCtx),
+        intro: await analyzeString(infoSel, rule.intro ?? '', infoCtx),
+        coverUrl: resolveUrl(await analyzeAddress(infoSel, rule.coverUrl ?? '', infoCtx), plan.url),
     }
 }
 

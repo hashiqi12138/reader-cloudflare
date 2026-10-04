@@ -25,7 +25,7 @@ import {
 } from './jsoup'
 import { baseGlobals, sourceLimits } from './globals'
 import { extractValues, parseHtml, reparseFragment, selectNodes } from './select'
-import { jsonPathToStrings } from './jsonpath'
+import { jsonPathToStrings, queryJsonPath } from './jsonpath'
 import { runInSandbox, sandboxResultToString, sandboxResultToStrings } from './js'
 import type { SandboxGetElements, SandboxGetString, SandboxLimits } from './js'
 import {
@@ -1427,6 +1427,88 @@ export async function analyzeString(
 ): Promise<string> {
     const values = await analyzeStrings(sel, rule, ctx)
     return values.filter((v) => v !== '').join('\n')
+}
+
+/**
+ * 这个 init 值能不能当「根」—— 当不了就返回 null
+ *
+ * 能当根的是「选择器 / 路径」那一类（线上 42 处 / 约 41 个源）：
+ *   `$.data`（23 处）、`data` 这类裸词（8 处）、`data.book` 这类点号路径（6 处）、
+ *   `.book` / `class.menu` / `tag.main` 这类 DOM 选择器（5 处）
+ */
+function jsonInitPath(source: string, selector: string): string | null {
+    if (!isJsonContent(source)) return null
+    const t = selector.trim()
+    if (t.startsWith('$')) return t
+    // `class.menu` / `tag.main` 这种是 JSOUP 步骤，不是 JSON 路径 —— 不能当成 `$.class.menu`
+    if (/^(?:class|id|tag|text|children)(?:\.|$)/.test(t)) return null
+    // 裸词（`data` / `head` / `result`）、点号路径（`data.book`）、以及带下标的（`data[0]`，
+    // ⚡📂绿柠小说 的形状）都按 JSON 路径读
+    if (/^[A-Za-z_][\w-]*(?:\.[A-Za-z_][\w-]*)*(?:\.-?\d+|\[[^\]]*\])?$/.test(t)) return `$.${t}`
+    return null
+}
+
+/**
+ * 求值 `ruleBookInfo.init`，并返回**替换后的求值根**（不需要换根时返回 null）
+ *
+ * 两次都在这一个函数里，是因为「有没有副作用」和「能不能当根」是同一件事的两面：
+ *   - `@put:{…}` / 脚本：求值一次（**副作用**：往变量表里写），不换根
+ *   - `$.data` / `class.menu` 这类：**换根** —— 后面的字段都相对它求值
+ *
+ * 为什么要「换根」：`⚡📂米读小说` 的 init 是 `$.data`、字段是 `$.title` / `$.author` /
+ * `$..cover`，接口返回的却是 `{code:0, data:{title:…}}` —— 不换根的话每条规则都差一层，
+ * 全部取空（而且不报错）。同一个源里 `ruleToc` 的 `$.data.chapter_lists[*]` 是**绝对**路径，
+ * 所以换根只对 `ruleBookInfo` 生效 —— 这与 `init` 只挂在这个字段下正好一致。
+ *
+ * DOM 一侧同理：`class.menu`（⚡📂笔趣阁）、`.book`（📂无奈书库）选出的节点成为新的根，
+ * 后续的 CSS / JSOUP 规则都在它**里面**找。一个节点都没选中时**不换根**：那时多半是
+ * init 写错了，沿用整页至少不会把本来能用的字段一起弄丢。
+ */
+export async function resolveInitSelection(
+    sel: Selection,
+    init: string,
+    ctx: RuleContext,
+): Promise<Selection | null> {
+    const t = init.trim()
+    if (t === '') return null
+
+    const sideEffectOnly = /^@?(?:put|js):/i.test(t) || /^<js[\s>]/i.test(t) || t.includes('{{')
+    if (sideEffectOnly) {
+        try {
+            await analyzeStrings(sel, t, ctx)
+        } catch {
+            /**
+             * `init` 只是给后面的字段**铺变量**：它自己失败时，让那些 `@get:{键}` 空着就行
+             *
+             * 不吞的话，一条 init 脚本写坏（沙箱报错、上游取网失败）就把整本书的详情页
+             * 变成报错 —— 而那些字段本来也只是空着，不该整页打不开。判据与
+             * `evalTemplate` 里那句一样：**展示用的字段取不到，不连累整条链路**。
+             */
+        }
+        return null
+    }
+
+    // JSON：把根换成 init 命中的那个值（重新序列化成一段 JSON 文本，
+    // 这样 `$.` / 裸字段名 / `{{}}` 三条路都自然相对它求值）
+    const path = jsonInitPath(sel.source, t)
+    if (path !== null) {
+        let parsed: unknown
+        try {
+            parsed = JSON.parse(sel.source)
+        } catch {
+            return null
+        }
+        const hit = queryJsonPath(parsed, path).find((v) => v !== null && v !== undefined)
+        if (hit === undefined) return null
+        const text = typeof hit === 'string' ? hit : JSON.stringify(hit)
+        if (text.trim() === '') return null
+        return { ...sel, source: text }
+    }
+
+    // DOM：init 选出的节点成为新的根
+    const picked = await analyzeSelections(sel, t, ctx)
+    const nodes = picked.flatMap((p) => p.nodes)
+    return nodes.length > 0 ? { ...sel, nodes } : null
 }
 
 export { selectionFromText }
