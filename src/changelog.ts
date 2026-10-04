@@ -25,6 +25,11 @@ export interface ReleaseNote {
 
 export const CHANGELOG: ReleaseNote[] = [
     {
+        version: '0.56.0',
+        date: '2026-10-05',
+        note: '媒体代取加了一层边缘缓存；搜索 503 的结论：免费计划的 10 ms 上限跑不动，需要换宿主',
+    },
+    {
         version: '0.55.0',
         date: '2026-10-05',
         note: '平台兼容层：数据库 / 静态资源 / WASM 收敛到 src/platform（只抽接口，还没落第二个适配器）',
