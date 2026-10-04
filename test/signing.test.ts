@@ -102,4 +102,20 @@ describe('媒体地址签名', () => {
         const token = await signMediaToken(SECRET, { sourceId: '', url: '' }, TTL)
         await expect(verifyMediaToken(SECRET, token)).rejects.toThrowError(/缺少书源/)
     })
+
+    /**
+     * 封面令牌多带一个 `cover` 标记
+     *
+     * 代取那一侧靠它区分「封面」与「文件源的下载文件」：后者要
+     * `Content-Disposition: attachment` 强制下载，而 `<img>` 遇到 attachment 不显示。
+     */
+    it('封面令牌能带出 cover 标记；不写这个键时结果里也不出现它', async () => {
+        const media = await signMediaToken(SECRET, PAYLOAD, TTL)
+        await expect(verifyMediaToken(SECRET, media)).resolves.toEqual(PAYLOAD)
+        expect(await verifyMediaToken(SECRET, media)).not.toHaveProperty('cover')
+
+        const coverPayload = { ...PAYLOAD, cover: true }
+        const cover = await signMediaToken(SECRET, coverPayload, TTL)
+        await expect(verifyMediaToken(SECRET, cover)).resolves.toEqual(coverPayload)
+    })
 })

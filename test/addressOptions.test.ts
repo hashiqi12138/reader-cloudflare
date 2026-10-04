@@ -34,6 +34,7 @@ const {
     analyzeAddress,
     booksFromItems,
     hasAddressOptions,
+    needsCoverProxy,
     resolveAddress,
     resolveCoverAddress,
     resolveUrl,
@@ -251,5 +252,30 @@ describe('hasAddressOptions：一张封面要不要走代取', () => {
         // 可选段 `<,{{page}}>` 里那个 `,{` 不算（判据与 splitUrlAndOptions 同一条）
         expect(hasAddressOptions('https://a.com/list/<,{{page}}>.html')).toBe(false)
         expect(hasAddressOptions('')).toBe(false)
+    })
+})
+
+/**
+ * 代取的判据（第四十八轮：从「只看带选项」放宽到「再加 http」）
+ *
+ * 抽样实测：真实返回的封面里 **86%** 是 `http:`（老小说站大量没有 https）——
+ * 而我们部署在 https 上，这些封面会被当成**混合内容**拦掉，浏览器连请求都不发。
+ * 所以判据是「带选项 **或** http」，其余（https 且不带选项）不代取。
+ */
+describe('needsCoverProxy：这两类封面浏览器自己取不到', () => {
+    it('带请求选项的算（防盗链，线上 8 处 / 4 源）', () => {
+        expect(needsCoverProxy(`http://a.com/1.jpg${COVER_OPTIONS}`)).toBe(true)
+        expect(needsCoverProxy(`https://a.com/1.jpg${COVER_OPTIONS}`)).toBe(true)
+    })
+
+    it('http 的算（混合内容，抽样里占 86%）', () => {
+        expect(needsCoverProxy('http://www.8xiaoshuo.net/headimgs/0/86/s86.jpg')).toBe(true)
+        expect(needsCoverProxy('http://a.com/1.jpg')).toBe(true)
+    })
+
+    it('https 且不带选项的不算 —— 浏览器直接就能加载，不为它多花一次签名与子请求', () => {
+        expect(needsCoverProxy('https://img.ptwxz.org/files/1s.jpg')).toBe(false)
+        expect(needsCoverProxy('https://a.com/1.jpg')).toBe(false)
+        expect(needsCoverProxy('')).toBe(false)
     })
 })

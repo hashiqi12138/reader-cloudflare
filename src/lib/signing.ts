@@ -33,6 +33,15 @@ export class MediaTokenError extends Error {
 export interface MediaTokenPayload {
     sourceId: string
     url: string
+    /**
+     * 这是一张**封面**（而不是正文章节里的媒体）
+     *
+     * 分开标记的原因在代取那一侧：文件源（`bookSourceType=3`）的媒体要带
+     * `Content-Disposition: attachment` 强制下载，而**封面**绝不能被当成下载 ——
+     * `<img>` 遇到 attachment 是不显示的。同一个书源既有封面又有下载文件，
+     * 光看 sourceId 分不出来，所以由签发时把用途写进令牌。
+     */
+    cover?: boolean
 }
 
 function toBase64Url(bytes: Uint8Array): string {
@@ -78,6 +87,9 @@ export async function signMediaToken(
                 s: payload.sourceId,
                 u: payload.url,
                 e: Math.floor(now / 1000) + ttlSeconds,
+                // 只有封面才写这个键：媒体与封面的令牌在别处**长得一样**，
+                // 多一个恒为 0 的键只是白占长度
+                ...(payload.cover ? { c: 1 } : {}),
             }),
         ),
     )
@@ -130,7 +142,7 @@ export async function verifyMediaToken(
         throw new MediaTokenError('媒体地址的载荷不是对象')
     }
 
-    const { s, u, e } = parsed as { s?: unknown; u?: unknown; e?: unknown }
+    const { s, u, e, c } = parsed as { s?: unknown; u?: unknown; e?: unknown; c?: unknown }
     if (typeof s !== 'string' || s === '') throw new MediaTokenError('媒体地址的载荷缺少书源')
     if (typeof u !== 'string' || u === '') throw new MediaTokenError('媒体地址的载荷缺少目标地址')
     if (typeof e !== 'number' || !Number.isFinite(e)) {
@@ -138,5 +150,7 @@ export async function verifyMediaToken(
     }
     if (e * 1000 < now) throw new MediaTokenError('媒体地址已过期，重新打开这一章即可')
 
-    return { sourceId: s, url: u }
+    // 非封面时**不返回 `cover` 键**：签什么就还原什么，调用方不必区分
+    // 「没有这个字段」和「这个字段是 false」
+    return c === 1 ? { sourceId: s, url: u, cover: true } : { sourceId: s, url: u }
 }

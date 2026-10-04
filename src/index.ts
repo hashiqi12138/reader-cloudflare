@@ -70,7 +70,7 @@ import { exploreBooks, listExploreCategories } from './legado/explore'
 import {
     fetchBookInfo,
     fetchChapters,
-    hasAddressOptions,
+    needsCoverProxy,
     searchBooks,
     type FieldWarning,
 } from './legado/ops'
@@ -1379,16 +1379,18 @@ async function proxiedMedia(
 }
 
 /**
- * 给一本书补上 `coverProxyUrl`：**只有带请求选项的封面才有**
+ * 给一本书补上 `coverProxyUrl`：**浏览器自己取不到的封面才有**
  *
- * 书源给 `coverUrl` 写 `,{"headers":{"Referer":…}}` 是为了防盗链 —— 而封面是
- * 浏览器 `<img src>` 直接加载的，既不会带那个 `Referer`，也不认 `,{...}` 这种写法，
- * 于是**必然取不到**（线上带选项的封面共 8 处 / 4 源：📂品书斋、🎨楠楠漫画、
- * 🎨漫畫狗网、📷🔞美女图片网）。这种封面必须由 `/api/media` 代取：
- * 它会合并选项里的请求头（见 media 那段路由）。
+ * 两类封面浏览器一定拿不到（判据在 `ops.ts` 的 `needsCoverProxy`）：
  *
- * 只给带选项的封面签发 —— 不带选项的封面浏览器直接就能加载，
- * 没必要为此多一次签名与一次子请求。前端「有 `coverProxyUrl` 就用它」，
+ *   1. **带请求选项**的（书源写了 `Referer` / `User-Agent`）—— 浏览器不带那个头
+ *   2. **`http:` 地址**的 —— 本站是 https，混合内容会被直接拦掉，连请求都不发
+ *
+ * 这两种都交给 `/api/media` 代取（它会合并选项里的请求头）。线上实测：真实返回的
+ * 封面里 **86%** 是 http，全都属于第 2 类。
+ *
+ * 只给这两类签发 —— `https:` 且不带选项的封面浏览器直接就能加载，
+ * 没必要为此多一次签名、一次子请求与一次读源。前端「有 `coverProxyUrl` 就用它」，
  * 其余照旧 `<img src={coverUrl}>`（见 `public/js/core.js` 的 `coverSrc`）。
  */
 async function withCoverProxy<T extends { coverUrl?: string }>(
@@ -1397,9 +1399,15 @@ async function withCoverProxy<T extends { coverUrl?: string }>(
     book: T,
 ): Promise<T & { coverProxyUrl?: string }> {
     const coverUrl = book.coverUrl
-    if (!coverUrl || !hasAddressOptions(coverUrl)) return book
-    const { proxyUrl } = await proxiedMedia(db, sourceId, { url: coverUrl })
-    return { ...book, coverProxyUrl: proxyUrl }
+    if (!coverUrl || !needsCoverProxy(coverUrl)) return book
+    // `cover: true` 写进令牌：文件源的媒体要强制下载，封面绝不能被当成下载（见 signing.ts）
+    const secret = await getOrCreateMediaSecret(db)
+    const token = await signMediaToken(
+        secret,
+        { sourceId, url: coverUrl, cover: true },
+        MEDIA_TOKEN_TTL_SECONDS,
+    )
+    return { ...book, coverProxyUrl: `/api/media/${token}` }
 }
 
 /** 一本书的封面处理一遍；`/api/home` 的推荐位是分组的，按分组各自的 sourceId 走 */
@@ -1635,7 +1643,10 @@ app.get('/api/media/:token', async (c) => {
         return c.json({ error: `上游取媒体返回 HTTP ${upstream.status}` }, 502)
     }
 
-    const isFileSource = (source.bookSourceType ?? SOURCE_TYPE.text) === SOURCE_TYPE.file
+    // 封面绝不能被当成「文件下载」：`<img>` 遇到 `Content-Disposition: attachment` 是不显示的。
+    // 同一个文件源既有封面又有下载文件，所以这个区别由令牌里的 `cover` 记着（见 signing.ts）
+    const isFileSource =
+        !payload.cover && (source.bookSourceType ?? SOURCE_TYPE.text) === SOURCE_TYPE.file
     return new Response(upstream.body, {
         status: upstream.status,
         headers: mediaResponseHeaders(upstream, split.url, isFileSource),

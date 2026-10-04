@@ -5323,6 +5323,97 @@ console.log('\n=== 35. 防盗链封面走 /api/media 代取（书源给 coverUrl
     )
 }
 
+console.log('\n=== 36. http 封面在 https 页面是混合内容（浏览器连请求都不发） ===')
+{
+    /**
+     * 第四十八轮抽样实测：真实返回的封面里 **86%** 是 `http:`（老小说站大量没有 https）。
+     * 我们部署在 https 上，这些封面会被当成**混合内容**拦掉 —— 连请求都不发出去。
+     * 后端为这种封面也签发 `coverProxyUrl`（走 /api/media 代取）。
+     *
+     * 本地 dev 是 http，正好是这一形态。用一个**纯 http、不带任何请求选项**的封面，
+     * 验三件事：
+     *   ① 不带选项的 http 封面也拿到了 `coverProxyUrl`
+     *   ② `coverUrl` 不变（仍是那个 http 地址）
+     *   ③ 取代取地址能拿到图
+     *
+     * 再加一个**反向对照**：https 且不带选项的封面**不该**被代取
+     * （浏览器直接就能加载，不该为它多花一次签名与子请求）。
+     */
+    const httpId = `user:${BASE}/plain-cover`
+    const httpsId = `user:${BASE}/https-cover`
+    for (const x of [httpId, httpsId])
+        await call('DELETE', `/api/sources?id=${encodeURIComponent(x)}`)
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: 'http 封面（临时）',
+                bookSourceUrl: `${BASE}/plain-cover`,
+                searchUrl: '/fixture/slash-xpath',
+                ruleSearch: {
+                    bookList: "//div[@class='hot_sale']",
+                    name: '/a/p[1]/text()',
+                    bookUrl: '/a/@href',
+                    coverUrl: '/a/img/@src',
+                },
+            },
+            {
+                bookSourceName: 'https 封面（临时）',
+                bookSourceUrl: `${BASE}/https-cover`,
+                searchUrl: '/fixture/slash-xpath',
+                ruleSearch: {
+                    bookList: "//div[@class='hot_sale']",
+                    name: '/a/p[1]/text()',
+                    bookUrl: '/a/@href',
+                    // 字面 https 地址（没有任何选项）—— 不该被代取
+                    coverUrl: '@js:"https://example.com/c.jpg"',
+                },
+            },
+        ]),
+    )
+
+    const searchOne = async (sourceId) => {
+        const res = await fetch(`${BASE}/api/search`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ keyword: '测试', sourceIds: [sourceId] }),
+        })
+        return (await res.json()).sources?.[0]?.books?.[0]
+    }
+
+    const plain = await searchOne(httpId)
+    check(
+        plain?.coverUrl === `${BASE}/fixture/media/page-1.png` &&
+            String(plain?.coverProxyUrl ?? '').startsWith('/api/media/'),
+        'http 封面拿到了代取地址（`coverUrl` 不变）',
+        `${String(plain?.coverUrl ?? '')} | ${String(plain?.coverProxyUrl ?? '').slice(0, 24)}`,
+    )
+
+    const proxied = await fetch(BASE + String(plain?.coverProxyUrl ?? ''))
+    check(
+        proxied.status === 200 && (proxied.headers.get('content-type') ?? '').startsWith('image/'),
+        'http 封面的代取地址取回的是图片',
+        `status=${proxied.status} type=${proxied.headers.get('content-type')}`,
+    )
+
+    const secure = await searchOne(httpsId)
+    check(
+        secure?.coverUrl === 'https://example.com/c.jpg' && secure?.coverProxyUrl === undefined,
+        '反向对照：https 且不带选项的封面**不**代取（不多花一次签名与子请求）',
+        `${String(secure?.coverUrl ?? '')} | proxy=${String(secure?.coverProxyUrl ?? '（无）')}`,
+    )
+
+    for (const x of [httpId, httpsId])
+        await call('DELETE', `/api/sources?id=${encodeURIComponent(x)}`)
+    check(
+        !((await getJson('/api/sources')).json?.sources ?? []).some(
+            (s) => String(s.id).includes('plain-cover') || String(s.id).includes('https-cover'),
+        ),
+        'http 封面的测试源已清理',
+    )
+}
+
 console.log('\n=== 结果 ===')
 if (failures.length === 0) {
     console.log(

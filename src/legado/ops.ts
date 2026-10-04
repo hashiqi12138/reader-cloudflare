@@ -50,12 +50,32 @@ function optionsPartOf(value: string): { url: string; options: string } {
 /**
  * 这条地址是不是带着请求选项（`,{...}`）
  *
- * 封面据此决定**要不要走 `/api/media` 代取**：带选项的封面（书源给它写了 `Referer`
- * 之类的）浏览器直接加载必然拿不到，必须由服务端替它把请求头补上。
  * 判据与 `optionsPartOf` / `splitUrlAndOptions` 同一条，三处认的必须是同一个 `,`。
+ * 封面据它判断「要不要走代取」的一半理由（另一半见 `needsCoverProxy`）。
  */
 export function hasAddressOptions(value: string): boolean {
     return ADDRESS_OPTIONS_AT.test(value)
+}
+
+/**
+ * 一张封面要不要走 `/api/media` 代取
+ *
+ * 两种情况都会让浏览器**根本取不到**这张图：
+ *
+ *   1. **带请求选项**（书源给它写了 `Referer` / `User-Agent`）—— 浏览器既不带那个头、
+ *      也不认 `,{...}` 这种写法（见 `resolveCoverAddress`；线上 8 处 / 4 源）
+ *   2. **`http:` 地址** —— 本站是 https，http 子资源会被当成「混合内容」拦掉，
+ *      浏览器连请求都不发出去（第四十八轮抽样：真实返回的封面里 **86%** 是 http）
+ *
+ * 其余（`https:` 且不带选项）浏览器直接就能加载，不为它多花一次签名与子请求 ——
+ * 代取对每张封面都是「一次签名 + 一次子请求 + 一次读源」，代价要花在真的取不到的那些上。
+ *
+ * 为什么不干脆把 `http` 改写成 `https`（那样一次请求都不用花）：**改不动**。
+ * 实测抽样里那些站点（`www.8xiaoshuo.net` 一族）根本没有 https，改写之后一律
+ * `fetch failed` —— 老小说站大量是这种。
+ */
+export function needsCoverProxy(coverUrl: string): boolean {
+    return hasAddressOptions(coverUrl) || /^http:\/\//i.test(coverUrl)
 }
 
 /**
