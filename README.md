@@ -5121,6 +5121,11 @@ button 159 / text 40 / password 20 / **toggle 8** / **select 7** / **input 1**�
 - `src/legado/loginUi.ts` 是纯函数模块（`normalizeLoginForm` / `parseLoginUiJson`）；
   `src/index.ts` 顺带把三处共用的沙箱调用与判据抽成 `runLoginCode` / `loggedInOf` /
   `loginStoredOf` / `seedLoginFields` / `loginFieldsOf`
+- CI：**又红了一次**，还是同一个手误的第三种变体 —— 第 45 段加进 `scripts/smoke.mjs`
+  之后没跑 `format` 就提交了；后来那一次 `npm run format` 把工作树修好了，但**修复本身
+  没提交**（我只 `git add README.md`），于是仓库里那份仍是没格式化的。补一个 `style:`
+  提交后 CI 绿。教训不变、但要说得更准：**改完就跑 `format`，而且 `format` 动过的文件
+  要**一起**提交**（第四 / 第五十六轮是「新段落没跑 format」，这一次是「跑了但没提交」）
 
 **五、线上核验**（`/api/probe` 报 `0.48.0`）。816 条源里 116 条带登录入口；挑四种形态各看一个：
 
