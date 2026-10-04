@@ -187,6 +187,70 @@ var __varsOut = (function () {
   try { return JSON.parse(String(globalThis.__sourceVars || '{}')) || {} } catch (e) { return {} }
 })()
 
+/**
+ * 给一个对象挂上 Legado 的 StrResponse 方法（body / code / statusCode / header(s) / url / raw）
+ *
+ * 存在的理由：**取网方法的返回值在语料里是两用的**，而且两种用法都真实存在 ——
+ *
+ *   JSON.parse(java.get(u, h))        当**字符串**（正文）用
+ *   java.get(u, h).statusCode() == 200  当**响应对象**用（⚡📂米读小说 / 📂就去看网）
+ *   java.post(u, b, h).body()           同上（🏷晋江文学）
+ *
+ * 只给字符串的话，第二种是 TypeError: ... is not a function（QuickJS 还说不出是哪一个）；
+ * 只给对象的话，第一种会在 JSON.parse 上炸。所以 java.get / java.post 的返回值是**盒装字符串**
+ * （typeof 是 object、但所有字符串操作照常），再把响应方法挂上去 ——
+ * 与 __boxHtml 处理 result 的两用是同一个手法。
+ *
+ * getDetail 是取数入口（调一次、结果缓存），urlOf 是不取网就能算出来的请求地址
+ * （java.get 当场取数，java.connect 只在真要 body/code/headers 时才取）。
+ */
+function __attachResponse(target, getDetail, urlOf) {
+  target.url = function () { return urlOf === undefined || urlOf === null ? '' : String(urlOf) }
+  target.body = function () {
+    var d = getDetail()
+    return d.ok ? String(d.body === undefined || d.body === null ? '' : d.body) : String(d.error || '')
+  }
+  target.code = function () { var d = getDetail(); return d.ok ? Number(d.status) : 0 }
+  target.statusCode = target.code
+  target.isSuccessful = function () { var c = target.code(); return c >= 200 && c < 300 }
+  target.headers = function (name) {
+    var d = getDetail()
+    if (!d.ok) return []
+    var list = (d.headers || {})[String(name).toLowerCase()]
+    return list === undefined || list === null ? [] : list
+  }
+  target.header = function (name, fallback) {
+    var list = target.headers(name)
+    if (list.length > 0) return list[0]
+    return fallback === undefined || fallback === null ? '' : fallback
+  }
+  target.raw = function () {
+    return {
+      request: function () { return { url: function () { return target.url() } } },
+      code: function () { return target.code() },
+      headers: function (name) { return target.headers(name) },
+    }
+  }
+  return target
+}
+
+/**
+ * 当场取一次网，把响应包成「正文 + 响应方法」的盒装字符串（java.get 两参 / java.post）
+ *
+ * 网络层真失败（超时、连不上）仍然抛错，与 java.ajax 一致 —— 那种情况没有任何
+ * 可用的响应可言，静默返回一段错误文本会让书源把「取不到」当成「取到了」。
+ * HTTP 非 2xx **不抛**：那正是 .statusCode() == 403 这类判断要看的东西。
+ */
+function __fetchResponse(opts) {
+  var res = JSON.parse(__host.fetchFull(JSON.stringify(opts)))
+  if (!res.ok) throw new Error('取网失败：' + (res.error || '未知错误'))
+  var text = String(res.body === undefined || res.body === null ? '' : res.body)
+  var boxed = new String(text)
+  __attachResponse(boxed, function () { return res }, res.url || opts.url)
+  boxed.toString = function () { return text }
+  return boxed
+}
+
 var java = {
   base64Encode: function (s) { return __host.b64encode(String(s)) },
   base64Decode: function (s) { return __host.b64decode(String(s)) },
@@ -338,8 +402,12 @@ var java = {
   // 二参 35 处才是地址（java.get(baseUrl, headers)）。早先一律当取网，
   // 于是 if (java.get("单") == '') 会去**请求一个叫「单」的地址**：必然失败，
   // 而且报出来的是一个与书源毫无关系的网络错误。
+  //
+  // 二参那条返回的是 Legado 的 **StrResponse**（既是正文、又带响应方法）——
+  // 语料里两种用法都有：JSON.parse(java.get(u, h)) 当字符串，
+  // java.get(u, h).statusCode() == 200 当响应对象（⚡📂米读小说 / 📂就去看网）。
   get: function (a, b) {
-    if (arguments.length >= 2) return java.__req({ url: String(a), headers: b || {} })
+    if (arguments.length >= 2) return __fetchResponse({ url: String(a), headers: b || {} })
     var v = __varsOut[String(a)]
     return v === undefined || v === null ? '' : String(v)
   },
@@ -348,8 +416,14 @@ var java = {
   put: function (key, value) {
     __varsOut[String(key)] = value === undefined || value === null ? '' : String(value)
   },
+  // 与 java.get 两参同形：Legado 的 post 也返回 StrResponse（🏷晋江文学 用 .body()）
   post: function (url, body, headers) {
-    return java.__req({ url: String(url), method: 'POST', body: String(body), headers: headers || {} })
+    return __fetchResponse({
+      url: String(url),
+      method: 'POST',
+      body: String(body),
+      headers: headers || {},
+    })
   },
   // Legado 的 ajaxAll 返回的是带 body() 方法的响应对象数组，这里对齐这个形状
   ajaxAll: function (urls) {
@@ -401,28 +475,10 @@ var java = {
       if (cached === null) cached = JSON.parse(__host.fetchFull(JSON.stringify(opts)))
       return cached
     }
-    var response = {
-      url: function () { return requestUrl },
-      body: function () {
-        var d = detail()
-        return d.ok ? String(d.body === undefined || d.body === null ? '' : d.body) : String(d.error || '')
-      },
-      code: function () { var d = detail(); return d.ok ? Number(d.status) : 0 },
-      isSuccessful: function () { var c = response.code(); return c >= 200 && c < 300 },
-      raw: function () {
-        return {
-          request: function () { return { url: function () { return requestUrl } } },
-          code: function () { return response.code() },
-          headers: function (name) {
-            var d = detail()
-            if (!d.ok) return []
-            var all = d.headers || {}
-            var list = all[String(name).toLowerCase()]
-            return list === undefined || list === null ? [] : list
-          },
-        }
-      },
-    }
+    // 与 java.get / java.post 共用同一套响应方法（见 __attachResponse 的说明）。
+    // 差别只在**取数时机**：这里的 url() 是解析出来的、不发请求，
+    // body() / code() / headers() 才触发那唯一一次请求。
+    var response = __attachResponse({}, detail, requestUrl)
     // 规则直接把响应对象返回时（result = java.connect(url)），串化要给出正文而不是 {}
     response.toString = function () { return response.body() }
     return response

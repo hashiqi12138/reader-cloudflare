@@ -3707,11 +3707,27 @@ console.log('\n=== 21. 连接式取网（java.connect）与 result.toArray() ===
                         "@js:(function(){var r = java.connect('" +
                         BASE +
                         "/fixture/connect?status=403');return r.code() + '|' + (String(r.body()).indexOf('connect-error-403') >= 0 ? 'ERRBODY' : 'WRONG')})()",
-                    // `source.getKey()` 必须是**书源地址**：122 个源、206 处都把它当站点地址用
+                    // 三件事一起验（都放在 intro 这个**纯文本**字段上 —— coverUrl 会被当相对地址解析）：
+                    //   1. `source.getKey()` 必须是**书源地址**（122 个源、206 处都这么用）
+                    //   2. `java.get(url, h)` 的返回值当**字符串**用（JSON.parse）
+                    //   3. `java.get` / `java.post` 的返回值带**响应方法**（statusCode / code）
                     intro:
-                        "@js:source.getKey() === '" +
+                        '@js:(function(){' +
+                        "var j = java.get('" +
                         BASE +
-                        "' ? 'KEY-OK' : ('KEY-BAD:' + source.getKey())",
+                        "/fixture/api/search?q=%E6%B5%8B%E8%AF%95&p=1', {});" +
+                        "var p = java.post('" +
+                        BASE +
+                        "/fixture/search-post', 'q=%E6%B5%8B%E8%AF%95');" +
+                        "var e = java.get('" +
+                        BASE +
+                        "/fixture/connect?status=403', {});" +
+                        "return ['KEY-' + (source.getKey() === '" +
+                        BASE +
+                        "' ? 'OK' : 'BAD')," +
+                        ' JSON.parse(j).data.list.length,' +
+                        " String(p).indexOf('result-item') >= 0 ? 'P' + p.code() : 'P-BAD'," +
+                        " e.statusCode(), String(e.isSuccessful())].join('|')})()",
                 },
             },
         ]),
@@ -3756,9 +3772,9 @@ console.log('\n=== 21. 连接式取网（java.connect）与 result.toArray() ===
     )
     const intros = books.map((b) => String(b.intro ?? ''))
     check(
-        intros.length > 0 && intros.every((v) => v === 'KEY-OK'),
-        '`source.getKey()` 给的是**书源地址**（122 个源、206 处都这么用）',
-        JSON.stringify(intros),
+        intros.length > 0 && intros.every((v) => v === 'KEY-OK|2|P200|403|false'),
+        '`source.getKey()` 是书源地址；`java.get`/`java.post` 的返回值既能当字符串（JSON.parse）用，又带 statusCode / code',
+        JSON.stringify(intros[0] ?? ''),
     )
 
     await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
