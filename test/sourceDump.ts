@@ -125,5 +125,28 @@ export function rulesOf(source: Record<string, unknown>): string[] {
     return ruleFieldsOf(source).map((field) => field.value)
 }
 
+/**
+ * 一条书源里所有「可能写脚本」的文本
+ *
+ * 与 `ruleFieldsOf` 的区别：那个只收「引擎会当规则求值」的字段（排掉 `jsLib` / `loginUrl`
+ * 与以 `Js` 结尾的字段），因为扫描**选择器**时那些字段里的 JS 会冒出一整批假阳性；
+ * 这一份要的恰恰是**脚本** —— `java.*` / `source.*` / `book.*` 的调用都写在它们里面。
+ */
+export function scriptTextsOf(source: Record<string, unknown>): string[] {
+    const out: string[] = []
+    for (const key of ['jsLib', 'loginUrl', ...URL_FIELDS]) {
+        const value = source[key]
+        if (typeof value === 'string' && value !== '') out.push(value)
+    }
+    for (const group of RULE_GROUPS) {
+        const fields = source[group]
+        if (!fields || typeof fields !== 'object') continue
+        for (const value of Object.values(fields)) {
+            if (typeof value === 'string' && value !== '') out.push(value)
+        }
+    }
+    return out
+}
+
 /** 规则与 URL 字段里的连接符 */
 export const JOINERS = ['&&', '||', '%%'] as const

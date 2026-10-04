@@ -5635,6 +5635,94 @@ console.log('\n=== 39. `source.getLoginInfoMap()` 给的是 Map（书源写 `inf
     )
 }
 
+console.log('\n=== 40. 对象全局补上的那几个方法（第五十二轮那套「问沙箱自己」量出来的） ===')
+{
+    /**
+     * 第五十二轮把 `java.*` 的差集量干净之后，第五十三轮问的是**别的沙箱对象**：
+     * `source` / `book` / `chapter` / `cookie` / `cache` 各自「语料在调用、沙箱里没有」的名字。
+     *
+     * 量出来的差集是 13 个，分类之后补了 9 个 —— 每一笔都对应一种**报错方向被带偏**的形态：
+     *   - `cookie.getKey`  → 🏷起点 的发现页地址模板（338 处模板里都在用）整条建不出来
+     *   - `book.setReverseToc` → 写在 **ruleBookInfo.name 的中途**，抛错连书名都丢
+     *   - `chapter.isVip`  → 写在 🏷起点(部分可看) 的正文规则里，抛错**整章正文一条都取不到**
+     *   - `source.removeLoginHeader` / `getLoginInfo` / `removeLoginInfo` → 退出/登录那条路
+     *   - `book.putCustomVariable` / `chapter.putImgUrl` / `source.putConcurrent` → 菜单回调
+     *
+     * 这一段的断言都在 `@js:` 里做，四件事一起验：
+     *   ① `cookie.getKey` 真的能取到键（域名写法不同也命中、找不到回空串）
+     *   ② 以前抛 `not a function` 的那几句现在跑得通、值还取得回来
+     *   ③ `source.getLoginInfo` 能读回 `putLoginInfo` 写进去的值、`remove*` 真的清掉
+     *   ④ `chapter.isVip` 恒 false（章节上下文里没有 vip 标记，这是缺信息不是缺方法）
+     */
+    const id = `user:${BASE}/object-methods`
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: '对象全局方法（临时）',
+                bookSourceUrl: `${BASE}/object-methods`,
+                searchUrl: '/fixture/search?q={{key}}',
+                ruleSearch: {
+                    bookList: 'div.result-item',
+                    // ① ③：cookie.getKey + chapter 的两个
+                    name:
+                        `@js:(function(){var c=cookie;c.setCookie('https://qidian.com/rank','a=1; _csrfToken=CSRF; b=2');` +
+                        `var t=typeof chapter.isVip;chapter.putImgUrl(null);` +
+                        `return 'ck='+c.getKey('https://qidian.com','_csrfToken')` +
+                        `+'|'+c.getKey('qidian.com','_csrfToken')` +
+                        `+'|'+c.getKey('https://other.com','_csrfToken')` +
+                        `+'|miss='+c.getKey('https://qidian.com','ywkey')` +
+                        `+'|vip='+chapter.isVip()+','+t+','+typeof chapter.putImgUrl;})()`,
+                    // ② ④：book 的两个 + source 的四个
+                    author:
+                        `@js:(function(){var b=book;var t=typeof b.setReverseToc;b.setReverseToc(true);` +
+                        `b.putCustomVariable('开启•购买');` +
+                        `source.putLoginInfo('{"账号":"u1"}');var first=source.getLoginInfo();` +
+                        `var m=source.getLoginInfoMap().get('账号');` +
+                        `source.removeLoginInfo();var after=source.getLoginInfo();` +
+                        `source.putLoginHeader('{"Cookie":"c=1"}');var head=source.getLoginHeader();` +
+                        `source.removeLoginHeader();source.putConcurrent('18/30000');` +
+                        `return 'rst='+t+','+b.reverseToc+','+b.customVariable` +
+                        `+'|info='+first+','+m+','+JSON.stringify(after)+','+JSON.stringify(source.getLoginHeader())` +
+                        `+'|head='+head+',perc='+typeof source.putConcurrent;})()`,
+                    bookUrl: 'h3.title a@href',
+                },
+            },
+        ]),
+    )
+
+    const res = await fetch(`${BASE}/api/search`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ keyword: '测试', sourceIds: [id] }),
+    })
+    const one = (await res.json()).sources?.[0]
+    const book = one?.books?.[0]
+
+    check(one?.ok === true, '这一条源能跑通（改前是 `not a function`）', String(one?.error ?? ''))
+    check(
+        book?.name === 'ck=CSRF|CSRF||miss=|vip=false,function,function',
+        'cookie.getKey 取到了键（两种域名写法都命中、别的站回空串），chapter 两个方法都在',
+        String(book?.name ?? ''),
+    )
+    check(
+        book?.author ===
+            'rst=function,true,开启•购买|info={"账号":"u1"},u1,"",""|head={"Cookie":"c=1"},perc=function',
+        'book 两个方法跑得通且记得住；source 的登录信息写-读-清 与 header 清空都对',
+        String(book?.author ?? ''),
+    )
+
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+    check(
+        !((await getJson('/api/sources')).json?.sources ?? []).some((s) =>
+            String(s.id).includes('object-methods'),
+        ),
+        '对象全局方法的测试源已清理',
+    )
+}
+
 console.log('\n=== 结果 ===')
 if (failures.length === 0) {
     console.log(

@@ -22,26 +22,9 @@
 import { describe, expect, it } from 'vitest'
 
 import { JAVA_SURFACE } from '../src/engine/platform'
-import { loadSourceDump, RULE_GROUPS, URL_FIELDS } from './sourceDump'
+import { loadSourceDump, scriptTextsOf } from './sourceDump'
 
 const DUMP = process.env.SOURCES_DUMP ?? ''
-
-/** 一条源里所有可能写脚本的文本 */
-function scriptTextsOf(source: Record<string, unknown>): string[] {
-    const out: string[] = []
-    for (const key of ['jsLib', 'loginUrl', ...URL_FIELDS]) {
-        const value = source[key]
-        if (typeof value === 'string' && value !== '') out.push(value)
-    }
-    for (const group of RULE_GROUPS) {
-        const fields = source[group]
-        if (!fields || typeof fields !== 'object') continue
-        for (const value of Object.values(fields)) {
-            if (typeof value === 'string' && value !== '') out.push(value)
-        }
-    }
-    return out
-}
 
 /** 名字 → 处数 + 用到它的源名。**在用例里调用**（dump 只在开了 SOURCES_DUMP 时才读） */
 function usageOf(): {
