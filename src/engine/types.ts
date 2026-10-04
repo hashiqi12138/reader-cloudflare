@@ -6,6 +6,8 @@
  * 后续要换解析实现也不会波及调用方。
  */
 
+import type { CookieJar } from '../lib/cookies'
+
 /** 规则求值的结果：可能是单值，也可能是列表（列表规则一定返回数组） */
 export type RuleResult = string | string[]
 
@@ -285,6 +287,33 @@ export interface BookSource {
      */
     variable?: string
 
+    /**
+     * 是否启用 cookie 罐（Legado 的 `BookSource.enabledCookieJar`）
+     *
+     * 816 条源里 **457 条是 true**、359 条 false —— 这个字段是书源作者明确表过态的，
+     * 所以只有 true 才建罐子（收响应里的 `Set-Cookie`、自动带上 `Cookie` 头、落库）。
+     * false 的源里 `cookie.*` 仍然是「只活本次求值」的老行为，与它们自己声明的取舍一致。
+     */
+    enabledCookieJar?: boolean
+
+    /**
+     * cookie 罐（内存态，按请求加载；见 `src/lib/cookies.ts`）
+     *
+     * 放在书源对象上而不是求值上下文里，因为它必须被**三处**同时看到：
+     * 取网层（收发）、沙箱里的 `cookie.*` 全局、以及落库那一步（`persistCookies`）。
+     * 与 `variable` 一样是「会被自己改的运行期状态」，只是它比一个字符串更结构化。
+     */
+    cookieJar?: CookieJar
+
+    /**
+     * 罐子变过之后写回库（由注册表装上，见 `data/db.ts`）
+     *
+     * 是**写穿**而不是「请求结束时统一落」：取网层收完 `Set-Cookie` 就调它一次，
+     * 沙箱里的 `cookie.setCookie` 也调它一次。只在罐子真的变了时才调 ——
+     * 一个站点会话里通常就一两次，不会变成每次请求都写库。
+     */
+    persistCookies?: () => void | Promise<void>
+
     /** 搜索地址模板，含 {{key}} / {{page}} */
     searchUrl?: string
     /** 搜索请求选项：charset / headers / method / body */
@@ -480,4 +509,15 @@ export interface FetchPlan {
      * 整页的等待取决于最慢的那个源，所以它的超时该比「读一章正文」短得多。
      */
     timeoutMs?: number
+    /**
+     * 这次请求要读写的 cookie 罐（书源开着 `enabledCookieJar` 时才有）
+     *
+     * 取网层在发请求前从这里拼 `Cookie` 头（书源自己声明了 `Cookie` 时不覆盖），
+     * 收到响应后把 `Set-Cookie` 收进来。放在计划里而不是取网层另开一个参数，
+     * 是因为计划是**所有请求的唯一形态**（沙箱内的 `java.ajax` 与链路请求都走它），
+     * 加一个参数就得到处补，而漏掉一处的表现是「某个入口不带 cookie」这种半好半坏的状态。
+     */
+    cookieJar?: CookieJar
+    /** 罐子变过之后写回库（见 `BookSource.persistCookies`） */
+    persistCookies?: () => void | Promise<void>
 }

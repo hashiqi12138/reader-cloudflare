@@ -1,0 +1,16 @@
+-- cookie 罐（原项目的 CookieJar / `BookSource.enabledCookieJar`）
+--
+-- 站点在**搜索那一趟**下发的会话 cookie，要能带到「详情 / 目录 / 正文」那几趟上去 ——
+-- 在我们这里那是四次互不相干的 HTTP 请求，所以它必须落库，不能只活在内存里。
+-- 不落库的表现是「搜索能搜到、点进去 403」：看起来像书源坏了，其实是会话丢了。
+--
+-- 存一列 JSON（主机名 → `k=v; k2=v2`），而不是像书源变量那样一段自由字符串：
+-- 它天然就是「按域名分组的表」，拆成两张表不值得 —— 一条源通常只有一两个域。
+--
+-- 只有 `enabledCookieJar` 为 true 的书源才会写这一列（816 条源里 457 条是 true，
+-- 另外 359 条作者明确关掉了，关掉的源连罐子都不建）。
+--
+-- 与 `variable` 一样**不进 `importSources` 的 ON CONFLICT 更新列**：
+-- 重新导入一份同名书源会覆盖规则快照，但保留 cookie —— 那是站点给的会话状态，
+-- 不是导入文件的一部分，被一次重导冲掉会让用户莫名地「退出登录」。
+ALTER TABLE sources ADD COLUMN cookies TEXT NOT NULL DEFAULT '';

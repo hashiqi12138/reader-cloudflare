@@ -11,6 +11,7 @@
  */
 
 import type { FetchPlan } from '../engine/types'
+import { cookieHeaderFor, mergeSetCookie } from './cookies'
 
 /**
  * 单次响应最多读取多少字节，超出直接截断并标记
@@ -213,12 +214,25 @@ export async function fetchDetailed(plan: FetchPlan): Promise<FetchedResponse> {
     const body = isBodyless(method) ? undefined : plan.body
     const timeoutMs = plan.timeoutMs ?? DEFAULT_TIMEOUT_MS
 
+    /**
+     * 带上 cookie 罐里的 Cookie 头
+     *
+     * **书源自己声明了 `Cookie` 时不覆盖**：有些站点要的是一份专门的 cookie
+     * （签名、风控令牌），而罐子里那一份是站点下发的会话 cookie，混在一起反而会挂。
+     * 书源既然写了，就说明它知道自己要什么。
+     */
+    const jarCookie = plan.cookieJar ? cookieHeaderFor(plan.cookieJar, plan.url) : ''
+    const headers =
+        jarCookie !== '' && !hasHeader(plan.headers, 'cookie')
+            ? { ...plan.headers, Cookie: jarCookie }
+            : plan.headers
+
     let response: Response
     try {
         response = await fetch(plan.url, {
             method,
             // 带 body 时必须自己声明 Content-Type，否则站点收不到参数（见 requestHeaders）
-            headers: requestHeaders(method, body, plan.headers),
+            headers: requestHeaders(method, body, headers),
             body,
             redirect: 'follow',
             signal: AbortSignal.timeout(timeoutMs),
@@ -244,10 +258,33 @@ export async function fetchDetailed(plan: FetchPlan): Promise<FetchedResponse> {
         charset = normalizeCharset(sniffCharset(probe)) ?? 'utf-8'
     }
 
+    const actualUrl = response.url || plan.url
+    const collected = collectHeaders(response.headers)
+
+    /**
+     * 把响应里的 `Set-Cookie` 收进罐子，变了就**立刻写回库**（写穿）
+     *
+     * 落库要等（`await`）：Worker 的响应一旦返回，还在飞的 promise 会被直接掐掉，
+     * 而站点恰恰是在**搜索那一趟**下发会话 cookie 的 —— 不等它写完，
+     * 「读目录」那一趟就带不上，表现是「搜得到、点进去 403」。
+     *
+     * 只在罐子真的变了时才调：一个站点会话里通常就一两次，不会变成每次请求都写库。
+     */
+    if (plan.cookieJar) {
+        const changed = mergeSetCookie(plan.cookieJar, actualUrl, collected['set-cookie'] ?? [])
+        if (changed && plan.persistCookies) {
+            try {
+                await plan.persistCookies()
+            } catch {
+                /* 落库失败不该让这一次请求失败 —— cookie 丢了顶多少一次会话，正文还得给用户 */
+            }
+        }
+    }
+
     return {
-        url: response.url || plan.url,
+        url: actualUrl,
         status: response.status,
-        headers: collectHeaders(response.headers),
+        headers: collected,
         body: decode(buffer, charset),
     }
 }

@@ -10,6 +10,7 @@
  */
 
 import type { BookSource } from '../engine/types'
+import { dumpJar, parseJar } from '../lib/cookies'
 import { BUILTIN_ID_PREFIX, DataError, userIdForUrl, type RegisteredSource } from './types'
 
 /** 单次导入的条数上限。D1 免费版每日写 10 万行，一次塞几十万条会直接把额度打满 */
@@ -31,9 +32,21 @@ interface SourceRow {
     payload: string
     /** 书源变量（Legado 的 `BookSource.variable`），起点是空串，由书源自己填 */
     variable: string
+    /** cookie 罐的 JSON（主机名 → cookie 串），只有 enabledCookieJar 的源才写 */
+    cookies: string
 }
 
-function rowToSource(row: SourceRow): RegisteredSource {
+/**
+ * 行 → 书源对象
+ *
+ * 除了把列盖到 payload 上，还**装上 cookie 罐与它的落库路径** ——
+ * 罐子必须在「取网层 / 沙箱 / 落库」三处是同一个对象，而这三处都从书源对象上取，
+ * 所以装配点只能是这里（唯一知道 db 与行内容的地方）。
+ *
+ * 只有 `enabledCookieJar === true` 才建：816 条源里 359 条作者明确关掉了，
+ * 给关掉的源也建罐子，等于把它们的 `cookie.*` 从「只活本次求值」悄悄改成跨请求。
+ */
+function rowToSource(row: SourceRow, db: D1Database): RegisteredSource {
     let parsed: BookSource
     try {
         parsed = JSON.parse(row.payload) as BookSource
@@ -48,7 +61,7 @@ function rowToSource(row: SourceRow): RegisteredSource {
     if (parsed === null || typeof parsed !== 'object') {
         throw new DataError(`书源 ${row.id} 的存储内容不是对象`, 500, 'corrupt_source')
     }
-    return {
+    const source: RegisteredSource = {
         ...parsed,
         // 身份与本地状态以列为准，payload 只是规则快照
         id: row.id,
@@ -61,16 +74,22 @@ function rowToSource(row: SourceRow): RegisteredSource {
         // payload 里那一份是导入时的快照（816 条源里没有一条自带 variable）
         variable: row.variable ?? '',
     }
+    if (source.enabledCookieJar === true) {
+        const jar = parseJar(row.cookies)
+        source.cookieJar = jar
+        source.persistCookies = () => saveSourceCookies(db, row.id, dumpJar(jar))
+    }
+    return source
 }
 
-const SELECT_COLUMNS = 'id, name, url, group_name, enabled, sort_order, payload, variable'
+const SELECT_COLUMNS = 'id, name, url, group_name, enabled, sort_order, payload, variable, cookies'
 
 /** 全部用户书源，按展示顺序 */
 export async function listUserSources(db: D1Database): Promise<RegisteredSource[]> {
     const { results } = await db
         .prepare(`SELECT ${SELECT_COLUMNS} FROM sources ORDER BY sort_order, name`)
         .all<SourceRow>()
-    return (results ?? []).map(rowToSource)
+    return (results ?? []).map((row) => rowToSource(row, db))
 }
 
 /** 单个用户书源；不存在返回 undefined（与「读取出错」区分开） */
@@ -82,7 +101,7 @@ export async function getUserSource(
         .prepare(`SELECT ${SELECT_COLUMNS} FROM sources WHERE id = ?`)
         .bind(id)
         .first<SourceRow>()
-    return row ? rowToSource(row) : undefined
+    return row ? rowToSource(row, db) : undefined
 }
 
 /**
@@ -114,7 +133,7 @@ export async function listUserSourcePage(
         )
         .bind(limit, offset)
         .all<SourceRow>()
-    return (results ?? []).map(rowToSource)
+    return (results ?? []).map((row) => rowToSource(row, db))
 }
 
 /** 按 id 批量取用户书源（只读点到的这几条，不碰整张表） */
@@ -128,7 +147,7 @@ export async function listUserSourcesByIds(
         .prepare(`SELECT ${SELECT_COLUMNS} FROM sources WHERE id IN (${placeholders})`)
         .bind(...ids)
         .all<SourceRow>()
-    return (results ?? []).map(rowToSource)
+    return (results ?? []).map((row) => rowToSource(row, db))
 }
 
 /** 启用的用户书源总数（分页要让界面知道「还有多少个没搜」） */
@@ -190,6 +209,20 @@ export async function countUserSources(db: D1Database): Promise<number> {
 export async function saveSourceVariable(db: D1Database, id: string, value: string): Promise<void> {
     await db
         .prepare('UPDATE sources SET variable = ?, updated_at = ? WHERE id = ?')
+        .bind(value, Date.now(), id)
+        .run()
+}
+
+/**
+ * 写回 cookie 罐（`sources.cookies`）
+ *
+ * 与 `saveSourceVariable` 同一条路数、同样的理由：请求一返回，还在飞的 promise 会被掐掉。
+ * 区别在**调用时机** —— 这个是「罐子真的变了」才调（取网层收完 `Set-Cookie`、
+ * 或沙箱里的 `cookie.setCookie` 之后），所以一次请求通常只写一次，甚至一次都不写。
+ */
+export async function saveSourceCookies(db: D1Database, id: string, value: string): Promise<void> {
+    await db
+        .prepare('UPDATE sources SET cookies = ?, updated_at = ? WHERE id = ?')
         .bind(value, Date.now(), id)
         .run()
 }

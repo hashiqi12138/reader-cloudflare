@@ -45,6 +45,7 @@ import {
 } from 'quickjs-emscripten'
 
 import type { SandboxHttp } from './types'
+import type { CookieJar } from '../lib/cookies'
 import { base64OfUtf8, bytesOfBase64, utf8OfBase64 } from '../lib/base64'
 import { DEFAULT_TIME_OFFSET_HOURS, formatJavaTime } from '../lib/javatime'
 import { md5Bytes, md5Hex, runHash, sha256Hex, type HashRequest } from '../lib/hash'
@@ -966,65 +967,154 @@ var source = (function () {
 
 // ---------------------------------------------------------------- cookie / cache
 //
-// 只在本次求值内有效（见上面 GLOBALS_PRELUDE 的说明）。取不到时返回空串，
-// 与 Legado 的语义一致 —— 返回 null 会让 cookie.getCookie(u).length 这类写法报错。
+// cookie 罐按**主机名**存（见 src/lib/cookies.ts），与宿主侧那一个模块同一套语义：
+//   收 —— 每个响应的 Set-Cookie 由取网层收进来（这里不再收）
+//   发 —— 请求前由取网层按主机名拼 Cookie 头
+//   存 —— 书源开着 enabledCookieJar 时按源落库
+//
+// 沙箱这一侧只做两件事：**读写注入进来的那一份**，以及把改动记到 __cookieJarOut
+// 让求值结束后被 collectCookies 收回去。书源没开 CookieJar 时注入的是空表，
+// 于是 cookie.* 退回「只活本次求值」的老行为 —— 与它自己声明的取舍一致。
+//
+// 取不到时返回空串，与原项目的语义一致 —— 返回 null 会让 cookie.getCookie(u).length 这类写法报错。
+//
+// 注意：这一段是模板字符串的一部分 —— 里面**不能写带反斜杠的正则**（模板字符串会把
+// 反斜杠吃掉：转义过的斜杠只剩斜杠、空白类只剩它后面那个字母，正则会悄悄变形，
+// 甚至直接变成语法错误）。所以下面几个小助手一个反斜杠都不用。
+
+function __cookieHost(url) {
+  var s = String(url === undefined || url === null ? '' : url).trim()
+  if (s === '') return ''
+  var scheme = s.indexOf('://')
+  if (scheme > 0) s = s.slice(scheme + 3)
+  else if (s.slice(0, 2) === '//') s = s.slice(2)
+  var cut = s.length
+  var marks = ['/', '?', '#']
+  for (var i = 0; i < marks.length; i++) {
+    var at = s.indexOf(marks[i])
+    if (at !== -1 && at < cut) cut = at
+  }
+  var host = s.slice(0, cut)
+  var at2 = host.indexOf('@')
+  if (at2 !== -1) host = host.slice(at2 + 1)
+  var colon = host.indexOf(':')
+  if (colon !== -1) host = host.slice(0, colon)
+  return host.toLowerCase()
+}
+
+// 「这个站的 cookie」是哪几个主机。比宿主侧发请求时那一份**宽**：除了自己和各级父域，
+// 还往下找子域 —— 站点常把会话 cookie 下在 m.xxx.com 上，而书源问的是 xxx.com
+// （🏷起点 的发现页模板就是 cookie.getKey("https://qidian.com","_csrfToken")，
+// 而它的页面全在 m.qidian.com 上）。这里是「脚本看这个站」，不是「这次请求发什么」，
+// 发出去的那一份由取网层按严格的父子域规则拼（见 src/lib/cookies.ts）。
+function __cookieRelated(jar, host) {
+  var out = [host]
+  var parts = host.split('.')
+  for (var i = 1; i < parts.length - 1; i++) out.push(parts.slice(i).join('.'))
+  var suffix = '.' + host
+  var subs = []
+  for (var k in jar) {
+    if (k !== host && k.length > suffix.length && k.slice(k.length - suffix.length) === suffix) {
+      subs.push(k)
+    }
+  }
+  subs.sort()
+  return out.concat(subs)
+}
+
+function __cookiePairs(text) {
+  var out = []
+  var parts = String(text).split(';')
+  for (var i = 0; i < parts.length; i++) {
+    var seg = parts[i].trim()
+    var eq = seg.indexOf('=')
+    if (eq > 0) out.push([seg.slice(0, eq).trim(), seg.slice(eq + 1).trim()])
+  }
+  return out
+}
+
+function __cookieMerge(existing, incoming) {
+  var order = []
+  var map = {}
+  var all = __cookiePairs(existing).concat(incoming)
+  for (var i = 0; i < all.length; i++) {
+    var name = all[i][0]
+    if (!Object.prototype.hasOwnProperty.call(map, name)) order.push(name)
+    map[name] = all[i][1]
+  }
+  var out = []
+  for (var j = 0; j < order.length; j++) out.push(order[j] + '=' + map[order[j]])
+  return out.join('; ')
+}
 
 var cookie = (function () {
   var jar = {}
-
-  // cookie.getKey(url, key)：从按域保存的 cookie 串里取**一个键**的值。
-  // 语料 2 处 / 2 源 —— 🏷起点 的发现页地址模板（cookie.getKey("https://qidian.com","_csrfToken")，
-  // 338 处模板里都在用）与 🏷阅文集团 的登录脚本。以前没有这个方法，模板那一句直接
-  // TypeError，**整条分类地址都建不出来**。
-  //
-  // 但要说清这个缺口的性质：**响应里的 Set-Cookie 还没有收进这个 jar**
-  // （只有同一段脚本里 cookie.setCookie 写进来的才有），而它要的键本来是浏览器登录后
-  // 由站点下发的。所以线上多半返回空串 —— 这是「没实现」，不是「没这个名字」。
-  //
-  // 注意：这一段是模板字符串的一部分 —— 里面**不能写带反斜杠的正则**：
-  // 模板字符串会把反斜杠吃掉（转义过的斜杠只剩斜杠、空白类只剩它后面那个字母），
-  // 正则于是悄悄变形、连语法错误都不报。所以这两个小助手一个反斜杠都不用。
-  function hostOf(url) {
-    var s = String(url)
-    var scheme = s.indexOf('://')
-    if (scheme > 0) s = s.slice(scheme + 3)
-    else if (s.slice(0, 2) === '//') s = s.slice(2)
-    var end = s.length
-    var slash = s.indexOf('/')
-    if (slash !== -1 && slash < end) end = slash
-    var query = s.indexOf('?')
-    if (query !== -1 && query < end) end = query
-    return s.slice(0, end)
-  }
-  function findKey(entry, key) {
-    var parts = String(entry).split(';')
-    for (var i = 0; i < parts.length; i++) {
-      var seg = parts[i].trim()
-      var eq = seg.indexOf('=')
-      if (eq > 0 && seg.slice(0, eq) === key) return seg.slice(eq + 1)
+  var dirty = {}
+  try {
+    var injected = JSON.parse(String(globalThis.__cookieJar || '{}'))
+    if (injected && typeof injected === 'object') {
+      for (var k in injected) jar[String(k).toLowerCase()] = String(injected[k])
     }
-    return ''
+  } catch (e) {}
+
+  // 记一笔改动：宿主求值结束后按这张表更新罐子（空串表示删掉这个主机）。
+  // 只记**改过的主机** —— 整份回传会把求值期间取网层刚收进来的 cookie 覆盖掉。
+  function touch(host) {
+    dirty[host] = jar[host] === undefined ? '' : String(jar[host])
+    globalThis.__cookieJarOut = JSON.stringify(dirty)
+  }
+
+  // 这个请求会带上的那一串（含各级父域的合并，更具体的先出现、同名以它为准）
+  function stored(url) {
+    var host = __cookieHost(url)
+    if (host === '') return ''
+    var names = __cookieRelated(jar, host)
+    var seen = {}
+    var out = []
+    for (var i = 0; i < names.length; i++) {
+      var value = jar[names[i]]
+      if (!value) continue
+      var ps = __cookiePairs(value)
+      for (var j = 0; j < ps.length; j++) {
+        if (Object.prototype.hasOwnProperty.call(seen, ps[j][0])) continue
+        seen[ps[j][0]] = 1
+        out.push(ps[j][0] + '=' + ps[j][1])
+      }
+    }
+    return out.join('; ')
   }
 
   return {
-    getCookie: function (url) { var v = jar[String(url)]; return v === undefined ? '' : v },
-    setCookie: function (url, value) { jar[String(url)] = String(value) },
-    replaceCookie: function (url, value) { jar[String(url)] = String(value) },
-    removeCookie: function (url) { delete jar[String(url)] },
+    getCookie: function (url) { return stored(url) },
     getCookieMap: function () { return jar },
     getKey: function (url, key) {
-      var want = hostOf(url)
       var name = String(key)
-      if (want === '') return ''
-      for (var u in jar) {
-        var have = hostOf(u)
-        // 域名互相包含就算同一个站：cookie.getKey("qidian.com", k) 也要命中
-        // 存成 https://qidian.com/xxx 的那一条（反过来也一样）。
-        if (have !== want && have.indexOf(want) === -1 && want.indexOf(have) === -1) continue
-        var hit = findKey(jar[u], name)
-        if (hit !== '') return hit
-      }
+      var ps = __cookiePairs(stored(url))
+      for (var i = 0; i < ps.length; i++) if (ps[i][0] === name) return ps[i][1]
       return ''
+    },
+    // setCookie 按**名字合并**（同名覆盖、其余留着）；replaceCookie 整串换掉
+    setCookie: function (url, value) {
+      var host = __cookieHost(url)
+      if (host === '') return
+      var incoming = __cookiePairs(String(value === undefined || value === null ? '' : value))
+      if (incoming.length === 0) return
+      jar[host] = __cookieMerge(jar[host] || '', incoming)
+      touch(host)
+    },
+    replaceCookie: function (url, value) {
+      var host = __cookieHost(url)
+      if (host === '') return
+      var text = String(value === undefined || value === null ? '' : value)
+      if (text === '') delete jar[host]
+      else jar[host] = __cookieMerge('', __cookiePairs(text))
+      touch(host)
+    },
+    removeCookie: function (url) {
+      var host = __cookieHost(url)
+      if (host === '') return
+      if (jar[host] !== undefined) delete jar[host]
+      touch(host)
     },
   }
 })()
@@ -1494,6 +1584,15 @@ export interface SandboxLimits {
      * 用法是可接受的降级（每章重探一次），对用户手填的 `custom` 反而更接近本意。
      */
     persistBookVariable?: (name: string, value: string) => void | Promise<void>
+    /**
+     * cookie 罐（书源开着 `enabledCookieJar` 时才有，见 `BookSource.cookieJar`）
+     *
+     * 沙箱里 `cookie.*` 的起点是它，求值结束后改动由 `collectCookies` 收回并落库。
+     * 没有它时预置里那一份是**本次求值私有的**（老行为）。
+     */
+    cookieJar?: CookieJar
+    /** cookie 罐变过之后就写回库（由注册表装上，见 `data/db.ts`） */
+    persistCookies?: () => void | Promise<void>
 }
 
 /**
@@ -1904,6 +2003,7 @@ async function executeInSandbox(
         collectSourceVars(vm, session)
         await collectSourceVariable(vm, limits)
         await collectBookVars(vm, session, limits)
+        await collectCookies(vm, limits)
         releaseHostBridge(vm, runtime)
     }
 }
@@ -2267,6 +2367,51 @@ async function collectBookVars(
         }
     } catch {
         /* 落库失败不影响这次求值的结果（书源那侧已经拿到它要的值了） */
+    }
+}
+
+/**
+ * 把这次求值里改过的 **cookie** 收回罐子（并写回库）
+ *
+ * 读取端是预置脚本写的 `globalThis.__cookieJarOut`：`cookie.setCookie` / `replaceCookie` /
+ * `removeCookie` 每改一个主机就记一笔（空串表示删掉）。
+ *
+ * 只收回**改过的主机**，不是整份快照 —— 这一点很要紧：这次求值期间书源可能自己发过请求
+ * （`java.ajax`），取网层已经把响应里的 `Set-Cookie` 收进了同一个罐子；拿求值开始时的
+ * 快照整个覆盖回去，会把刚收到的那些悄悄抹掉。
+ *
+ * 落库要等（`await`）：Worker 的响应一返回，还在飞的 promise 会被掐掉，
+ * 而「搜索那一趟拿到会话 cookie」正是后面几趟要用的东西。失败只能咽掉 ——
+ * 这里发生在求值之后，再抛一个只会盖掉真正的失败原因。
+ */
+async function collectCookies(vm: QuickJSAsyncContext, limits: SandboxLimits): Promise<void> {
+    const jar = limits.cookieJar
+    if (!jar) return
+    try {
+        const handle = vm.evalCode('JSON.stringify(globalThis.__cookieJarOut || {})')
+        if (handle.error) {
+            handle.error.dispose()
+            return
+        }
+        const text = String(vm.dump(handle.value) ?? '')
+        handle.value.dispose()
+        const parsed = JSON.parse(text) as Record<string, unknown>
+        let changed = false
+        for (const host of Object.keys(parsed)) {
+            const value = String(parsed[host] ?? '')
+            if (value === '') {
+                if (jar.hosts[host] !== undefined) {
+                    delete jar.hosts[host]
+                    changed = true
+                }
+            } else if (jar.hosts[host] !== value) {
+                jar.hosts[host] = value
+                changed = true
+            }
+        }
+        if (changed && limits.persistCookies) await limits.persistCookies()
+    } catch {
+        /* cookie 收不回来只影响下一次请求带不带它，不该盖掉这次求值的结果 */
     }
 }
 

@@ -91,6 +91,14 @@ export function sourceGlobals(ctx: RuleContext): Record<string, unknown> {
         __source: sourcePayload(ctx.source),
         __sourceVars: JSON.stringify(variables),
         __infoMap: ctx.infoMap ?? {},
+        /**
+         * cookie 罐（主机名 → cookie 串）
+         *
+         * 只有书源开着 `enabledCookieJar` 时注册表才给它建罐子（见 `data/db.ts`），
+         * 没建时注入空表 —— 沙箱里的 `cookie.*` 于是退回「只活本次求值」的老行为，
+         * 与书源自己声明的取舍一致。求值结束后 `collectCookies` 把改动收回罐子并落库。
+         */
+        __cookieJar: JSON.stringify(ctx.source?.cookieJar?.hosts ?? {}),
     }
 }
 
@@ -170,5 +178,8 @@ export function sourceLimits(ctx: RuleContext): SandboxLimits {
         ...(ctx.sandbox ? { session: ctx.sandbox as SandboxSession } : {}),
         ...(ctx.persistSourceVariable ? { persistSourceVariable: ctx.persistSourceVariable } : {}),
         ...(ctx.persistBookVariable ? { persistBookVariable: ctx.persistBookVariable } : {}),
+        // cookie 罐：书源没开 enabledCookieJar 时它压根不存在，沙箱那侧就退回老行为
+        ...(ctx.source?.cookieJar ? { cookieJar: ctx.source.cookieJar } : {}),
+        ...(ctx.source?.persistCookies ? { persistCookies: ctx.source.persistCookies } : {}),
     }
 }

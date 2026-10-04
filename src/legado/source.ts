@@ -101,7 +101,16 @@ export function planFromResolvedUrl(
         headers: { ...defaultHeaders(absolute), ...parseSourceHeaders(source.header) },
         charset: 'auto',
         webView: false,
+        // cookie 罐：书源开着 enabledCookieJar 时注册表才给它建（见 data/db.ts）。
+        // 挂在这里就等于**所有**请求都走它 —— 链路请求与沙箱里的 java.ajax 都从这一个函数出。
+        ...cookieJarOf(source),
     }
+}
+
+/** 把书源上的 cookie 罐挂进请求计划（没建罐子就什么都不加） */
+function cookieJarOf(source: BookSource): Pick<FetchPlan, 'cookieJar' | 'persistCookies'> {
+    if (!source.cookieJar) return {}
+    return { cookieJar: source.cookieJar, persistCookies: source.persistCookies }
 }
 
 /**
