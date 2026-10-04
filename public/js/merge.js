@@ -17,7 +17,17 @@
  */
 
 /** 参与合并的普通字段：第一个非空的胜出 */
-const FIELDS = ['coverUrl', 'kind', 'lastChapter', 'intro']
+const FIELDS = ['kind', 'lastChapter', 'intro']
+
+/**
+ * 封面是**成对**的，单独处理
+ *
+ * `coverProxyUrl` 里的令牌指向 `coverUrl` 那个地址（签名时就把它写进去了，见
+ * `src/index.ts` 的 `withCoverProxy`）。两个字段若各自「取第一个非空」，
+ * 可能拼出「A 源的图 + B 源的令牌」—— 令牌解得出的地址与图不是一个，
+ * 显示出来的是另一本书的封面。所以只在 **coverUrl 为空**时成对搬过来。
+ */
+const COVER_FIELDS = ['coverUrl', 'coverProxyUrl']
 
 /**
  * 归一化：去掉所有空白（含全角空格）再转小写
@@ -67,6 +77,7 @@ export function mergeBooks(results, options = {}) {
                     sources: [],
                 }
                 for (const field of FIELDS) entry[field] = ''
+                for (const field of COVER_FIELDS) entry[field] = ''
                 siblings.push(entry)
                 merged.push(entry)
             } else if (entry.authorKey === '' && authorKey !== '') {
@@ -76,6 +87,11 @@ export function mergeBooks(results, options = {}) {
 
             for (const field of FIELDS) {
                 if (!entry[field] && book?.[field]) entry[field] = String(book[field])
+            }
+            // 封面成对搬：令牌与地址必须来自同一个源（见 COVER_FIELDS 说明）
+            if (!entry.coverUrl && book?.coverUrl) {
+                entry.coverUrl = String(book.coverUrl)
+                entry.coverProxyUrl = book.coverProxyUrl ? String(book.coverProxyUrl) : ''
             }
             entry.sources.push({
                 sourceId: result.sourceId,

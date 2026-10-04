@@ -67,7 +67,13 @@ import { javaSurfaceSummary } from './engine/platform'
 import { parseHtml } from './engine/select'
 import { handleFixture } from './fixture'
 import { exploreBooks, listExploreCategories } from './legado/explore'
-import { fetchBookInfo, fetchChapters, searchBooks, type FieldWarning } from './legado/ops'
+import {
+    fetchBookInfo,
+    fetchChapters,
+    hasAddressOptions,
+    searchBooks,
+    type FieldWarning,
+} from './legado/ops'
 import { fetchChapterContent } from './legado/media'
 import { mediaRequestHeaders } from './legado/source'
 import { splitUrlAndOptions } from './legado/urlOptions'
@@ -464,7 +470,11 @@ app.delete('/api/sources', async (c) => {
  */
 app.get('/api/shelf', async (c) => {
     const entries = await listShelf(c.env.DB, await ownerOf(c))
-    return c.json({ count: entries.length, entries })
+    // 防盗链封面补一个代取地址（见 withCoverProxy）。书架条目来自各自的源，逐个按自己的 sourceId 走
+    const withCovers = await Promise.all(
+        entries.map((entry) => withCoverProxy(c.env.DB, entry.sourceId, entry)),
+    )
+    return c.json({ count: withCovers.length, entries: withCovers })
 })
 
 app.post('/api/shelf', async (c) => {
@@ -1100,7 +1110,8 @@ app.get('/api/explore/books', async (c) => {
             sourceId: source.id,
             sourceName: source.bookSourceName,
             count: result.books.length,
-            books: result.books,
+            // 防盗链封面补一个代取地址（见 withCoverProxy）
+            books: await withCoverProxyAll(c.env.DB, source.id, result.books),
             nextUrl: result.nextUrl,
             // 分类地址里带 {{page}} 时，分页由模板表达，前端一直往下翻即可
             hasMore: result.nextUrl !== null || result.templated,
@@ -1128,7 +1139,13 @@ app.get('/api/home', async (c) => {
         return fail(c, err)
     }
 
-    const continueReading = entries.filter((e) => e.chapterUrl !== null).slice(0, 8)
+    // 防盗链封面补一个代取地址（见 withCoverProxy）。「继续阅读」来自各自的源，逐个按自己的 sourceId 走
+    const continueReading = await Promise.all(
+        entries
+            .filter((e) => e.chapterUrl !== null)
+            .slice(0, 8)
+            .map((e) => withCoverProxy(c.env.DB, e.sourceId, e)),
+    )
 
     const refresh = c.req.query('refresh') === '1'
     let payload = refresh ? null : await readHomeCache(c.env.DB)
@@ -1147,7 +1164,20 @@ app.get('/api/home', async (c) => {
         }
     }
 
-    return c.json({ ...payload, continueReading, count: entries.length })
+    /**
+     * 推荐位里的封面也补代取地址，但**缓存里存的是不含它的那一份**
+     *
+     * 代取地址有 24 小时有效期，写进缓存就成了「过期的死链」——
+     * 所以只在响应这一层签发（见 `writeHomeCache` 上面写的是 `payload`）。
+     */
+    const sections = await Promise.all(
+        payload.sections.map(async (section) => ({
+            ...section,
+            books: await withCoverProxyAll(c.env.DB, section.sourceId, section.books),
+        })),
+    )
+
+    return c.json({ ...payload, sections, continueReading, count: entries.length })
 })
 
 /** 搜索分页：一页默认搜几个书源（界面默认也是这个数，改这里要同步 searchPlan.js） */
@@ -1223,7 +1253,8 @@ app.post('/api/search', async (c) => {
                     ok: true,
                     count: books.length,
                     elapsedMs: Date.now() - started,
-                    books,
+                    // 防盗链封面补一个代取地址（见 withCoverProxy）
+                    books: await withCoverProxyAll(c.env.DB, source.id, books),
                     ...(warnings.length > 0 ? { warnings } : {}),
                 }
             } catch (err) {
@@ -1278,7 +1309,8 @@ app.get('/api/book', async (c) => {
         // `warnings` 收集展示用字段被容错掉的错误（见 ops.ts 的 tolerantField）：
         // 字段留空，但原因要带出去 —— 否则就成了「静默吞掉一个坏规则」
         const info = await fetchBookInfo(source, target, await bookEvalContext(c, source, target))
-        return c.json({ sourceId: source.id, ...info })
+        // 防盗链封面补一个代取地址（见 withCoverProxy）
+        return c.json({ sourceId: source.id, ...(await withCoverProxy(c.env.DB, source.id, info)) })
     } catch (err) {
         return fail(c, err)
     }
@@ -1344,6 +1376,39 @@ async function proxiedMedia(
     const secret = await getOrCreateMediaSecret(db)
     const token = await signMediaToken(secret, { sourceId, url: link.url }, MEDIA_TOKEN_TTL_SECONDS)
     return { ...link, proxyUrl: `/api/media/${token}` }
+}
+
+/**
+ * 给一本书补上 `coverProxyUrl`：**只有带请求选项的封面才有**
+ *
+ * 书源给 `coverUrl` 写 `,{"headers":{"Referer":…}}` 是为了防盗链 —— 而封面是
+ * 浏览器 `<img src>` 直接加载的，既不会带那个 `Referer`，也不认 `,{...}` 这种写法，
+ * 于是**必然取不到**（线上带选项的封面共 8 处 / 4 源：📂品书斋、🎨楠楠漫画、
+ * 🎨漫畫狗网、📷🔞美女图片网）。这种封面必须由 `/api/media` 代取：
+ * 它会合并选项里的请求头（见 media 那段路由）。
+ *
+ * 只给带选项的封面签发 —— 不带选项的封面浏览器直接就能加载，
+ * 没必要为此多一次签名与一次子请求。前端「有 `coverProxyUrl` 就用它」，
+ * 其余照旧 `<img src={coverUrl}>`（见 `public/js/core.js` 的 `coverSrc`）。
+ */
+async function withCoverProxy<T extends { coverUrl?: string }>(
+    db: D1Database,
+    sourceId: string,
+    book: T,
+): Promise<T & { coverProxyUrl?: string }> {
+    const coverUrl = book.coverUrl
+    if (!coverUrl || !hasAddressOptions(coverUrl)) return book
+    const { proxyUrl } = await proxiedMedia(db, sourceId, { url: coverUrl })
+    return { ...book, coverProxyUrl: proxyUrl }
+}
+
+/** 一本书的封面处理一遍；`/api/home` 的推荐位是分组的，按分组各自的 sourceId 走 */
+async function withCoverProxyAll<T extends { coverUrl?: string }>(
+    db: D1Database,
+    sourceId: string,
+    books: T[],
+): Promise<(T & { coverProxyUrl?: string })[]> {
+    return Promise.all(books.map((book) => withCoverProxy(db, sourceId, book)))
 }
 
 /** 允许原样透传的媒体类型。其余一律降级，理由见 mediaResponseHeaders */

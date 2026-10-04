@@ -30,8 +30,14 @@ vi.mock('../src/engine/js', () => ({
     sandboxResultToStrings: (value: unknown) => [String(value ?? '')],
 }))
 
-const { analyzeAddress, booksFromItems, resolveAddress, resolveCoverAddress, resolveUrl } =
-    await import('../src/legado/ops')
+const {
+    analyzeAddress,
+    booksFromItems,
+    hasAddressOptions,
+    resolveAddress,
+    resolveCoverAddress,
+    resolveUrl,
+} = await import('../src/legado/ops')
 const { analyzeSelections, rootSelection } = await import('../src/engine/analyze')
 const { splitUrlAndOptions } = await import('../src/legado/urlOptions')
 type BookSource = import('../src/engine/types').BookSource
@@ -214,15 +220,36 @@ describe('展示用字段的容错：坏规则不该让整条搜索失败', () =
     })
 })
 
-describe('resolveCoverAddress：封面要的是**能被浏览器直接加载**的地址', () => {
-    it('选项被丢掉，只留补全后的地址', () => {
+describe('resolveCoverAddress：封面**保留**选项，交给 /api/media 代取（第四十七轮）', () => {
+    /**
+     * 第四十三轮这里把选项**丢掉**了，理由是「封面由浏览器 `<img src>` 直接加载」。
+     * 丢掉之后地址是合法的 —— 但对**防盗链**封面没有用：地址对、图仍然 403。
+     * 第四十七轮改成保留选项 + 由 `/api/media` 代取（会合并选项里的 `Referer`）。
+     */
+    it('选项被保留 —— 代取正要靠它里面的 Referer', () => {
         const out = resolveCoverAddress(`/cover/1.jpg${COVER_OPTIONS}`, BASE)
-        expect(out).toBe('https://guiwb.nnmh.info/cover/1.jpg')
-        expect(out).not.toContain('{')
+        expect(out).toBe(`https://guiwb.nnmh.info/cover/1.jpg${COVER_OPTIONS}`)
+        // 闭环：这张封面被签进 /api/media 的令牌之后，代取那一侧还要能拆回同一个请求头
+        expect(splitUrlAndOptions(out).options).toEqual({
+            headers: { Referer: 'https://guiwb.nnmh.info/' },
+        })
     })
 
-    it('没有选项时与 resolveAddress 一致', () => {
+    it('行为与 resolveAddress 一致（封面只是**叫法不同**，好让意图写在名字上）', () => {
         expect(resolveCoverAddress('https://cdn.a.com/c.jpg', BASE)).toBe('https://cdn.a.com/c.jpg')
         expect(resolveCoverAddress('/c.jpg', BASE)).toBe('https://guiwb.nnmh.info/c.jpg')
+        expect(resolveCoverAddress(`/cover/1.jpg${COVER_OPTIONS}`, BASE)).toBe(
+            resolveAddress(`/cover/1.jpg${COVER_OPTIONS}`, BASE),
+        )
+    })
+})
+
+describe('hasAddressOptions：一张封面要不要走代取', () => {
+    it('带 `,{...}` 的算，其余不算', () => {
+        expect(hasAddressOptions(`https://a.com/1.jpg${COVER_OPTIONS}`)).toBe(true)
+        expect(hasAddressOptions('https://a.com/1.jpg')).toBe(false)
+        // 可选段 `<,{{page}}>` 里那个 `,{` 不算（判据与 splitUrlAndOptions 同一条）
+        expect(hasAddressOptions('https://a.com/list/<,{{page}}>.html')).toBe(false)
+        expect(hasAddressOptions('')).toBe(false)
     })
 })

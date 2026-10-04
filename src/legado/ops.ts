@@ -48,6 +48,17 @@ function optionsPartOf(value: string): { url: string; options: string } {
 }
 
 /**
+ * 这条地址是不是带着请求选项（`,{...}`）
+ *
+ * 封面据此决定**要不要走 `/api/media` 代取**：带选项的封面（书源给它写了 `Referer`
+ * 之类的）浏览器直接加载必然拿不到，必须由服务端替它把请求头补上。
+ * 判据与 `optionsPartOf` / `splitUrlAndOptions` 同一条，三处认的必须是同一个 `,`。
+ */
+export function hasAddressOptions(value: string): boolean {
+    return ADDRESS_OPTIONS_AT.test(value)
+}
+
+/**
  * 地址类字段：**先拆请求选项，再补全地址，然后把选项原样接回去**
  *
  * 顺序不能反，这是这一段的全部要点。`new URL()` 会把 `{` `"` 百分号编码，选项段一旦
@@ -70,19 +81,23 @@ export function resolveAddress(value: string, base: string): string {
 }
 
 /**
- * 封面地址：**丢掉**请求选项，只把地址补全
+ * 封面地址：**保留**请求选项，由 `/api/media` 代取（第四十七轮改的）
  *
- * 封面与链路地址的去处不同：它被前端当成 `<img src>` **由浏览器直接加载**（见
- * `public/js/core.js` 的 `coverNode`），浏览器既不会带书源指定的 `Referer`，也不认
- * `,{...}` 这种写法 —— 带着选项的地址在浏览器里同样是坏的（百分号编码之后请求一个
- * 不存在的路径）。
+ * 第四十三轮这里把选项**丢掉**了，理由是封面由浏览器 `<img src>` 直接加载，
+ * 浏览器既不带书源指定的 `Referer`、也不认 `,{...}` 这种写法。丢掉之后至少
+ * 「是一个合法图片地址」—— 但对**防盗链**的封面没有用：地址是对的，图仍然 403。
  *
- * 所以这里取「至少是一个合法图片地址」：`📂品书斋` / `🎨楠楠漫画` 那 8 处封面能少一层
- * 必然 404。真要让防盗链封面可用，得把封面也走 `/api/media` 代取 —— 那是**另一件事**，
- * 代价是每一张封面多一次签名与一次子请求（见 README 的待办）。
+ * 现在改成与 `resolveAddress` 一样**保留**选项，因为真正的取图交给 `/api/media`
+ * 代取 —— 那份选项里的 `Referer` 正是书源写它的目的。前端拿到的
+ * `coverProxyUrl`（见 `index.ts` 的 `withCoverProxy`）优先于 `coverUrl`；
+ * 不带选项的封面不签发代取地址，浏览器直接加载原图即可。
+ * （线上带选项的封面共 8 处 / 4 源：📂品书斋、🎨楠楠漫画、🎨漫畫狗网、📷🔞美女图片网。）
+ *
+ * 所以这个函数保留下来只为**写明这一处的意图**（封面 vs 链路地址），
+ * 行为与 `resolveAddress` 一致。
  */
 export function resolveCoverAddress(value: string, base: string): string {
-    return resolveUrl(optionsPartOf(value).url, base)
+    return resolveAddress(value, base)
 }
 
 /**

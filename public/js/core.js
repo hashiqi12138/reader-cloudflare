@@ -193,6 +193,18 @@ function seedOf(text) {
     return String(hash % 8)
 }
 
+/**
+ * 一本书的封面地址：**有代取地址就用代取地址**
+ *
+ * 书源给 `coverUrl` 写了 `,{"headers":{"Referer":…}}` 的封面（防盗链）浏览器直接
+ * 加载必然 403 —— 后端会为这种封面签发 `coverProxyUrl`（走 `/api/media`，
+ * 由服务端把 `Referer` 补上，见 `src/index.ts` 的 `withCoverProxy`）。
+ * 其余封面没有这个字段，直接用 `coverUrl` 让浏览器加载。
+ */
+export function coverSrc(book) {
+    return (book && (book.coverProxyUrl || book.coverUrl)) || ''
+}
+
 // ---------------------------------------------------------------- 偏好
 
 const prefKeys = {

@@ -12,6 +12,7 @@ import {
     claimAnonymous,
     contextParams,
     coverNode,
+    coverSrc,
     currentUser,
     el,
     go,
@@ -491,7 +492,7 @@ export function bookCard(book, sourceId, options = {}) {
 
     return el('article', { class: `book-card ${options.compact ? 'compact' : ''}` }, [
         el('a', { class: 'book-card-main', href: bookUrl(sourceId, book) }, [
-            coverNode(book.coverUrl, book.name, 'cover'),
+            coverNode(coverSrc(book), book.name, 'cover'),
             el('div', { class: 'book-card-text' }, [
                 el('h3', { class: 'book-title', text: book.name }),
                 el('p', { class: 'book-meta', text: meta }),
@@ -596,7 +597,7 @@ export async function viewHome(host) {
             row.append(
                 el('article', { class: 'rail-card' }, [
                     el('div', { class: 'rail-head' }, [
-                        coverNode(entry.coverUrl, entry.name, 'cover small'),
+                        coverNode(coverSrc(entry), entry.name, 'cover small'),
                         el('div', { class: 'rail-text' }, [
                             el('h3', { class: 'book-title', text: entry.name }),
                             el('p', {
@@ -671,7 +672,7 @@ export async function viewHome(host) {
         for (const book of section.books) {
             row.append(
                 el('a', { class: 'shelf-tile', href: bookUrl(section.sourceId, book) }, [
-                    coverNode(book.coverUrl, book.name, 'cover tile'),
+                    coverNode(coverSrc(book), book.name, 'cover tile'),
                     el('span', { class: 'tile-title', text: book.name }),
                     el('span', { class: 'tile-meta', text: book.author || '未知作者' }),
                 ]),
@@ -761,7 +762,7 @@ export async function viewShelf(host) {
                         href: bookUrl(entry.sourceId, { bookUrl: entry.bookUrl, name: entry.name }),
                     },
                     [
-                        coverNode(entry.coverUrl, entry.name, 'cover'),
+                        coverNode(coverSrc(entry), entry.name, 'cover'),
                         el('div', { class: 'book-card-text' }, [
                             el('h3', { class: 'book-title', text: entry.name }),
                             el('p', { class: 'book-meta', text: entry.author || '未知作者' }),
@@ -1874,7 +1875,7 @@ export async function viewBook(host) {
     setChildren(host, [
         el('article', { class: 'book-detail card' }, [
             el('div', { class: 'book-detail-head' }, [
-                coverNode(info.coverUrl, name, 'cover large'),
+                coverNode(coverSrc(info), name, 'cover large'),
                 el('div', { class: 'spacer' }, [
                     el('h1', { class: 'book-title large', text: name }),
                     el('p', { class: 'book-meta', text: author || '未知作者' }),

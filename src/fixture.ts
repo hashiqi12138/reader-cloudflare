@@ -139,6 +139,26 @@ ${items}
 }
 
 /**
+ * **防盗链封面**的列表页：条目里的 `<img>` 指向一个「没有 Referer 就 403」的地址
+ *
+ * 专供 `scripts/smoke.mjs` §35：线上 `📂品书斋` / `🎨楠楠漫画` / `🎨咚漫` 的封面就是
+ * 「书源给 `coverUrl` 写了 `,{"headers":{"Referer":…}}`」这一形态 —— 浏览器 `<img>`
+ * 直接加载必然 403，必须由 `/api/media` 代取。与 `fixtureSearchPage` 分开写，
+ * 免得调这个形状时牵动别的段落。
+ */
+export function fixtureGuardedCoverPage(): string {
+    const items = BOOKS.slice(0, 2)
+        .map(
+            (b) => `<div class="gc-item">
+    <a href="/fixture/book/${b.id}"><img src="/fixture/cover-guarded" alt=""><span class="gc-name">${escapeHtml(b.name)}</span></a>
+</div>`,
+        )
+        .join('\n')
+
+    return page('防盗链封面', `<div class="gc-list">\n${items}\n</div>`)
+}
+
+/**
  * **POST 表单搜索**：专门守住「带请求体必须声明 Content-Type」这一条
  *
  * 真实站点绝大多数是 PHP，而 PHP 只在 `application/x-www-form-urlencoded`（或
@@ -613,6 +633,24 @@ export async function handleFixture(request: Request, url: URL): Promise<Respons
 
     // 单斜杠 XPath 的靶子（见 fixtureSlashXPathPage 的说明）
     if (pathname === '/fixture/slash-xpath') return html(fixtureSlashXPathPage())
+
+    // 防盗链封面的列表页（见 fixtureGuardedCoverPage 的说明）
+    if (pathname === '/fixture/guarded-cover-page') return html(fixtureGuardedCoverPage())
+
+    /**
+     * **防盗链封面**本身：没有 `Referer` 就 403
+     *
+     * 照线上那几家的规矩写，**不宽容**：少了 `Referer` 就是 403。
+     * 宽容的话（比如「没 Referer 也放行」）用例就守不住「代取到底有没有真的
+     * 把 `Referer` 发出去」——那正是这一段要验的东西（§35）。
+     */
+    if (pathname === '/fixture/cover-guarded') {
+        if ((request.headers.get('referer') ?? '') === '') {
+            return new Response('forbidden', { status: 403 })
+        }
+        const cover = MEDIA_FILES['/fixture/media/page-1.png']!
+        return mediaResponse(cover.body, cover.type, null)
+    }
 
     /**
      * `java.connect` 的靶子：一个**能被断言状态码与响应头**的端点

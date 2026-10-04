@@ -4775,7 +4775,7 @@ console.log('\n=== 31. 地址类字段里的请求选项（`地址,{选项}`） 
                     name: 'h3.title@text',
                     // 详情页：地址带着一个自定义请求头，靠它证明选项真的到了请求上
                     bookUrl: `a@href@js:'/fixture/echo-request,{"headers":{"X-RC-Probe":"addr-opt"}}'`,
-                    // 封面：同样带选项，验证它被丢掉（浏览器直连）
+                    // 封面：同样带选项 —— 现在**原样保留**，而且后端为它签发代取地址（见 §35）
                     coverUrl: `a@href@js:result + ',{"headers":{"Referer":"https://example.com/"}}'`,
                 },
                 ruleBookInfo: {
@@ -4807,9 +4807,10 @@ console.log('\n=== 31. 地址类字段里的请求选项（`地址,{选项}`） 
         String(book?.bookUrl ?? ''),
     )
     check(
-        !String(book?.coverUrl ?? '').includes('{'),
-        '封面地址丢掉了选项（浏览器直接加载，带选项必然 404）',
-        String(book?.coverUrl ?? ''),
+        String(book?.coverUrl ?? '').includes('Referer') &&
+            String(book?.coverProxyUrl ?? '').startsWith('/api/media/'),
+        '封面地址**保留**了选项，并拿到代取地址（第四十七轮起走 /api/media）',
+        `${String(book?.coverUrl ?? '').slice(0, 60)} | ${String(book?.coverProxyUrl ?? '').slice(0, 24)}`,
     )
 
     const detail = await getJson(
@@ -5233,6 +5234,92 @@ console.log('\n=== 34. 单斜杠开头的 XPath（飘天文学那一族的字段
             String(s.id).includes('slash-xpath'),
         ),
         '单斜杠 XPath 的测试源已清理',
+    )
+}
+
+console.log('\n=== 35. 防盗链封面走 /api/media 代取（书源给 coverUrl 写了 Referer） ===')
+{
+    /**
+     * 线上 `📂品书斋` / `🎨楠楠漫画` / `🎨漫畫狗网` / `📷🔞美女图片网` 的封面（共 8 处 / 4 源）
+     * 是这么写的：
+     *
+     *   coverUrl: tag.img@src@js:result + ',{"headers":{"Referer":"…"}}'
+     *
+     * 封面由浏览器 `<img src>` 直接加载 —— 它既不带书源指定的 `Referer`、
+     * 也不认 `,{...}` 这种写法，于是**必然取不到**。第四十七轮起后端为这种封面
+     * 签发 `coverProxyUrl`（走 `/api/media` 代取，由服务端把 `Referer` 补上）。
+     *
+     * 用 fixture 里同形状的页面 + 一个「没有 Referer 就 403」的封面地址，验四件事：
+     *   ① 搜索响应里带上了 `coverProxyUrl`（指向 /api/media）
+     *   ② `coverUrl` 仍是**带选项的原始地址**（存储 / 导出要用它，不是代取地址）
+     *   ③ 取代取地址能拿到图 —— 代取真的把 `Referer` 发出去了
+     *   ④ 反向对照：不带 `Referer` 直连封面地址是 403（证明这个靶子确实认 Referer）
+     */
+    const id = `user:${BASE}/guarded-cover`
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: '防盗链封面（临时）',
+                bookSourceUrl: `${BASE}/guarded-cover`,
+                searchUrl: '/fixture/guarded-cover-page',
+                ruleSearch: {
+                    bookList: 'div.gc-item',
+                    name: 'span.gc-name@text',
+                    bookUrl: 'a@href',
+                    coverUrl: `img@src@js:result + ',{"headers":{"Referer":"${BASE}/"}}'`,
+                },
+            },
+        ]),
+    )
+
+    const res = await fetch(`${BASE}/api/search`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ keyword: '测试', sourceIds: [id] }),
+    })
+    const one = (await res.json()).sources?.[0]
+    const book = one?.books?.[0]
+
+    check(
+        one?.ok === true && (one?.count ?? 0) > 0,
+        '防盗链封面的源搜索跑通',
+        one?.error ?? `count=${one?.count}`,
+    )
+    check(
+        String(book?.coverProxyUrl ?? '').startsWith('/api/media/'),
+        '带选项的封面拿到了代取地址',
+        String(book?.coverProxyUrl ?? '').slice(0, 60),
+    )
+    check(
+        /\/fixture\/cover-guarded/.test(String(book?.coverUrl ?? '')) &&
+            String(book?.coverUrl ?? '').includes('Referer'),
+        '`coverUrl` 仍是带选项的原始地址（存储用它）',
+        String(book?.coverUrl ?? '').slice(0, 90),
+    )
+
+    const proxied = await fetch(BASE + String(book?.coverProxyUrl ?? ''))
+    check(
+        proxied.status === 200 && (proxied.headers.get('content-type') ?? '').startsWith('image/'),
+        '代取地址取回的是图片（代取把 Referer 发出去了）',
+        `status=${proxied.status} type=${proxied.headers.get('content-type')}`,
+    )
+
+    const direct = await fetch(`${BASE}/fixture/cover-guarded`)
+    check(
+        direct.status === 403,
+        '反向对照：不带 Referer 直连封面地址是 403',
+        `status=${direct.status}`,
+    )
+
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+    check(
+        !((await getJson('/api/sources')).json?.sources ?? []).some((s) =>
+            String(s.id).includes('guarded-cover'),
+        ),
+        '防盗链封面的测试源已清理',
     )
 }
 

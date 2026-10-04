@@ -72,6 +72,44 @@ describe('mergeBooks：同一本书在多个源上', () => {
         expect(merged[0].intro).toBe('简介来自甲')
         expect(merged[0].coverUrl).toBe('/cover.jpg')
     })
+
+    /**
+     * 封面是**成对**的：`coverProxyUrl` 里的令牌指向 `coverUrl` 那个地址
+     * （防盗链封面走 /api/media 代取，见 src/index.ts 的 withCoverProxy）。
+     * 两个字段各自「取第一个非空」会拼出「A 源的图 + B 源的令牌」——
+     * 令牌解出来的是另一本书的封面。
+     */
+    it('封面成对合并：地址来自源甲时，令牌不能跟着源乙走', () => {
+        const merged = mergeBooks([
+            source('a', '源甲', [{ name: '书', author: '人', coverUrl: 'https://a.com/c.jpg' }]),
+            source('b', '源乙', [
+                {
+                    name: '书',
+                    author: '人',
+                    coverUrl: 'https://b.com/c.jpg',
+                    coverProxyUrl: '/api/media/BBB',
+                },
+            ]),
+        ])
+        expect(merged[0].coverUrl).toBe('https://a.com/c.jpg')
+        expect(merged[0].coverProxyUrl).toBe('')
+    })
+
+    it('地址为空时，同源的两个封面字段一起搬过来', () => {
+        const merged = mergeBooks([
+            source('a', '源甲', [{ name: '书', author: '人' }]),
+            source('b', '源乙', [
+                {
+                    name: '书',
+                    author: '人',
+                    coverUrl: 'https://b.com/c.jpg',
+                    coverProxyUrl: '/api/media/BBB',
+                },
+            ]),
+        ])
+        expect(merged[0].coverUrl).toBe('https://b.com/c.jpg')
+        expect(merged[0].coverProxyUrl).toBe('/api/media/BBB')
+    })
 })
 
 describe('mergeBooks：主源与排序', () => {
