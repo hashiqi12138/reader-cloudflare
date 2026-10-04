@@ -37,6 +37,7 @@
 | **HTTP 重定向**（自己跟：每一跳的 `Set-Cookie` 都收，第一跳的 `Location` 交回给脚本）               | 已实现（`fetch` 的 `follow` 会把这两样都吃掉 —— 线上 11 个源的 `searchUrl` 正是靠那个 `Location` 找真正的搜索页地址；见「第五十五轮」）                                                                                                                                                                                                         |
 | **目录里的标注**：`isVip` / `isPay` / `isVolume` / `updateTime`                                     | 已实现（45 / 7 / 25 / 74 个源在用；VIP 标记、卷分组、更新时间都会显示在目录里，`chapter.isVip()` 也第一次拿到真值 —— 见「第五十六轮」）                                                                                                                                                                                                         |
 | **书源登录态**（跑一次 `loginUrl` → 落库 → 之后每趟请求都带上）                                     | 已实现（`putLoginHeader` / `putLoginInfo` 写穿落库、取网层三层请求头带上、`POST /api/sources/login`；116 条写了 loginUrl 的源里 76 条是 WebView 的登录页地址，那一档会**说清楚**跑不了 —— 见「第五十七轮」）                                                                                                                                    |
+| **书源登录界面**（`loginUi`：输入框 / 下拉 / 界面上的按钮）                                         | 已实现（35 条源写了它，六种控件、按钮动作 163 处是源自己的函数；书源页每行一个「登录」入口，见「第五十八轮」）                                                                                                                                                                                                                                  |
 | 书源自带的 `jsLib` 全局函数库                                                                       | 已实现（35 条源在用；作为沙箱前置脚本执行，失败不中断但会说明原因）                                                                                                                                                                                                                                                                             |
 | 沙箱里的 `book` / `chapter` 上下文与**书的变量**（`book.getVariable` / `putVariable`）              | 已实现（`book.name` 54 处 / 39 源、`chapter.title` 32 处 / 30 源；变量落 `book_variables`，见「第三十五轮」）                                                                                                                                                                                                                                   |
 | `org.jsoup.Jsoup` + Element/Elements API                                                            | 已实现（宿主桥 + cheerio 句柄；写操作是空操作，未实现的方法报出方法名；`<script>` / `<style>` 也是元素 —— 见「第四十九轮」）                                                                                                                                                                                                                    |
@@ -5060,14 +5061,107 @@ runtime + context + 把 50KB 预置重新解析一遍。冒烟第 43 段那组�
 - 前几轮挂着的那几笔（`parseFragments` 的怪相、选项里 `{{}}` 与 `body` 混用、
   `media.ts` 的两条多行地址路、`java.get(键)`、**WebView 那一族**）依旧没动
 
+### 第五十八轮：登录界面（`loginUi`）—— 上一轮那句「登录没有 UI」这一轮补上
+
+第五十七轮把「跑一次 `loginUrl` → 落库 → 之后每趟请求都带上」接通了，但只能从接口调，
+书源页上**没有任何入口**。这一轮把界面补上。
+
+**一、先量 `loginUi` 的形态。** 816 条源里写了它的有 **35 条**，形态比官方文档复杂：
+
+| 形态                           | 条数 | 怎么读                                      |
+| ------------------------------ | ---- | ------------------------------------------- |
+| 裸 JSON 数组                   | 18   | 直接 `JSON.parse`                           |
+| 前缀 `@js:`                    | 8    | 拼好之后挂到 `result` 上                    |
+| 以 `[` 开头但**不是合法 JSON** | 8    | 键没加引号的 JS 字面量（`{ name:"账号" }`） |
+| 包在 `<js>` 里                 | 1    | 求值出来是一个 JSON 字符串                  |
+
+控件 `type` 实际出现**六种**，而文档只写了三种（`text` / `password` / `button`）：
+button 159 / text 40 / password 20 / **toggle 8** / **select 7** / **input 1**。
+`select` 与 `toggle` 都带 `chars` + `default`（`{type:"toggle", chars:["🔳","✅"], default:"🔳"}`），
+所以判据是**按「有没有 `chars`」决定要不要渲染成下拉**，不是按 type 硬编码 ——
+`toggle` 的语义文档里没写，但 8 处全是「两个图标二选一」，当下拉处理是如实的。
+
+还有一笔同样重要：**163 个按钮动作是源自己的函数**（`jmDoLogin()` / `checkSite()` /
+`saveCommentSetting(…)`），只有 **2 个**正好写着 `login()`。也就是说「获取验证码」
+「切换线路」「检测登录态」这些**都挂在按钮上**，不点它，那半边功能就用不了
+（🏷书旗小说 那个界面 20 多个控件里只有一个是登录）。
+
+**二、后端两个新接口。**
+
+- **`GET /api/sources/login-ui?id=`** —— **先试 `JSON.parse`，失败再进沙箱**。
+  18/35 条走快路，那些严格 JSON 的源连沙箱都不用碰，也不会因为源里有奇怪脚本而失败。
+  沙箱那条路补了**第二趟读 `result`**：8 条 `@js:` 拼出来的源把值挂在 `result` 上，
+  而不是「最后一句表达式的值」（🔞 Linpx 那种「全是变量声明」的连 `result` 都没设，
+  那就如实报「解析不出控件」并把原文贴出来）。
+- **`POST /api/sources/login-action`**（`{ id, action, fields? }`）—— 调界面上的**某一个按钮**。
+  做法就是 App 的做法：**同一次求值里先跑 `loginUrl`（把函数定义出来）再把动作接上去** ——
+  沙箱每次求值都是新上下文，分两趟跑是看不到那些函数的。而这里**不**顺带调 `login()`：
+  点「获取验证码」不该把登录也跑一遍。
+  `action` 只接受**出现在这个书源 `loginUi` 文本里**的那些（文本级核对，不进沙箱）——
+  是白名单，不是「客户端说跑什么就跑什么」。
+
+**三、前端。** 书源页每行多一个「登录」入口（`/api/sources` 新给 `hasLogin` / `loggedIn`），
+点开是一个面板：输入框 / 密码框 / 下拉（带 `chars` 的）＋ 主按钮「登录」＋ 界面上那些按钮
+（`action` 是 http 地址的新开标签页，空 `action` 的当说明牌）。两处细节：
+
+- 面板**只在第一次展开时读一次**界面 —— 每次点都重读会把已经填好的账号密码清掉
+- 主按钮走 `/api/sources/login`，于是**地址型 `loginUrl`**（App 里用 WebView 打开的那种）
+  那句明白话就在这里露出来，不是静默失败
+
+**四、验证。**
+
+- 单测 **825 → 839**（新增 `test/loginUi.test.ts`：按 `chars` 判下拉、`default` 不在候选里
+  就丢掉、没有 `name` 的条目跳过、JSON 字符串先剥一层、解不出来的只留一句原文不抛错；
+  `parseLoginUiJson` 只走严格 JSON 那条快路）
+- 冒烟**新增第 45 段**，七件事一起验（靶子是三条临时源：严格 JSON 的 / `@js:` 拼出来的 /
+  没写 `loginUi` 的）：① 严格 JSON 的界面归一对了（含下拉候选、默认、http 按钮的 `url`）
+  ② `@js:` 拼出来、值挂在 `result` 上也解得出 ③ 没写 `loginUi` → `hasUi:false` 但不报错
+  ④ 按钮函数调得到、表单字段从 `result.get(...)` 读得到 ⑤ 界面上那个 `login()` 按钮真能登上
+  ⑥ 不在 `loginUi` 里的动作 → 400 ⑦ `/api/sources` 带上 `hasLogin` / `loggedIn`
+- `src/legado/loginUi.ts` 是纯函数模块（`normalizeLoginForm` / `parseLoginUiJson`）；
+  `src/index.ts` 顺带把三处共用的沙箱调用与判据抽成 `runLoginCode` / `loggedInOf` /
+  `loginStoredOf` / `seedLoginFields` / `loginFieldsOf`
+
+**五、线上核验**（`/api/probe` 报 `0.48.0`）。816 条源里 116 条带登录入口；挑四种形态各看一个：
+
+| 源              | 形态                         | 读出来的界面                                                                     |
+| --------------- | ---------------------------- | -------------------------------------------------------------------------------- |
+| 📂台湾小说网    | 包在 `<js>` 里               | `hasUi=true`、0 个输入框、**2 个按钮**（检查访问状态 / 打开网站）                |
+| 📂霹雳书屋      | 严格 JSON                    | `hasUi=true`、1 个下拉（线路，3 个候选）                                         |
+| 🏷书旗小说       | `@js:` 拼的（值在 `result`） | `hasUi=true`、**16 个输入框 + 5 个按钮**（含那个 `login()` 按钮）                |
+| 🔞🎨禁漫天堂API | 严格 JSON                    | `hasUi=true`、账号 + 密码、**15 个按钮**（登录 / 检测登录态 / 清除登录 / 线路…） |
+| ⚡📂少年梦阅读  | 严格 JSON                    | `hasUi=true`、账号 + 密码                                                        |
+| ⚡📂企鹅阅读    | 没有 `loginUi`               | `hasUi=false`                                                                    |
+
+再按一次真按钮：📂台湾小说网 的 `checkSite()` 确实被调到（`ok:true`，报的是
+`本引擎不支持 Java 类 Packages.org.*` —— 第五十二轮那份平台能力清单里的一档，
+与这一步无关）；白名单外的动作回 400。静态资源那边也核了一遍：线上 `/js/views.js`
+里确实带着 `renderLoginPanel` 与 `/api/sources/login-action`。
+
+**这一轮仍然没做完的**
+
+- **76 条地址型 `loginUrl` 依旧跑不了**（WebView 的活）；界面会显示那句明白话，
+  但登录本身做不了
+- **`loginUi` 里的按钮只能一个一个点**：没有「按顺序跑一串」那回事（App 里也是手点）
+- **`loginUi` 的 `style`（Flexbox 布局）没有实现**：语料里到处是
+  `layout_flexGrow` / `layout_flexBasisPercent`，我们按「一行一格 + 自动换行」铺开 ——
+  布局与 App 不同，控件本身一个不少
+- **语料里那 1 条「读表单却没写 `loginUi`」的源**（📂文学爱度）没法填账号：字段名只有
+  脚本自己知道，界面给不出来（面板会提示「直接点登录」）
+- **表单值仍然不落库**（有意，见第五十七轮）
+- 前几轮挂着的那几笔（`preUpdateJs`、`MAX_MARKED_CHAPTERS` 有损、重定向后不换 `Referer`、
+  `code()` 看不到 302、cookie 没有 path/domain、`cookie.mapToCookie`、`parseFragments` 的怪相、
+  选项里 `{{}}` 与 `body` 混用、`media.ts` 的两条多行地址路、`java.get(键)`、
+  **WebView 那一族**）都没动
+
 ## 验证
 
 ```bash
 npm install
 npm run db:migrate   # 建本地 D1 表（首次、以及每次新增迁移后）
-npm test             # 单元测试（825 项，Node 里毫秒级跑完；另有十八个默认跳过的全量扫描，见下）
+npm test             # 单元测试（839 项，Node 里毫秒级跑完；另有十八个默认跳过的全量扫描，见下）
 npm run dev          # 起本地服务，浏览器打开首页即可用；另开一个终端跑下面这条
-npm run smoke        # 端到端：链路 + 书源管理 + 静态资源 + 账号/书架/进度/书签 + 改显示名/改密码 + 导出导入备份 + 书签清单 + 替换净化同步 + 笔记 + 媒体 + 字段模板 + 选择器@js: + 空选择器取值 + 列表标记（+ / 顶格 <js>）+ 沙箱助手 + setContent/digestHex/UI 动作 + 节点级助手/加解密 + 连接式取网与 result.toArray() + 书源变量落库 + 书的上下文与书的变量 + JS 尾段列表规则保留节点 + 连接符切分 + 列表规则（末尾那个词 / CSS 首段的位置后缀 / `!` 排除下标）+ 字段规则（CSS 式多段 `@`）+ 变量指令（`@put:` / `@get:` 含**跨请求**那一半）+ `init`（铺变量与**换根**两种）+ `<js>` 段 + JSONPath 尾段（`$[*]` / `$[:n]`）+ 地址尾部的请求选项（`地址,{选项}` / 排成多行的那份选项块）+ URL 选项里 `body` 写对象（`application/json`）+ 展示用字段的容错与 `warnings` + 单斜杠 XPath（`/a/p[1]/text()` 相对当前条目）+ 防盗链封面走 `/api/media` 代取 + http 封面（混合内容）也代取 + `<script>` / `<style>` 也是元素（`java.getElement("script")` 那条路） + JSOUP 简写 `class.A B`（两个类都要有） + `source.getLoginInfoMap()` 的 Map 语义 + URL 字段 JS + 发现/首页 + cookie 罐（收 / 发 / 按源落库）+ 重定向自己跟（302 上的 `Set-Cookie` 与 `Location`）+ 目录里的 `isVip` / `isPay` / `isVolume` / `updateTime` + 登录态（跑一次 `loginUrl` → 落库 → 之后每趟请求都带上）
+npm run smoke        # 端到端：链路 + 书源管理 + 静态资源 + 账号/书架/进度/书签 + 改显示名/改密码 + 导出导入备份 + 书签清单 + 替换净化同步 + 笔记 + 媒体 + 字段模板 + 选择器@js: + 空选择器取值 + 列表标记（+ / 顶格 <js>）+ 沙箱助手 + setContent/digestHex/UI 动作 + 节点级助手/加解密 + 连接式取网与 result.toArray() + 书源变量落库 + 书的上下文与书的变量 + JS 尾段列表规则保留节点 + 连接符切分 + 列表规则（末尾那个词 / CSS 首段的位置后缀 / `!` 排除下标）+ 字段规则（CSS 式多段 `@`）+ 变量指令（`@put:` / `@get:` 含**跨请求**那一半）+ `init`（铺变量与**换根**两种）+ `<js>` 段 + JSONPath 尾段（`$[*]` / `$[:n]`）+ 地址尾部的请求选项（`地址,{选项}` / 排成多行的那份选项块）+ URL 选项里 `body` 写对象（`application/json`）+ 展示用字段的容错与 `warnings` + 单斜杠 XPath（`/a/p[1]/text()` 相对当前条目）+ 防盗链封面走 `/api/media` 代取 + http 封面（混合内容）也代取 + `<script>` / `<style>` 也是元素（`java.getElement("script")` 那条路） + JSOUP 简写 `class.A B`（两个类都要有） + `source.getLoginInfoMap()` 的 Map 语义 + URL 字段 JS + 发现/首页 + cookie 罐（收 / 发 / 按源落库）+ 重定向自己跟（302 上的 `Set-Cookie` 与 `Location`）+ 目录里的 `isVip` / `isPay` / `isVolume` / `updateTime` + 登录态（跑一次 `loginUrl` → 落库 → 之后每趟请求都带上）+ 登录界面（读 `loginUi` → 渲染表单 → 界面上的按钮单独调得到）
 ```
 
 另外还有一条**不进 CI 的**体检命令（它要打真实站点，默认打线上那台）：
