@@ -2440,6 +2440,48 @@ console.log('\n=== 13. 图片 / 音频 / 文件源 ===')
         `代理=${proxiedBytes.length} 上游=${directBytes.length}`,
     )
 
+    /**
+     * 媒体缓存（Cache API）
+     *
+     * 命中和未命中的响应体**一模一样**，从外面只看得到 `X-Media-Cache` 这一个信号 ——
+     * 不显式断言它，「缓存到底有没有生效」就永远无从验证。
+     *
+     * 第二次用的是**重新签发的**地址：令牌里带过期时间（秒级），隔一秒再签就是另一个地址。
+     * 所以「换过地址之后仍然命中」才证明了键是从**验签之后的载荷**算的，不是拿 URL 当键。
+     */
+    await new Promise((resolve) => setTimeout(resolve, 1100))
+    const sameImage = await media(
+        `/api/content?sourceId=${encodeURIComponent('builtin:fixture-image')}&url=${encodeURIComponent(imageChapter)}`,
+    )
+    const secondProxy = sameImage.json?.images?.[0]?.proxyUrl ?? ''
+    check(
+        secondProxy !== '' && secondProxy !== (imageList[0]?.proxyUrl ?? ''),
+        '同一张图隔一秒重新签发，代取地址确实变了（否则下面那条命中证明不了什么）',
+        `第一次=${imageList[0]?.proxyUrl ?? ''} 第二次=${secondProxy}`,
+    )
+    // 写缓存发生在响应之后（`waitUntil` 里，要等响应体收完），所以先给它一点时间
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    const cachedPng = await fetch(`${BASE}${secondProxy}`)
+    const cachedBytes = new Uint8Array(await cachedPng.arrayBuffer())
+    check(
+        cachedPng.headers.get('x-media-cache') === 'hit',
+        '换了地址之后同一张图仍然命中缓存（键从验签载荷算，不是拿 URL 当键）',
+        `header=${cachedPng.headers.get('x-media-cache')}`,
+    )
+    check(
+        cachedBytes.length === directBytes.length &&
+            cachedBytes.every((b, i) => b === directBytes[i]),
+        '命中缓存拿到的字节与上游仍然逐字节一致',
+        `缓存=${cachedBytes.length} 上游=${directBytes.length}`,
+    )
+    // 带 Range 的不该进缓存（存下来是一段而不是整份）
+    const rangedPng = await fetch(`${BASE}${secondProxy}`, { headers: { Range: 'bytes=0-3' } })
+    check(
+        rangedPng.headers.get('x-media-cache') === 'skip',
+        '带 Range 的代取不进缓存（X-Media-Cache: skip）',
+        `header=${rangedPng.headers.get('x-media-cache')}`,
+    )
+
     // 「图片地址」其实指向 HTML 时必须降级：这个接口是**同源**的，
     // 以 text/html 透传等于在我们自己的域上执行别人的脚本，
     // 而 localStorage 里正放着身份令牌。

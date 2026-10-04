@@ -80,4 +80,11 @@ describe('平台边界', () => {
 
         expect(naming.sort()).toEqual(['index.ts', 'platform/cloudflare.ts'])
     })
+
+    it('边缘缓存只从适配层拿 —— 业务代码里不出现 `caches`', () => {
+        // 业务侧一律走 `c.env.CACHE`（`PlatformCache`），换平台时才只需要改一个适配器
+        const leaked = BUSINESS.filter((one) => /\bcaches\b/.test(one.text)).map((one) => one.path)
+
+        expect(leaked).toEqual([])
+    })
 })
