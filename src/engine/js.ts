@@ -50,6 +50,7 @@ import { DEFAULT_TIME_OFFSET_HOURS, formatJavaTime } from '../lib/javatime'
 import { md5Bytes, md5Hex, sha256Hex } from '../lib/hash'
 import { runSymmetric, type SymmetricRequest } from '../lib/symmetric'
 import { JsoupBridge } from './jsoupBridge'
+import { unsupportedPrelude } from './platform'
 
 // 相对路径 import WASM：wrangler 会把它编译成 WebAssembly.Module 直接交给运行时。
 // 这是 Workers 上唯一可用的加载方式 —— 运行时既禁止 WebAssembly.compile，
@@ -466,12 +467,9 @@ var java = {
   t2s: function (s) { __host.log('[t2s] 未做简繁转换，原样返回'); return String(s) },
   s2t: function (s) { __host.log('[s2t] 未做简繁转换，原样返回'); return String(s) },
 
-  // 以下都需要 WebView / 浏览器，本引擎没有对应能力。
-  // **明确报错**，而不是给一个空实现 —— 空实现会让书源表现成
-  // 「规则跑通了但一本书都没有」，那是最难定位的一类症状。
-  webView: function () { throw new Error('本引擎不支持 java.webView（需要 WebView 渲染）') },
-  startBrowserAwait: function () { throw new Error('本引擎不支持 java.startBrowserAwait（需要浏览器）') },
-  startBrowser: function () { throw new Error('本引擎不支持 java.startBrowser（需要浏览器）') },
+  // 需要 WebView / 浏览器 / Android / 文件系统的那一批**不在这里手写**：
+  // 它们由 src/engine/platform.ts 的成员表统一生成（见文件末尾的 unsupportedPrelude），
+  // 表里同时记着上游签名、缺的是哪一类平台能力、以及换了平台之后该由谁来提供。
   // java.setContent(content[, baseUrl])：把「当前内容」换成传进来的这一段
   //
   // Legado 里它改的是**后续规则求值的对象**：设过之后，java.getString(规则) 与
@@ -503,38 +501,8 @@ var java = {
     if (alg === 'SHA256') return __host.sha256(String(s))
     throw new Error('本引擎的 java.digestHex 只实现了 MD5 与 SHA-256，不支持 ' + alg)
   },
-  getFile: function () { throw new Error('本引擎不支持 java.getFile（没有可持久化的文件系统）') },
-  queryTTF: function () { throw new Error('本引擎不支持 java.queryTTF（字体混淆）') },
   alert: function (s) { __host.log('[alert] ' + String(s)) },
   logType: function (s) { __host.log(String(s)) },
-
-  // ---------------------------------------------------------------- 语料里在调、但没法实现
-  //
-  // 这些是扫全量书源**数出来**的（java.xxx( 的分布），都属于「需要 App / Android /
-  // 浏览器」的能力。给它们一个**带名字**的报错，因为 QuickJS 只会说
-  // TypeError: not a function，不说哪一个 —— 脚本动辄几十行，照那句话定位不到。
-  //
-  // 为什么是报错而不是返回空：这里没有一个「安全的中性值」。拿空 UA 去拼签名、
-  // 拿空验证码去登录，错误都会跑到下游，症状离原因更远。宁可在这里失败，
-  // 让报错直接说出缺的是哪一个能力。
-  //
-  // **唯一故意留空的是 java.ajaxTestAll**：🔞 Linpx 与 🔞兽人小说站用它做能力探测
-  // （typeof java.ajaxTestAll === 'function'）。给它一个函数，探测就会从
-  // 「没有这个能力 → 走另一条路」变成「有 → 调用 → 抛错」，把本来能跑的源弄坏。
-  // 不确定的成员，缺着比乱补安全。
-  androidId: function () { throw new Error('java.androidId 需要 Android 运行时，本引擎没有') },
-  getVerificationCode: function () {
-    throw new Error('java.getVerificationCode 需要图形验证码界面，本引擎没有')
-  },
-  showBrowser: function () { throw new Error('java.showBrowser 需要浏览器界面，本引擎没有') },
-  head: function () { throw new Error('java.head 本引擎没有实现（现有的是 ajax / get / post）') },
-  getCookie: function () { throw new Error('java.getCookie 本引擎没有实现（用 cookie.getCookieMap 代替）') },
-  getStrResponse: function () {
-    throw new Error('java.getStrResponse 需要 App 的响应对象，本引擎没有')
-  },
-  HMacBase64: function () { throw new Error('java.HMacBase64 本引擎没有实现') },
-  ruleUrl: function () { throw new Error('java.ruleUrl 需要 App 的界面跳转，本引擎没有') },
-  webview: function () { throw new Error('本引擎不支持 java.webview（需要 WebView 渲染）') },
 
   // 当前使用的 UA。getWebViewUA 之外的两个别名，线上另有 4 处 java.getUserAgent
   getUserAgent: function () { return java.getWebViewUA() },
@@ -549,6 +517,17 @@ var java = {
     }
     try { return decodeURIComponent(esc) } catch (e) { return esc }
   },
+
+  // ---------------------------------------------------------------- 本平台没有的成员
+  //
+  // 这一批**不在源码里手写**：由 src/engine/platform.ts 的成员表（对着上游
+  // help/JsExtensions.kt 与 help/JsEncodeUtils.kt 抄的面）生成，每个成员都带
+  // 「上游签名 + 缺的是哪一类平台能力」。这样加一个成员、换一个平台都只改那一张表。
+  //
+  // 为什么是报错而不是返回空：这里没有一个「安全的中性值」—— 拿空 UA 去拼签名、
+  // 拿空验证码去登录，错误都会跑到下游，症状离原因更远。而 QuickJS 的
+  // TypeError: not a function 又不说**是哪一个**，所以报错里必须自带名字。
+${unsupportedPrelude()}
 }
 `
 

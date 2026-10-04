@@ -1,4 +1,4 @@
-# reader-cloudflare
+﻿# reader-cloudflare
 
 书源聚合阅读器：**兼容 Legado 书源规则格式**的解析引擎 + 阅读器，整套跑在 Cloudflare 上（Workers + D1 + 静态资源，后续接 R2）。
 
@@ -2438,12 +2438,62 @@ URL 段一直是有模板展开的，**选项段没有**（`.get(key)` 那条路
   冒烟立刻变红且报的是 `ok=true count=0` —— 就是这个静默形态
 - 另外补了：`java.put` 跨求值可读、一参 `java.get` 读变量、未实现能力报出名字、`dd.2:3` 与 `dd[2:3]` 同解析
 
+### 第三十一轮：把 `java.*` 做成兼容层 —— 对着原项目的面建一张表
+
+上一轮修 `java.*` 时暴露了一个结构问题：这些成员**散在沙箱预置的源码里手写**，
+「上游到底有哪些」「哪些是我们没有的」「没有的原因是什么」全靠读代码猜。
+而这一层本质上是**在别的平台上复刻原项目的 Android 接口**，本来就该是一张表 + 一个接缝。
+
+**先把原项目的面数清楚。** 上游的 `java` 对象来自两个文件（签名原样抄进表里）：
+
+| 上游文件                                                | 内容                                     | 成员数 |
+| ------------------------------------------------------- | ---------------------------------------- | ------ |
+| `app/src/main/java/io/legado/app/help/JsExtensions.kt`  | 取网 / WebView / 文件 / UI / 时间 / 归档 | 66     |
+| `app/src/main/java/io/legado/app/help/JsEncodeUtils.kt` | md5 / 摘要 / HMAC / AES / DES / 签名     | 27     |
+
+数出来才知道差距有多大：**上游 93 个成员，我们实现了 51 个**。而「没实现」也不是一回事 ——
+表里每一行都标了缺的是哪一类平台能力，理由分开写：
+
+| 缺什么             | 例子                                                                |
+| ------------------ | ------------------------------------------------------------------- |
+| WebView / 浏览器   | `webView` `startBrowser` `startBrowserAwait` `webViewGetSource`     |
+| Android 运行时     | `androidId` `getVerificationCode` `queryTTF` `replaceFont`          |
+| 可持久化文件系统   | `getFile` `readTxtFile` `unzipFile` `cacheFile` `downloadFile`      |
+| App 侧配置/界面    | `getThemeConfig` `getReadBookConfig` `ruleUrl`                      |
+| 连接级取网         | `head` `getCookie` `getStrResponse`（本引擎只有 ajax / get / post） |
+| **纯计算、还没做** | `md5Encode16` `HMacBase64` `digestBase64Str` `desEncodeToString` …  |
+
+最后一类特别值得单列：它们**不需要任何平台能力**，只是我们还没写。
+笼统写成「本引擎不支持」会让人以为「换个平台就有了」，而实际上补个实现就有。
+
+**兼容层就是这张表 + 一个接缝**（`src/engine/platform.ts`）：
+
+- `JAVA_SURFACE`：一行一个成员 —— `upstream`（原签名）、`support`、`platform`、`reason`、`note`
+- `PlatformCapabilities`：**这个平台有什么**（Workers 只勾了 `http`）
+- `PlatformHost`：**接一个新平台要实现哪几件事**（base64 / md5 / sha256 / timeFormat / log / request / getString / getElements / jsoup）—— 沙箱那侧不用动
+- `unsupportedPrelude()`：由表生成「本平台没有」的桩，报错自带名字。
+  `js.ts` 里那一整块手写桩**删掉了**，现在只有一行 `${unsupportedPrelude()}`
+- `javaSurfaceSummary()`：`/api/probe` 里报出「面多大、实现了多少」，线上可观测
+- `note` 一栏记的是**与上游不一样的地方** —— 兼容层最该说清楚的就是这些：
+  `get` 一参读变量（上游只有两参重载）、`put` 上游没有但线上 130 处在用、
+  `t2s`/`s2t` 原样返回、`toast`/`openUrl` 只记日志、`randomUUID` 不是密码学随机……
+
+**一条经验也写进了注释**：表里没有的成员在沙箱里就是 `undefined`，这是**故意的默认值**。
+有书源用 `typeof java.xxx === 'function'` 探测能力来选分支（🔞 Linpx、🏷七猫小说），
+给它们一个「会抛错的函数」会把本来能跑的源弄坏 —— 所以 `ajaxTestAll` 登记为 `keep-absent`，
+而「不确定」时的安全默认是**缺着**，不是补一个桩。
+
+**验证**：`test/platform.test.ts` 把表与沙箱预置**钉在一起** ——
+表里说实现了的预置里必须有、预置里的每个成员表里必须登记过（不能有表外私货）、
+`keep-absent` 的必须既不在预置里也不在生成的桩里、生成的那段不许带反引号与 `${`
+（它要拼进模板字符串）。加上单测 621 项、冒烟全绿、线上 `/api/probe` 带上 `java` 一栏。
+
 ## 验证
 
 ```bash
 npm install
 npm run db:migrate   # 建本地 D1 表（首次、以及每次新增迁移后）
-npm test             # 单元测试（612 项，Node 里毫秒级跑完；另有六个默认跳过的全量扫描，见下）
+npm test             # 单元测试（621 项，Node 里毫秒级跑完；另有六个默认跳过的全量扫描，见下）
 npm run dev          # 起本地服务，浏览器打开首页即可用；另开一个终端跑下面这条
 npm run smoke        # 端到端：链路 + 书源管理 + 静态资源 + 账号/书架/进度/书签 + 改显示名/改密码 + 导出导入备份 + 书签清单 + 替换净化同步 + 笔记 + 媒体 + 字段模板 + 选择器@js: + 空选择器取值 + 列表标记（+ / 顶格 <js>）+ 沙箱助手 + setContent/digestHex/UI 动作 + 节点级助手/加解密 + 连接符切分 + 列表规则 + URL 字段 JS + 发现/首页
 ```

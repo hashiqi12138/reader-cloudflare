@@ -55,6 +55,7 @@ import { getOrCreateMediaSecret } from './data/settings'
 import { UnsupportedRuleError } from './engine/analyze'
 import { SOURCE_TYPE, type MediaLink, type RuleContext } from './engine/types'
 import { SandboxError, createSandboxSession, runInSandbox, type SandboxSession } from './engine/js'
+import { javaSurfaceSummary } from './engine/platform'
 import { parseHtml } from './engine/select'
 import { handleFixture } from './fixture'
 import { exploreBooks, listExploreCategories } from './legado/explore'
@@ -227,6 +228,13 @@ app.get('/api/probe', async (c) => {
         quickjs: { value: quickjsValue, error: quickjsError },
         d1: { userSourceCount: sourceCount, error: dbError },
         version: c.env.ENGINE_VERSION ?? 'unknown',
+        /**
+         * 「java 平台」兼容层的规模：面有多大、实现了多少
+         *
+         * 放在探活接口里，是因为「这版引擎到底支持哪些 java.*」是个会变的事实，
+         * 而线上唯一能看到它的地方就是这里（见 engine/platform.ts）。
+         */
+        java: javaSurfaceSummary(),
     })
 })
 
