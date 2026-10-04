@@ -34,6 +34,7 @@
 | 媒体代取（防盗链 / 混合内容 / 跨域）                                                                | 已实现（签名地址 + Range 透传；**防盗链封面**也走它 —— 带选项的封面签发 `coverProxyUrl`，见「第四十七轮」）                                                                                                                                                                                                                                     |
 | 沙箱里的 `source` / `book` / `chapter` / `cookie` / `cache` / `infoMap` 全局                        | 已实现（见「沙箱里的全局对象」；`source.getKey()` 线上用了 413 次；`getLoginInfoMap()` / `putLoginInfo` 给的是 Map 语义；这五个对象的**方法面**有一张登记表 `test/sandboxSurface.ts`、语料差集必须为空 —— 见「第五十一 / 五十三轮」）                                                                                                           |
 | **cookie 罐**（`enabledCookieJar` 的源：收 `Set-Cookie` / 请求自动带 `Cookie` / 按源落库）          | 已实现（816 条源里 457 条开着这个东西；「搜索那一趟拿到的会话 cookie 能不能带到详情那一趟」就靠它 —— 见「`cookie` 罐」与「第五十四轮」）                                                                                                                                                                                                        |
+| **HTTP 重定向**（自己跟：每一跳的 `Set-Cookie` 都收，第一跳的 `Location` 交回给脚本）               | 已实现（`fetch` 的 `follow` 会把这两样都吃掉 —— 线上 11 个源的 `searchUrl` 正是靠那个 `Location` 找真正的搜索页地址；见「第五十五轮」）                                                                                                                                                                                                         |
 | 书源自带的 `jsLib` 全局函数库                                                                       | 已实现（35 条源在用；作为沙箱前置脚本执行，失败不中断但会说明原因）                                                                                                                                                                                                                                                                             |
 | 沙箱里的 `book` / `chapter` 上下文与**书的变量**（`book.getVariable` / `putVariable`）              | 已实现（`book.name` 54 处 / 39 源、`chapter.title` 32 处 / 30 源；变量落 `book_variables`，见「第三十五轮」）                                                                                                                                                                                                                                   |
 | `org.jsoup.Jsoup` + Element/Elements API                                                            | 已实现（宿主桥 + cheerio 句柄；写操作是空操作，未实现的方法报出方法名；`<script>` / `<style>` 也是元素 —— 见「第四十九轮」）                                                                                                                                                                                                                    |
@@ -1124,12 +1125,12 @@ HTTP 请求，所以罐子必须落库。
 绝大多数用法是「同一段脚本里先存后取」，内存版足够。
 `cache.getFile` / `putFile` 明确返回空（服务端没有可持久化的私有文件系统）。
 
-**这一版还没做的两件事**（都记在「第五十四轮」那一节）：
+**这一版还没做的**（都记在「第五十四轮」那一节）：
 
-- **3xx 响应上的 `Set-Cookie` 收不到**：`fetch` 的 `redirect: 'follow'` 会把中间响应吃掉，
-  而不少站点正是用 302 下发会话 cookie。要收它得自己跟重定向。
 - **24 个关着开关的源也在调 `cookie.removeCookie`**：它们的罐子是空的，那句等于没做 ——
   这是它们自己关掉开关的后果，不是引擎漏了。
+- 另外两条（3xx 上收不到 `Set-Cookie`、没有 path/domain 属性）都记在「第五十五轮」：
+  前者**那一轮做掉了** —— 重定向改成自己跟之后，每一跳的 `Set-Cookie` 都收得到。
 
 ### 五个对象全局的**方法面**是一张登记表
 
@@ -1151,7 +1152,10 @@ HTTP 请求，所以罐子必须落库。
 `java.webView` / `java.setContent` / `java.startBrowserAwait` / `java.reLoginView` /
 `java.getFile` / `java.queryTTF`
 都需要 WebView、浏览器或私有文件系统，引擎里没有对应能力，**一律抛出带名字的错误**。
-`java.connect` 已实现基础形态；`java.createSymmetricCrypto` / `java.aesBase64DecodeToString`
+`java.connect` 已实现基础形态；**重定向是我们替书源跟的**，所以
+`res.code()` / `body()` 给的是最后一跳，而 `res.header('Location')` 给的是**书源那次请求
+自己拿到的那一跳**（见「第五十五轮」——线上 11 个源靠它找真正的搜索页地址）。
+`java.createSymmetricCrypto` / `java.aesBase64DecodeToString`
 见上（AES 与 DES 的 CBC / ECB，CFB、ISO10126Padding、DESede 会带名字报错）。
 `java.t2s` / `java.s2t`(简繁转换) 没有字典表，返回原文并记一条日志 ——
 「降级但内容正确」比抛错让整条规则失败要好。
@@ -4730,8 +4734,7 @@ this.classNames = className.trim().split("\\s+");   // 然后要求**每一个**
 **这一轮仍然没做完的**
 
 - **3xx 响应上的 `Set-Cookie` 收不到**：`fetch` 的 `redirect: 'follow'` 会把中间响应吃掉，
-  而不少站点正是用 302 下发会话 cookie。要收它得自己跟重定向（`redirect: 'manual'` 加一个循环），
-  那会改动所有请求的行为，值得单独一轮
+  而不少站点正是用 302 下发会话 cookie。**第五十五轮做掉了**（重定向改成自己跟），见那一轮
 - **没有 path / domain 属性**：`Set-Cookie` 的属性全丢，按主机名归并（见上）。
   同一主机上不同 path 的同名 cookie 会互相覆盖
 - **24 个关着开关的源也在调 `cookie.removeCookie`**：它们的罐子是空的，那句等于没做 ——
@@ -4739,6 +4742,89 @@ this.classNames = className.trim().split("\\s+");   // 然后要求**每一个**
 - **登录流程仍然没实现**：这次让「搜索→详情→目录→正文」这几趟之间的会话活了下来，
   但「用户在浏览器里登录一次、之后一直用」还需要一个能跑 `loginUrl` 的入口
   （`cookie.mapToCookie` 也还缺，见「第五十三轮」）
+- 前几轮挂着的那几笔（`parseFragments` 的怪相、选项里 `{{}}` 与 `body` 混用、
+  `media.ts` 的两条多行地址路、`java.get(键)`、`chapter.isVip` 缺证据、
+  **WebView 那一族（16 个名字）**）都没动
+
+### 第五十五轮：重定向改成自己跟 —— 302 上的 `Set-Cookie` 与那个 `Location`
+
+第五十四轮把 cookie 罐接上之后，README 里留了一句「3xx 上的 `Set-Cookie` 收不到」。
+这一轮先量它，量出来发现还有**另一笔更实在的**：
+
+| 量什么                                   | 结果                                            |
+| ---------------------------------------- | ----------------------------------------------- |
+| 用 `code()` / `statusCode()` 判 3xx 的源 | **0 处** —— 没有源依赖「看得见 302 这个状态码」 |
+| 读响应头 `Location` 的源                 | **11 处 / 11 源**，全写在 `searchUrl` 里        |
+| `java.connect`                           | 19 处 / 15 源                                   |
+
+那 11 处的写法一模一样：
+
+```
+java.post(url, body, {}).header("location")            天悦小说 / 伪书香 / 类伪奇书
+var htmlUrl = java.get(su, {}).headers('Location')     无忧书城 / 兔九三网 / 8小说网 / 笔趣阁#8
+source.setVariable(response.header("Location"))        米读小说
+```
+
+它们拿 **POST 的 302** 去找真正的搜索页地址（站点把表单提交 302 到结果页）。而
+`fetch` 的 `redirect: 'follow'` 把中间响应整份吃掉 —— `Location` 只能是空串，
+这些源随后拿一个空地址去请求。**这不是新账**：从引擎支持 `java.post` 那天起就是坏的，
+只是没人量过。
+
+**一、改法：`redirect: 'manual'` 加一个循环，自己跟。**
+
+| 跟法            | 照抄 `fetch` 的规矩                                                                                                          |
+| --------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| 301 / 302 / 303 | 把 POST 退化成 GET，并且**不再发 body**（站点把「已提交」的那一次 302 指向结果页，再发一遍就是重复提交）                     |
+| 307 / 308       | 保留方法与 body                                                                                                              |
+| `Location`      | 相对地址按**当前这一跳**解析，不是按最初的地址                                                                               |
+| 跳数            | 上限 5；超了就停下、把那个 3xx 当最终响应交出去（`fetchText` 照常报「上游返回 HTTP 302」，比编一句「重定向太多」更贴近事实） |
+| 超时            | **整条链共享一份预算**，不是每一跳各给一份（否则 5 跳 × 20 秒能把一次搜索拖到 100 秒）                                       |
+| cookie          | **每一跳**的 `Set-Cookie` 都收进罐子；`Cookie` 头按**这一跳**的地址取（重定向可能换域）                                      |
+
+**二、`Location` 交回给书源。** 跟完之后最终响应里当然没有 `Location` 了，但那个头是
+**书源那次请求的真实响应头** —— 全丢了就是「丢掉信息」，不是「过滤噪声」。
+所以第一跳的 `status` 与 `location` 留在 `FetchedResponse.redirectedFrom` 里，
+沙箱那侧的 `headers('Location')` 在最终响应没有它时兜这一份：
+
+```
+res.code()              → 最后一跳的（书源照旧能判 200）
+res.body()              → 最后一跳的
+res.header('Location')  → 书源那次请求自己拿到的那一跳
+```
+
+**三、验证。**
+
+- 单测 **793 → 801**：`test/fetchLayer.test.ts` 加 8 条，全在**真实 HTTP 线**上（起了本地服务、看
+  `seen` 里每一跳到底发了什么）：跟到最终页 / 302 的 cookie 进罐 / `redirectedFrom` /
+  302 后 POST 变 GET 且不带 Content-Type / 307 保持 POST 与 body / 相对 Location /
+  绕圈停下（正好 6 次请求）/ **超时共享预算**（两跳各慢 150ms、给 220ms：共享会失败，
+  每跳各给一份反而会成功 —— 这条断言专门用来分辨那两种实现）
+- 账本 **16 → 17 条**（新增 `test/redirect.scan.test.ts`：那 11 处都在「先取网、再读头」
+  的写法里、都在 `searchUrl` 里；数量为 0 时说明这个特例该重新评估）
+- 冒烟**新增第 42 段**：靶子 `/fixture/redirect-set` 用 302 下发 `rc55=1` 并指向
+  `/fixture/redirect-land`，而落地页**要求带着 rc55**。一次搜索同时验三件事
+  （跟了重定向 / 302 的 cookie 进了罐 / `Location` 交得回去）；再加对照
+  「不带那一次 302 直接请求落地页 → 403」与跨请求「详情是另一个请求，照样带得上」
+- 第五十四轮的 §41 与其余各段**照旧全绿**（改动影响所有请求，所以那才是真正的回归网）
+
+**四、线上核验**（`/api/probe` 报 `0.45.0`）。用 httpbin 的 `/cookies/set` —— 它正是
+「302 + Set-Cookie + 指向 `/cookies`」那个形态，且落地页会把收到的 cookie 回显出来：
+
+| 场景                                                           | 改前（0.44.0）                                                                  | 改后（0.45.0）                                                      |
+| -------------------------------------------------------------- | ------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| 搜索地址就是 `/cookies/set?rc55=1`（302 → `/cookies`）         | 落地页回 `{"cookies":{}}` —— 302 上那个 cookie 在中间响应里，被 `follow` 吃掉了 | 落地页回 **`{"cookies":{"rc55":"1"}}`**（跟到了，且第二跳就带着它） |
+| 书源写 `java.get('<…>/cookies/set?rc55=2').header('Location')` | `Location` 是空串（书源拿不到真地址）                                           | 拿到 `https://httpbin.org/cookies`                                  |
+
+**这一轮仍然没做完的**
+
+- **重定向之后没换 `Referer`**：整条链共用最初那套请求头。浏览器会把 Referer 换成
+  上一跳的地址；我们保留最初的（书源站点自己的地址），因为防盗链校验要的往往是它。
+  跨域跳转时这会多带一点来源信息，属于知情取舍
+- **没有 path / domain 属性**（第五十四轮记的，这一轮没动）
+- **`code()` 看不到 302 本身**：想要原始 3xx 的书源（本轮量到 **0 个**）拿不到。
+  真需要时再说 —— 改法是给 `java.connect` 一个「别替我跳」的开关
+- **登录流程仍然没有入口**（第五十二 / 五十三 / 五十四轮都记着）：`loginUrl` 跑不起来，
+  所以「在浏览器里登录一次、之后一直用」还是走不通
 - 前几轮挂着的那几笔（`parseFragments` 的怪相、选项里 `{{}}` 与 `body` 混用、
   `media.ts` 的两条多行地址路、`java.get(键)`、`chapter.isVip` 缺证据、
   **WebView 那一族（16 个名字）**）都没动
@@ -4962,7 +5048,7 @@ B 导入 → B 的书架、阅读位置（含「停在第几页」）、书签�
 ### 用真实书源全量扫描
 
 冒烟跑的是内置站点 —— 它证明「运行时可跑」，但证明不了「线上 800 多条书源里没有漏网的」。
-有些结论只能拿整份集合去量，现在有十六个扫描（各自独立，都默认跳过）：
+有些结论只能拿整份集合去量，现在有十七个扫描（各自独立，都默认跳过）：
 
 | 扫描                            | 量什么                                                                                           |
 | ------------------------------- | ------------------------------------------------------------------------------------------------ |
@@ -4982,6 +5068,7 @@ B 导入 → B 的书架、阅读位置（含「停在第几页」）、书签�
 | `javaSurface.scan.test.ts`      | 脚本用到的 `java.*` 名字表里都有登记吗（没登记就是 `not a function`，第五十二轮）                |
 | `sandboxObjects.scan.test.ts`   | `source`/`book`/`chapter`/`cookie`/`cache` 上用到的方法都在表里吗（同上，第五十三轮）            |
 | `cookieJar.scan.test.ts`        | 只读 cookie（靠站点下发）的源有没有关掉 `enabledCookieJar`；开关与各方法的用量分布（第五十四轮） |
+| `redirect.scan.test.ts`         | 谁在读响应头里的 `Location`、写在哪个字段、是不是「先取网、再读头」（第五十五轮）                |
 
 ```bash
 # 导出一份书源（wrangler --json 的原样输出即可，也接受裸数组或探索结果的 json）
@@ -4992,7 +5079,7 @@ SOURCES_DUMP=sources.json npx vitest run test/ruleSplitting.scan.test.ts test/ru
   test/listMarker.scan.test.ts test/resultHtml.scan.test.ts test/jsTailList.scan.test.ts \
   test/listExtract.scan.test.ts test/listCssHeadIndex.scan.test.ts test/bangIndex.scan.test.ts \
   test/fieldCssStops.scan.test.ts test/putGet.scan.test.ts test/javaSurface.scan.test.ts \
-  test/sandboxObjects.scan.test.ts test/cookieJar.scan.test.ts
+  test/sandboxObjects.scan.test.ts test/cookieJar.scan.test.ts test/redirect.scan.test.ts
 ```
 
 **默认整组跳过**，所以 CI 与日常 `npm test` 不受影响，书源也不会进仓库（dump 在 `.gitignore` 里）。
