@@ -289,6 +289,27 @@ describe('JSONPath', () => {
         expect(queryJsonPath(data, '$.data.list[-1].name')).toEqual(['乙'])
     })
 
+    it('切片 `[:n]` / `[a:]` / `[a:b]`（`🎨阿吧漫画` 的搜索列表写的是 `$[:10]`）', () => {
+        const arr = { list: ['a', 'b', 'c', 'd', 'e'] }
+        expect(queryJsonPath(arr, '$.list[:2]')).toEqual(['a', 'b'])
+        expect(queryJsonPath(arr, '$.list[2:]')).toEqual(['c', 'd', 'e'])
+        expect(queryJsonPath(arr, '$.list[1:3]')).toEqual(['b', 'c'])
+        expect(queryJsonPath(arr, '$.list[-2:]')).toEqual(['d', 'e'])
+        // 越界要夹到数组长度，不能变成空
+        expect(queryJsonPath(arr, '$.list[:100]')).toEqual(['a', 'b', 'c', 'd', 'e'])
+    })
+
+    it('根就是数组时的 `$[*]` / `$[:n]`（`<js>` 段 `JSON.stringify` 出数组的源头）', () => {
+        const arr = [{ name: '甲' }, { name: '乙' }, { name: '丙' }]
+        expect(queryJsonPath(arr, '$[*]')).toEqual(arr)
+        expect(queryJsonPath(arr, '$[:2]')).toEqual(arr.slice(0, 2))
+    })
+
+    it('点号后直接跟方括号（`$.[*]`，🏷晋江文学 / 📂笔下文学 等 7 处）', () => {
+        expect(queryJsonPath(data, '$.[*]')).toEqual(Object.values(data))
+        expect(queryJsonPath(data, '$.data.list.[*].name')).toEqual(['甲', '乙'])
+    })
+
     it('引号键名', () => {
         expect(queryJsonPath(data, "$['data']['list'][0]['name']")).toEqual(['甲'])
     })

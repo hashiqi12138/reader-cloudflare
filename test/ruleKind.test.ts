@@ -49,4 +49,13 @@ describe('规则方言判定', () => {
             expect(detectKind(rule).kind, rule).toBe('css')
         }
     })
+
+    it('`$` 开头的都是 JSONPath，含 `$[*]` / `$[:10]` / `$.[*]` 这三个变体', () => {
+        // `$[` 早先没被认出来，会被当 **CSS** 去 cheerio 里找一个叫 `$[*]` 的元素 ——
+        // 静默 0 条。线上 `$[*]` / `$[:10]` 共 5 处、`$.[*]` 7 处以上，
+        // 全都长在 `<js>` 段之后。
+        for (const rule of ['$.data.list[*]', '$[*]', '$[:10]', '$.[*]', '$..name']) {
+            expect(detectKind(rule).kind, rule).toBe('json')
+        }
+    })
 })

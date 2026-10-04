@@ -114,6 +114,18 @@ function collectHits(dump: string): Hit[] {
 }
 
 describe.skipIf(DUMP === '')('真实书源全量扫描：`选择器@js:` 的 result 绑法', () => {
+    /**
+     * 参照的**已知例外**（人工判过，就一条）
+     *
+     * `⚡📂米读小说 (http://m.miduxs.com)` 的 `ruleContent.nextContentUrl` 里两种形态同时出现：
+     * 开头 `var go=result[0];`（下标访问 → 该绑数组）、结尾 `result.replace(/__/,'_')`
+     * （字符串方法 → 参照要字符串）。但那是脚本**自己把 `result` 重新赋成了字符串**
+     * （`result=next` / `result=""`）之后再调的 —— 参照的前提是「`result` 全程是同一样东西」，
+     * 这里不成立。引擎按「有下标访问 → 绑数组」判是**对的**：绑字符串的话
+     * `result[0]` 只会取到第一个**字符**。
+     */
+    const STRING_OP_EXCEPTIONS = ['⚡📂米读小说 / ruleContent.nextContentUrl']
+
     it('字符串专有方法必须判成字符串；下标访问必须判成数组', () => {
         const hits = collectHits(DUMP)
 
@@ -130,7 +142,8 @@ describe.skipIf(DUMP === '')('真实书源全量扫描：`选择器@js:` 的 res
             // 见 resultShape.ts 的 stripJsLiterals）。
             if (ORACLE_STRING_METHOD.test(hit.code)) {
                 stringOpSeen += 1
-                if (hit.array)
+                const label = `${hit.source} / ${hit.field}`
+                if (hit.array && !STRING_OP_EXCEPTIONS.includes(label))
                     stringOpWrong.push(`${hit.source} / ${hit.field} :: ${hit.code.slice(0, 160)}`)
             }
             if (ORACLE_INDEX.test(hit.code)) {
@@ -184,8 +197,12 @@ describe.skipIf(DUMP === '')('真实书源全量扫描：`选择器@js:` 的 res
         console.log(`  判数组涉及到的字段（${fields.length} 个）：${fields.join(' / ')}`)
 
         // 判据写歪（比如把「原样返回」当成所有情况的数组）会立刻让这个集合铺开：
-        // 260 处 `选择器@js:` 里本来只有「结果是一列东西」的那几个字段会用到数组语义
-        expect(fields.length).toBeLessThanOrEqual(8)
+        // `选择器@js:` 里只有「结果是一列东西」的那几个字段会用到数组语义。
+        //
+        // 上限从 8 放到 12：dump 从 594 条源（260 处 `选择器@js:`）长到 816 条（337 处）之后，
+        // 涉及到的字段到了 **10** 个。要守的是「**没有到处都判数组**」，不是一个具体的数字 ——
+        // 判据写歪的话这个集合会铺到二三十个字段上去
+        expect(fields.length).toBeLessThanOrEqual(12)
         // 两个主力字段必须在名单里 —— 少了它们说明判据收得太紧，翻页会退回半截地址
         expect(fields).toContain('ruleToc.nextTocUrl')
         expect(fields).toContain('ruleToc.chapterList')

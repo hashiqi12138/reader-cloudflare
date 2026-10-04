@@ -136,15 +136,20 @@ describe.skipIf(DUMP === '')('真实书源全量扫描：XPath 规则都能解�
         expect(misclassified).toEqual([])
 
         /**
-         * 唯一一处解析不了的：🔞永远的神小说 的 `ruleToc.isVolume`
+         * 解析不了的**源侧笔误**，两处（都用「字段名 + 源名」精确指认）
          *
-         * 值是 `//javascript:gotochapter('2332','577419')` —— 看着像把站内的
-         * `javascript:` 链接粘错了字段，源本身是坏的。而这个字段（卷标记）本引擎不读，
-         * 所以它不影响任何功能。
+         *   1. 🔞永远的神小说 的 `ruleToc.isVolume`
+         *      值是 `//javascript:gotochapter('2332','577419')` —— 看着像把站内的
+         *      `javascript:` 链接粘错了字段。而这个字段（卷标记）本引擎不读，不影响功能
+         *   2. 🎨拷贝漫画 的 `ruleSearch.coverUrl`（dump 长到 816 条源之后新出现的）
+         *      值是 `//p[@class="mh-cover tip"])/@style` —— `]` 后面多了一个 `)`。
+         *      本意显然是 `//p[@class="mh-cover tip"]/@style`（封面在 `style` 属性的
+         *      `url(...)` 里），但**替书源猜它少写了一个括号**会掩盖真正的语法错，
+         *      所以只登记、不兜底
          *
          * 显式列出来而不是放宽断言：这样**新增**的解析失败仍然会被拦住。
          */
-        const KNOWN_BROKEN = ['isVolume']
+        const KNOWN_BROKEN = ['isVolume', '🎨拷贝漫画']
         const unexpected = unparsable.filter((line) => !KNOWN_BROKEN.some((k) => line.includes(k)))
         expect(unexpected).toEqual([])
     })

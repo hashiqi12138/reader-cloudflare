@@ -144,7 +144,11 @@ export function detectKind(rule: string): {
         return { kind: 'jsoup', body: t }
     }
     if (t.startsWith('//') || t.startsWith('(/')) return { kind: 'xpath', body: t }
-    if (t.startsWith('$.')) return { kind: 'json', body: t }
+    // `$[` 与 `$.` 都是 JSONPath：`$[*]`（根数组通配）、`$[:10]`（前 10 个）在语言里
+    // 与 `$.a[*]` 地位相同。只认 `$.` 的话它们会被当成 **CSS** 去 cheerio 里找一个叫
+    // `$[*]` 的元素 —— 静默 0 条。线上这一类共 4 源 5 处，全都长在 `<js>` 块之后
+    // （`<js>JSON.stringify(list)</js>` + `$[*]`），正好是「JS 段 + JSONPath 尾段」的形状
+    if (t.startsWith('$.') || t.startsWith('$[')) return { kind: 'json', body: t }
     // AllInOne：整块正则切分，只用于列表规则
     if (t.startsWith(':') && t.length > 1) return { kind: 'allinone', body: t }
     // 裸 CSS 选择器 —— 真实书源里非常常见：`.searchbook`、`h3.title@text`、
@@ -355,17 +359,20 @@ function evalCssField(sel: Selection, body: string): string[] {
     return reversed ? values.reverse() : values
 }
 
+/** 在一段**文本**上跑 JSONPath（不是节点上）。解析不了就当作没命中 */
+function evalJsonText(text: string, body: string): string[] {
+    let parsed: unknown
+    try {
+        parsed = JSON.parse(text)
+    } catch {
+        return []
+    }
+    return jsonPathToStrings(parsed, body)
+}
+
 /** 在给定节点集上跑一条「纯选择器」规则，返回字符串列表 */
 function evalSelector(sel: Selection, body: string, kind: string): string[] {
-    if (kind === 'json') {
-        let parsed: unknown
-        try {
-            parsed = JSON.parse(sel.source)
-        } catch {
-            return []
-        }
-        return jsonPathToStrings(parsed, body)
-    }
+    if (kind === 'json') return evalJsonText(sel.source, body)
 
     if (kind === 'xpath') {
         const { expression, extract } = toRunnableXPath(body)
@@ -755,6 +762,21 @@ async function evalSelectorChain(
     let values: string[] = []
     /** 前面有没有跑过选择器 —— 决定首个 `<js>` 块里的 `result` 是「页面原文」还是「空」 */
     let sawSelector = false
+    /**
+     * **上一段产出的文本**。跟在后面的 JSONPath 段（`$.路径` / `$[*]`）要作用在它上面，
+     * 而不是页面原文 —— 这与 HTML 尾段那条路（`trailingNodeSelector`）是同一条纪律：
+     * Legado 的 `getElements(ruleStr)` 按段分发，`<js>` 段的输出就是下一段的输入。
+     *
+     * 线上 `</js>` 后面直接跟 `$` 路径的共 **58 处**，绝大多数脚本会把结果**换掉**
+     * （`🔞书耽` 的 `decode(result)`、`⚡📂灯读文学` 的 `java.ajax(result)`、
+     * `🔞Jk小说` 的解密），只有少数是原样透传（`⚡📂笔趣全家桶` 的
+     * `result.replace(/<!--gg-->/, "")`）。以前这里用的是页面原文，于是那些
+     * 「脚本换过内容」的源一律**静默取空**。
+     *
+     * 注意它**只喂给 JSONPath**：`<js>` 块里的 `src` 仍旧用 `current.source`
+     * （页面原文）—— `📂小米书城` 的正文规则正是 `result` 取链接、`src` 取整页。
+     */
+    let content = sel.source
 
     for (let index = 0; index < jsBlocks.length; index += 1) {
         const part = jsBlocks[index]!
@@ -782,6 +804,10 @@ async function evalSelectorChain(
             if (kind.kind === 'allinone') {
                 values = applyAllInOne(current.source, part.text)
                 current = selectionFromText(values.join('\n'), current.source)
+            } else if (kind.kind === 'json') {
+                // JSONPath 段：作用在**上一段输出**上（`content`），不是页面原文
+                values = evalJsonText(content, kind.body)
+                current = selectionFromText(values.join('\n'), current.source)
             } else if (wantHtml) {
                 values = await nodeHtmlOrValues(current, part.text, null, ctx)
                 current = selectionFromText(values.join('\n'), current.source)
@@ -790,6 +816,7 @@ async function evalSelectorChain(
                 // 中间结果要能被后续规则继续筛选，所以重新解析成节点
                 current = selectionFromText(values.join('\n'), current.source)
             }
+            content = values.join('\n')
             continue
         }
 
@@ -825,10 +852,11 @@ async function evalSelectorChain(
             sandboxLimits(current, ctx),
         )
         // 数组要**逐个**返回，不能拍平成一条字符串：列表规则里的 N 条一旦被
-        // 换行 join 成一条，N 个条目就只剩 1 个（`sandboxResultToString` 对数组
+        // 换行 join 成一条，N 个条目就只剩 1 个（`sandboxResultToStrings` 对数组
         // 就是那么做的），而对象数组还会退化成 `[object Object]`。
         values = sandboxResultToStrings(result)
-        current = selectionFromText(values.join('\n'), current.source)
+        content = values.join('\n')
+        current = selectionFromText(content, current.source)
     }
 
     return values

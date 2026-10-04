@@ -6,6 +6,8 @@
  *
  *   $.data.list[*].title     逐层取键、通配
  *   $.data.list[0].name      取第 n 个
+ *   $.data.list[:10]         切片（前 10 个）；`$[2:]`、`$[1:3]` 同理
+ *   $.[*]                    点号后直接跟方括号（等价于 `$[*]`，书源里很常见）
  *   $['a-b'].c               键名含特殊字符时用引号
  *   $..name                  递归下降，取任意层级的 name
  *   $..[?(@.type=="audio")]  简单过滤器（见下）
@@ -32,6 +34,7 @@ type Token =
     | { type: 'key'; name: string }
     | { type: 'index'; index: number }
     | { type: 'wildcard' }
+    | { type: 'slice'; start: number | null; end: number | null }
     | { type: 'deep'; name: string }
     | FilterToken
 
@@ -124,6 +127,10 @@ function tokenize(expr: string): Token[] {
                 i++
                 continue
             }
+            // `$.[*]` / `$.[0]`：点号后面直接跟方括号，点号只是个分隔符。
+            // 线上这个写法有 7 处以上（🏷晋江文学、📂笔下文学、🎨看漫画、🎨W漫画…），
+            // 不认它就会整条抛「无法解析 JSONPath」，那些源的列表直接取空。
+            if (s[i] === '[') continue
             const start = i
             while (i < s.length && /[\w$@-]/.test(s[i]!)) i++
             if (i === start) throw new JsonPathUnsupportedError(`无法解析 JSONPath：${expr}`)
@@ -147,6 +154,15 @@ function tokenize(expr: string): Token[] {
                 tokens.push({ type: 'wildcard' })
             } else if (/^-?\d+$/.test(inner)) {
                 tokens.push({ type: 'index', index: Number(inner) })
+            } else if (/^-?\d*:-?\d*$/.test(inner)) {
+                // 切片：`$[:10]`（前 10 个）、`$[2:]`、`$[1:3]`。线上 `🎨阿吧漫画` 的
+                // 搜索列表用的就是 `$[:10]`；不认它整条抛错，搜索直接 0 条。
+                const [a, b] = inner.split(':')
+                tokens.push({
+                    type: 'slice',
+                    start: a === '' ? null : Number(a),
+                    end: b === '' ? null : Number(b),
+                })
             } else if (/^'.*'$/.test(inner) || /^".*"$/.test(inner)) {
                 tokens.push({ type: 'key', name: inner.slice(1, -1) })
             } else if (inner.startsWith('?')) {
@@ -177,7 +193,12 @@ function collectDeep(node: unknown, name: string, out: unknown[]): void {
     }
 }
 
-/** 按 JSONPath 取值，返回所有命中的节点（可能是 0 个、1 个或多个） */
+/** 切片端点归一化：负数从末尾数，越界夹到 `[0, len]` */
+function normalizeIndex(index: number, len: number): number {
+    return index < 0 ? Math.max(len + index, 0) : Math.min(index, len)
+}
+
+/** 把 JSONPath 取值，返回所有命中的节点（可能是 0 个、1 个或多个） */
 export function queryJsonPath(root: unknown, expr: string): unknown[] {
     const tokens = tokenize(expr)
     let current: unknown[] = [root]
@@ -204,6 +225,15 @@ export function queryJsonPath(root: unknown, expr: string): unknown[] {
                     if (Array.isArray(node)) next.push(...node)
                     else if (node !== null && typeof node === 'object')
                         next.push(...Object.values(node))
+                    break
+                }
+                case 'slice': {
+                    if (Array.isArray(node)) {
+                        const len = node.length
+                        const from = token.start === null ? 0 : normalizeIndex(token.start, len)
+                        const to = token.end === null ? len : normalizeIndex(token.end, len)
+                        next.push(...node.slice(from, Math.max(from, to)))
+                    }
                     break
                 }
                 case 'deep': {

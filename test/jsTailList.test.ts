@@ -80,7 +80,41 @@ describe('`<js>` 块 + 尾段 HTML 选择器：条目保留 DOM', () => {
     })
 })
 
-describe('不该被这条改动影响的两类尾段', () => {
+/**
+ * `<js>` 段后面跟 **JSONPath** 尾段（`$[*]` / `$[:10]`）时，条目要给**一段段 JSON**
+ *
+ * 线上 4 源 5 处（🏷微信读书二合一本地源、🎨51漫画、🎨阿吧漫画、📂完本小说）都长成
+ * 「脚本把数组 `JSON.stringify` 出来 + 尾段 `$[*]`」。`detectKind` 以前只认 `$.`，
+ * `$[` 于是被当成 **CSS** 去 cheerio 里找一个叫 `$[*]` 的元素 —— 静默 0 条。
+ *
+ * 修好之后它走的是**已有的那条 JSON 路**：`<js>` 的输出是 `[...]` → 摊平成一条条 →
+ * 每条重新解析成 Selection（`source` 就是那一条的 JSON 文本）→ 字段规则按 `$.键` 取。
+ * 这也正是 `selectNodesByKind` 对 json 类返回 null 的那个分支。
+ */
+describe('`<js>` 块 + JSONPath 尾段', () => {
+    const ITEMS = [
+        { name: '第一章 起风了', url: '/c/1' },
+        { name: '第二章 雨落下来', url: '/c/2' },
+    ]
+
+    it('尾段 `$[*]`：摊平成两条，字段按 `$.键` 各取各的', async () => {
+        sandbox.output = JSON.stringify(ITEMS)
+        const items = await analyzeSelections(sel(), `<js>JSON.stringify(list)</js>\n$[*]`, ctx)
+
+        expect(items).toHaveLength(2)
+        expect(await analyzeStrings(items[0]!, '$.name', ctx)).toEqual(['第一章 起风了'])
+        expect(await analyzeStrings(items[1]!, '$.url', ctx)).toEqual(['/c/2'])
+    })
+
+    it('尾段 `$[:10]`（切片语法，`🎨阿吧漫画` 的搜索列表就是这么写的）按 JSONPath 走', async () => {
+        sandbox.output = JSON.stringify(ITEMS)
+        const items = await analyzeSelections(sel(), `<js>JSON.stringify(list)</js>\n$[:10]`, ctx)
+        expect(items).toHaveLength(2)
+        expect(await analyzeStrings(items[0]!, '$.name', ctx)).toEqual(['第一章 起风了'])
+    })
+})
+
+describe('尾段不是 HTML 选择器时的两类写法', () => {
     it('尾段写了取值方式（`a@href`）：**仍旧给节点** —— 列表规则忽略取值方式', async () => {
         // Legado 的 `getElements(ruleStr)` 只取节点，取值方式（`@href` / `@text`）是
         // `getString` 那一层的事。线上 46 处 HTML 尾段里有一大半写成
@@ -94,14 +128,18 @@ describe('不该被这条改动影响的两类尾段', () => {
         expect(await analyzeStrings(items[0]!, 'href', ctx)).toEqual(['/1'])
     })
 
-    it('尾段是 JSONPath：走原来的路（条目是取出来的文本，不是节点）', async () => {
-        // 接口型书源的形态：页面本身就是 JSON，`<js>` 段跑完再用 `$.路径` 取列表
-        const jsonPage = rootSelection('{"data":{"list":[{"name":"甲"},{"name":"乙"}]}}')
-        sandbox.output = 'x'
-        const items = await analyzeSelections(jsonPage, `<js>x</js>\n$.data.list`, ctx)
+    it('尾段是 JSONPath：作用在 `<js>` 段的**输出**上（与 HTML 尾段同一条纪律）', async () => {
+        // 接口型书源的形态：页面本身就是 JSON。`$.路径` 读的是**脚本交出来的那份**，
+        // 不是页面原文 —— `🔞书耽` 的 `decode(result)`、`⚡📂灯读文学` 的
+        // `java.ajax(result)` 都是脚本把内容**换掉**之后再用 `$.路径` 取的。
+        // 这里让页面与脚本输出**故意不同**，钉住「读的是脚本输出」：
+        const jsonPage = rootSelection('{"data":{"list":[{"name":"页面里的"}]}}')
+        sandbox.output = '{"data":{"list":[{"name":"脚本里的"},{"name":"脚本里的二"}]}}'
+        const items = await analyzeSelections(jsonPage, `<js>换个 JSON</js>\n$.data.list`, ctx)
 
         expect(items).toHaveLength(2)
-        expect(items[0]!.source).toContain('"name":"甲"')
+        expect(items[0]!.source).toContain('脚本里的')
+        // 条目是取出来的**文本**（JSON），不是节点
         expect(items[0]!.source).not.toContain('<')
     })
 

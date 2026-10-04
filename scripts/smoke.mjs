@@ -4626,6 +4626,109 @@ console.log('\n=== 29. 跨请求的 `@put:` / `@get:`（走「书的变量」）
     )
 }
 
+console.log('\n=== 30. `<js>` 段 + JSONPath 尾段（`$[*]` / `$[:n]`） ===')
+{
+    /**
+     * 线上 `</js>` 后面直接跟 `$` 路径的共 **58 处**。它们的共同点是：
+     * **脚本先把内容换掉，再用 JSONPath 在「脚本输出」上取** ——
+     * `🔞书耽` 的 `decode(result)`、`⚡📂灯读文学` 的 `java.ajax(result)`、
+     * `🔞Jk小说` 的解密，以及 `🎨51漫画` / `🎨阿吧漫画` / `📂完本小说` 的
+     * `JSON.stringify(数组)` + `$[*]`。
+     *
+     * 这里验三件事：
+     *   ① `$[*]` 能被认成 **JSONPath**（以前 `detectKind` 只认 `$.`，`$[` 会被当 CSS
+     *      去 cheerio 里找一个叫 `$[*]` 的元素 → 静默 0 条）
+     *   ② `$[:n]` 切片语法
+     *   ③ JSONPath 作用在**脚本输出**上，不是页面原文
+     */
+    const ids = ['js-dollar-star', 'js-dollar-slice', 'js-dollar-replace'].map(
+        (suffix) => `user:${BASE}/${suffix}`,
+    )
+    for (const id of ids) await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+
+    const rules = (bookList) => ({
+        searchUrl: '/fixture/api/search?q={{key}}',
+        ruleSearch: {
+            bookList,
+            name: '$.name',
+            author: '$.author',
+            bookUrl: '$.url',
+        },
+    })
+
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: 'JSONPath 尾段 $[*]（临时）',
+                bookSourceUrl: `${BASE}/js-dollar-star`,
+                ...rules('<js>JSON.stringify(JSON.parse(result).data.list)</js>\n$[*]'),
+            },
+            {
+                bookSourceName: 'JSONPath 尾段 $[:1]（临时）',
+                bookSourceUrl: `${BASE}/js-dollar-slice`,
+                ...rules('<js>JSON.stringify(JSON.parse(result).data.list)</js>\n$[:1]'),
+            },
+            {
+                bookSourceName: 'JSONPath 尾段读脚本输出（临时）',
+                bookSourceUrl: `${BASE}/js-dollar-replace`,
+                // 页面里是「测试小说·甲 / 乙」，脚本**只留一本并改名**：
+                // 尾段若读页面原文就会看到「测试小说·甲」，那就说明这条链还是老的
+                ...rules(
+                    '<js>\n' +
+                        'var l = JSON.parse(result).data.list;\n' +
+                        "JSON.stringify([{ name: '脚本里的甲', author: '脚本作者', url: l[0].url }]);\n" +
+                        '</js>\n$[*]',
+                ),
+            },
+        ]),
+    )
+
+    const search = async (id) => {
+        const res = await fetch(`${BASE}/api/search`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ keyword: '测试', sourceIds: [id] }),
+        })
+        const json = await res.json()
+        return json.sources?.[0]
+    }
+
+    const star = await search(ids[0])
+    check(
+        star?.ok === true && star.books?.length === 2,
+        '`$[*]` 尾段：摊平成两条（以前被当 CSS，静默 0 条）',
+        star?.error ?? `count=${star?.books?.length}`,
+    )
+    check(
+        star?.books?.[0]?.name === '测试小说·甲' && star?.books?.[0]?.author === '作者甲',
+        '`$[*]` 尾段：字段按 `$.键` 各取各的',
+        JSON.stringify(star?.books?.[0]?.name),
+    )
+
+    const slice = await search(ids[1])
+    check(
+        slice?.ok === true && slice.books?.length === 1,
+        '`$[:1]` 尾段：切片语法生效（只留第 1 本）',
+        slice?.error ?? `count=${slice?.books?.length}`,
+    )
+
+    const replaced = await search(ids[2])
+    check(
+        replaced?.ok === true && replaced.books?.length === 1 && replaced.books[0]?.name === '脚本里的甲',
+        'JSONPath 尾段作用在**脚本输出**上（不是页面原文）',
+        replaced?.error ?? JSON.stringify(replaced?.books?.[0]?.name),
+    )
+
+    for (const id of ids) await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+    const leftDollar = (await getJson('/api/sources')).json?.sources ?? []
+    check(
+        !leftDollar.some((s) => String(s.id).includes('js-dollar-')),
+        'JSONPath 尾段的测试源已清理',
+    )
+}
+
 console.log('\n=== 结果 ===')
 if (failures.length === 0) {
     console.log(
