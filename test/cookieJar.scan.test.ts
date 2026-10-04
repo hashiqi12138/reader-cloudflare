@@ -37,7 +37,8 @@ function usageOf(): { sources: Usage[]; total: number } {
         const counts = new Map<string, number>()
         for (const text of scriptTextsOf(source)) {
             for (const method of [...READS, ...WRITES]) {
-                const hit = (text.match(new RegExp(`\\bcookie\\.${method}\\s*\\(`, 'g')) ?? []).length
+                const hit = (text.match(new RegExp(`\\bcookie\\.${method}\\s*\\(`, 'g')) ?? [])
+                    .length
                 if (hit > 0) counts.set(method, (counts.get(method) ?? 0) + hit)
             }
         }
@@ -59,7 +60,9 @@ describe.skipIf(DUMP === '')('真实书源全量扫描：cookie 罐与 enabledCo
         )
         const offenders = readOnly.filter((s) => !s.on).map((s) => s.name)
 
-        console.log(`书源 ${total} 条，用到 cookie.* 的 ${used.length} 条；其中只读的 ${readOnly.length} 条`)
+        console.log(
+            `书源 ${total} 条，用到 cookie.* 的 ${used.length} 条；其中只读的 ${readOnly.length} 条`,
+        )
         for (const s of readOnly) console.log(`    只读：${s.name}（开关 ${s.on ? '开' : '关！'}）`)
         console.log('  关着开关却用了 cookie.* 的（不止读的）：')
         for (const s of used.filter((x) => !x.on)) console.log(`    ${s.name}`)
