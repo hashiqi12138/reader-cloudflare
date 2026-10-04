@@ -1,0 +1,16 @@
+-- 书源变量（Legado 的 `BookSource.variable`）
+--
+-- 书源自己的**一张便签**：`source.setVariable(整串)` 写、`source.getVariable()` 读，
+-- 内容是一段自由字符串（书源自己往里塞 JSON：备用域名、开关、设备号、线路序号）。
+-- 线上 29 个源 126 处在读、24 个源 76 处在写，其中 24 个源是**读-改-写**的配置型用法。
+--
+-- 单列一列而不是塞进 payload：
+--   - 它**会被书源自己改**，而 payload 是「导入时的规则快照」（改它要整份重写几 KB 的 JSON）
+--   - 读的地方每次都只想要这一小段，不必反序列化整个书源
+--
+-- 起点是**空串**：全量 816 条源里没有任何一条自带 variable，都是运行期自己填的。
+--
+-- 刻意**不进** `importSources` 的 ON CONFLICT 更新列：重新导入一份同名书源会覆盖
+-- payload（规则快照），但**保留** variable —— 那是书源自己跑出来的状态
+-- （当前线路、设备号），不是导入文件的一部分，被一次重导冲掉会很难解释。
+ALTER TABLE sources ADD COLUMN variable TEXT NOT NULL DEFAULT '';

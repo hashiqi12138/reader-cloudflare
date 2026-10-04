@@ -13,7 +13,7 @@
 
 import type { BookSource, RuleContext } from './types'
 // 只取类型：`import type` 会被完全擦除，不会把 QuickJS 的 WASM 带进来
-import type { SandboxSession } from './js'
+import type { SandboxLimits, SandboxSession } from './js'
 
 /** 书源里会出现在脚本中的标量字段 */
 const SCALAR_FIELDS = [
@@ -73,6 +73,14 @@ export function sourcePayload(source: BookSource | undefined): Record<string, un
      * （书源的身份、cookie 与缓存的 tag 都用它）。搜索词在 Legado 里是**单独的 `key`**。
      */
     out.key = String(record.bookSourceUrl ?? '')
+    /**
+     * `source.variable` / `source.getVariable()` = **书源自己的 variable 字符串**
+     *
+     * 它必须**总是**作为字符串出现（哪怕是空串）：`getVariable()` 无参时要回它，
+     * 而这个字段在 816 条源里一条都没有 —— 靠 `SCALAR_FIELDS` 的「undefined 就不进
+     * payload」规则会把它整个丢掉，沙箱那侧于是拿到 undefined。
+     */
+    out.variable = String(record.variable ?? '')
     return out
 }
 
@@ -87,11 +95,14 @@ export function sourceGlobals(ctx: RuleContext): Record<string, unknown> {
 }
 
 /**
- * 本次请求里已经写过的书源变量
+ * 本次请求里已经写过的会话变量（`java.put` / `java.get(k)`）
  *
- * `java.put` / `source.setVariable` 写进会话（见 `SandboxSession.vars`），
- * 下一次求值再把它们注回沙箱 —— 书源里「搜索脚本先存、字段规则后读」靠的就是这一步。
+ * 写进会话（见 `SandboxSession.vars`），下一次求值再把它们注回沙箱 ——
+ * 书源里「搜索脚本先存、字段规则后读」靠的就是这一步。
  * 会话不存在（比如单测里只调 sourceGlobals）时给空表，行为与以前一样。
+ *
+ * 注意**不含**书源变量（`source.getVariable()`）：那一条走 `sourcePayload`，
+ * 因为它的值来自书源自己（会落库），不是这张按请求活的表。
  */
 function sessionVars(ctx: RuleContext): Record<string, string> {
     const session = ctx.sandbox as { vars?: Record<string, string> } | undefined
@@ -101,18 +112,22 @@ function sessionVars(ctx: RuleContext): Record<string, string> {
 /**
  * 沙箱资源上限里与书源有关的部分
  *
- * `preludeJs` 是书源自带的 JS 库；`session` 是本次请求的沙箱会话 ——
- * 两者都要跟着上下文走，缺一个都会让整类书源表现异常。
+ * 三样都要跟着上下文走，缺一样都会让整类书源表现异常：
+ *   - `preludeJs`：书源自带的 JS 库（那些源里的 `GetUL()` / `host()` 全来自它）
+ *   - `session`：本次请求的沙箱会话（模块实例、会话变量表）
+ *   - `persistSourceVariable`：`source.setVariable(整串)` 的落库路径（上层注入）
+ *
+ * 放这里而不是各自的调用点：analyze 的规则求值、`resolveTemplate` 的 `{{}}` 模板、
+ * `buildPlan` 的 URL 脚本三条路都要它，各写一遍必然有一处漏掉 —— 而漏掉的表现是
+ * 「书源里设置成功、下次进来又没了」，很难往这上面想。
  */
-export function sourceLimits(ctx: RuleContext): {
-    preludeJs?: string
-    session?: SandboxSession
-} {
+export function sourceLimits(ctx: RuleContext): SandboxLimits {
     const lib = ctx.source?.jsLib
     return {
         ...(lib && lib.trim() !== '' ? { preludeJs: lib } : {}),
         // `RuleContext` 里存的是结构化类型（避免 types.ts 依赖带 WASM 的模块），
         // 这里换回 SandboxSession 的具体类型，形状本就一致，只是 `module` 的泛型更精确
         ...(ctx.sandbox ? { session: ctx.sandbox as SandboxSession } : {}),
+        ...(ctx.persistSourceVariable ? { persistSourceVariable: ctx.persistSourceVariable } : {}),
     }
 }

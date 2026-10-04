@@ -3764,6 +3764,114 @@ console.log('\n=== 21. 连接式取网（java.connect）与 result.toArray() ===
     await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
 }
 
+console.log('\n=== 22. 书源变量跟着书源走（source.getVariable / setVariable） ===')
+{
+    /**
+     * Legado 的 `source.getVariable()` / `setVariable(整串)` 读写的是**书源自己的
+     * `variable` 字段** —— 一张书源自己填的便签（备用域名、线路序号、设备号）。
+     * 线上 29 个源 126 处在读、24 个源 76 处在写，其中 24 个是「读配置 → 改配置 → 写回」
+     * 的配置型用法。
+     *
+     * 以前引擎把它和「本次请求的变量表」（`java.put` / `java.get(k)`）混成了一张表：
+     * 一次请求内读写是对的，**跨请求不落库** —— 于是那些源每次进来都要重新初始化，
+     * 而症状只是「设置好像没保存」，很难往引擎上想。
+     *
+     * 这一段的断言是**跨请求**的：三次 search 是三个独立的 Worker 请求，
+     * 中间那次设置的值必须在第三次还读得到。只测「同一个请求内设了能读」是不够的
+     * —— 那正是旧实现也能过的情况。
+     */
+    // 两个源的 id 由**站点地址**派生（`user:<bookSourceUrl>`），所以 B 得换个地址；
+    // 它的搜索地址是绝对的，照样打到测试站点上
+    const urlA = BASE
+    const urlB = `${BASE}/b`
+    const idA = `user:${urlA}`
+    const idB = `user:${urlB}`
+    for (const id of [idA, idB]) await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+
+    /** 搜索 URL 的脚本：**只有**用 `作者甲` 这个关键词时才写变量 */
+    const searchUrl =
+        `@js:(function(){ if (key === '作者甲') { source.setVariable('PERSIST-OK') } ` +
+        `return '${BASE}/fixture/search?q=' + encodeURIComponent(key) + '&p=' + page })()`
+
+    const makeSource = (name, url, urlRule = searchUrl) => ({
+        bookSourceName: name,
+        bookSourceUrl: url,
+        searchUrl: urlRule,
+        ruleSearch: {
+            bookList: '@css:div.result-item',
+            name: '@css:h3.title@text',
+            bookUrl: '@css:h3.title a@href',
+            // 读的就是书源变量本身
+            author: '@js:source.getVariable()',
+        },
+    })
+
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([makeSource('变量测试源 A', urlA), makeSource('变量测试源 B', urlB)]),
+    )
+
+    const authorOf = async (id, keyword) => {
+        const res = await call('POST', '/api/search', { keyword, sourceIds: [id] })
+        const per = res.json?.sources?.[0]
+        if (!per || per.ok === false) return { books: 0, authors: [], error: per?.error }
+        return { books: per.books?.length ?? 0, authors: (per.books ?? []).map((b) => b.author) }
+    }
+
+    // ① 还没设置过：起点是**空串**（816 条源里没有一条自带 variable）
+    const first = await authorOf(idA, '测试')
+    check(
+        first.books === 2 && first.authors.every((a) => a === ''),
+        '没设置过时 `source.getVariable()` 是空串（而不是变量表的 JSON）',
+        JSON.stringify(first.authors),
+    )
+
+    // ② 另一个源读到的也是空串 —— 变量挂在**书源**上，不是全局
+    const other = await authorOf(idB, '测试')
+    check(
+        other.books === 2 && other.authors.every((a) => a === ''),
+        '另一个书源读不到别人的变量（挂在书源上，不是全局）',
+        JSON.stringify(other.authors),
+    )
+
+    // ③ 设置：搜索地址的脚本先写，同一个请求里的字段规则立刻读得到
+    const set = await authorOf(idA, '作者甲')
+    check(
+        set.books === 1 && set.authors.every((a) => a === 'PERSIST-OK'),
+        '`setVariable` 之后同一个请求里的规则立刻读得到',
+        JSON.stringify(set.authors),
+    )
+
+    // ④ **换一个请求**再读：这一步才是「落库」的证明
+    const again = await authorOf(idA, '测试')
+    check(
+        again.books === 2 && again.authors.every((a) => a === 'PERSIST-OK'),
+        '下一次请求仍然读得到（书源变量真的落库了，不是只活在请求里）',
+        JSON.stringify(again.authors),
+    )
+
+    // ⑤ 清空也是合法操作：空串要与「没设置过」区分开
+    const clearRule =
+        `@js:(function(){ source.setVariable(''); ` +
+        `return '${BASE}/fixture/search?q=' + encodeURIComponent(key) + '&p=' + page })()`
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([makeSource('变量测试源 A', urlA, clearRule)]),
+    )
+    const cleared = await authorOf(idA, '测试')
+    check(
+        cleared.books === 2 && cleared.authors.every((a) => a === ''),
+        "`setVariable('')` 能把变量清空（空串不被当成「没动过」）",
+        JSON.stringify(cleared.authors),
+    )
+
+    for (const id of [idA, idB]) await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+    const left = (await getJson('/api/sources')).json?.sources ?? []
+    check(!left.some((s) => s.id === idA || s.id === idB), '书源变量测试源已清理')
+}
+
 console.log('\n=== 结果 ===')
 if (failures.length === 0) {
     console.log(

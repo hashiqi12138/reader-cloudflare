@@ -29,6 +29,8 @@ interface SourceRow {
     enabled: number
     sort_order: number
     payload: string
+    /** 书源变量（Legado 的 `BookSource.variable`），起点是空串，由书源自己填 */
+    variable: string
 }
 
 function rowToSource(row: SourceRow): RegisteredSource {
@@ -55,10 +57,13 @@ function rowToSource(row: SourceRow): RegisteredSource {
         bookSourceGroup: row.group_name === '' ? undefined : row.group_name,
         enabled: row.enabled === 1,
         sortOrder: row.sort_order,
+        // 书源变量也以列为准：它是**运行期会被书源自己改**的东西，
+        // payload 里那一份是导入时的快照（816 条源里没有一条自带 variable）
+        variable: row.variable ?? '',
     }
 }
 
-const SELECT_COLUMNS = 'id, name, url, group_name, enabled, sort_order, payload'
+const SELECT_COLUMNS = 'id, name, url, group_name, enabled, sort_order, payload, variable'
 
 /** 全部用户书源，按展示顺序 */
 export async function listUserSources(db: D1Database): Promise<RegisteredSource[]> {
@@ -170,6 +175,23 @@ export async function recordSourceHealth(
 export async function countUserSources(db: D1Database): Promise<number> {
     const row = await db.prepare('SELECT COUNT(*) AS n FROM sources').first<{ n: number }>()
     return row?.n ?? 0
+}
+
+/**
+ * 写回书源变量（`source.setVariable(整串)`）
+ *
+ * 与 `recordSourceHealth` 一样只动一列，但**不批处理**：书源变量是书源自己的状态，
+ * 一次请求里通常只改一次，而调用方（`index.ts` 的 `evalContext`）需要**等它写完**
+ * ——Worker 的响应一旦返回，还在飞的 promise 会被直接掐掉，那时用户看到的是
+ * 「设置成功了」，下次进来却发现没生效。
+ *
+ * 内置书源不落库（它们是代码的一部分），由调用方过滤，这里不重复判断。
+ */
+export async function saveSourceVariable(db: D1Database, id: string, value: string): Promise<void> {
+    await db
+        .prepare('UPDATE sources SET variable = ?, updated_at = ? WHERE id = ?')
+        .bind(value, Date.now(), id)
+        .run()
 }
 
 export interface RejectedSource {

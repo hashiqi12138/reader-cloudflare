@@ -80,13 +80,24 @@ export interface RuleContext {
      *
      * 用途是给 `@js:` 规则里的 `source` 全局提供内容 —— 线上用它的规则非常多
      * （`source.getKey()` 413 次、`source.bookSourceUrl` 133 次、`source.getVariable()`
-     * 79 次），没有它这些规则一律 ReferenceError，书源表现成「脚本执行出错」。
+     * 126 次），没有它这些规则一律 ReferenceError，书源表现成「脚本执行出错」。
      *
      * 也顺带提供 `jsLib`（书源自带的 JS 库，35 条源在用）—— 那些源里的
      * `GetUL()`、`host()`、`QM_HEADERS` 之类**全是 jsLib 里定义的函数**，
      * 不先执行 jsLib，规则里的这些名字一个都不存在。
      */
     source?: BookSource
+
+    /**
+     * `source.setVariable(整串)` 的落库路径，由**上层注入**（只有它知道 db 与书源 id）
+     *
+     * 引擎自己不该碰数据库：这一层的职责是「把书源的意图表达清楚」，落哪儿是应用层的选择。
+     * 不注入时 `setVariable` 只在本次请求里生效（与 `java.put` 一样），
+     * 书源表现成「设置成功了，下次进来又没了」—— 所以真实调用路径都从 `index.ts` 注入。
+     *
+     * 调用方**应当等它写完**再返回响应：Worker 的响应一返回就掐掉还在飞的 promise。
+     */
+    persistSourceVariable?: (value: string) => void | Promise<void>
 
     /**
      * 发现页的筛选状态（Legado 的 `infoMap`）
@@ -165,6 +176,18 @@ export interface BookSource {
     bookSourceType?: number
     bookSourceComment?: string
     enabled?: boolean
+
+    /**
+     * 书源变量（Legado 的 `BookSource.variable`）
+     *
+     * 书源自己的**一张便签**：`source.setVariable(整串)` 写、`source.getVariable()` 读，
+     * 内容是一段自由字符串（书源往里塞 JSON：备用域名、开关、设备号、线路序号）。
+     * 落库在 `sources.variable` 列上，起点是空串 —— 全量 816 条源里没有一条自带它。
+     *
+     * 与 `RuleContext.vars`（`java.put` / `java.get(k)` 那张**按请求**活的表）是
+     * 两回事：这一条要跨请求活着，那一张只活一次请求。
+     */
+    variable?: string
 
     /** 搜索地址模板，含 {{key}} / {{page}} */
     searchUrl?: string

@@ -15,10 +15,33 @@ import {
     listUserSources,
     listUserSourcesByIds,
     listUserSourcePage,
+    saveSourceVariable,
 } from './db'
 import { BUILTIN_ID_PREFIX, type RegisteredSource } from './types'
 
 export type { RegisteredSource }
+
+/**
+ * 把 `source.setVariable(整串)` 的结果落到书源上
+ *
+ * 两件事，缺一不可：
+ *  1. **先改内存里这一份**（`source.variable`）。同一次请求里同一个书源会被求值很多次
+ *     （搜索地址的脚本 → 列表规则 → 每个字段规则 → 目录 → 正文），
+ *     `ruleBookInfo.downloadUrls` 这种「搜索时算出 url、详情页再取回来」的写法全靠它。
+ *  2. **再写库**。书源变量是**跨请求**的配置（备用域名、线路序号、设备号），
+ *     只活在一次请求里的话，用户看到的是「设置成功了，下次进来又没了」。
+ *
+ * 内置测试源只做第 1 步：它们是代码的一部分（跟着版本走），库里没有对应行。
+ */
+export async function persistSourceVariable(
+    db: D1Database,
+    source: RegisteredSource,
+    value: string,
+): Promise<void> {
+    source.variable = value
+    if (source.builtin || source.id.startsWith(BUILTIN_ID_PREFIX)) return
+    await saveSourceVariable(db, source.id, value)
+}
 
 /** 注册表选项 */
 export interface RegistryOptions {

@@ -113,7 +113,7 @@ export interface SandboxSession {
     /** 本会话内的串行链（只在本请求的上下文里串，不会跨请求） */
     queue: Promise<unknown>
     /**
-     * **会话级书源变量**：`java.put` / `java.get(key)` / `source.setVariable` 共用这一张表
+     * **会话变量**：`java.put` / `java.get(key)` / `source.put(k,v)` 共用这一张表
      *
      * 为什么要有它：书源里「先存后取」是常规写法 —— 搜索地址的脚本里
      * `java.put('单', …)` 记下这次搜索的形态，同一个源后面的字段规则再
@@ -122,8 +122,11 @@ export interface SandboxSession {
      * `java.get`，不是边角。
      *
      * 生命周期刻意与 cookie/cache 不同（那两个是「单次求值」，见 GLOBALS_PRELUDE 的说明）：
-     * 变量是**按请求**活的，因为要跨求值。仍然**不落库、不跨请求** ——
-     * 真正的跨请求持久化需要一张按书源隔离的表，那是另一件事。
+     * 变量是**按请求**活的，因为要跨求值，但仍然**不落库、不跨请求**。
+     *
+     * 注意它与「书源变量」（`source.getVariable()` / `setVariable(整串)`）是两回事：
+     * 后者读写书源自己的 `variable`、会落库、跨请求活着，值挂在 `BookSource.variable` 上，
+     * 不经过这张表。
      */
     vars: Record<string, string>
 }
@@ -168,11 +171,17 @@ export class SandboxError extends Error {
  * 底层会挂起脚本去发请求。
  */
 const JAVA_PRELUDE = `
-// ---------------------------------------------------------------- 书源变量
+// ---------------------------------------------------------------- 会话变量
 //
-// java.put(k, v) / java.get(k) / source.setVariable 共用这一张表。
-// 求值开始时由宿主注入（__sourceVars 里带着本次请求前面几次求值写过的值），
-// 求值结束时宿主再把它收回去 —— 「搜索脚本先存、字段规则后读」就靠这一步跨过去。
+// java.put(k, v) / java.get(k)（以及 source.get(k) / source.setVariable(k, v) 那种
+// 两参写法）共用这一张表。求值开始时由宿主注入（__sourceVars 里带着本次请求前面
+// 几次求值写过的值），求值结束时宿主再把它收回去 —— 「搜索脚本先存、字段规则后读」
+// 就靠这一步跨过去。
+//
+// **书源变量不走这张表**：source.getVariable() / setVariable(整串) 读写的是书源自己的
+// variable（Legado 的 BookSource.variable），会落库、跨请求活着，见 GLOBALS_PRELUDE 里
+// source 那一段与 collectSourceVariable。
+//
 // 注意：这一段是模板字符串的一部分，注释里**不能写反引号**。
 var __varsOut = (function () {
   try { return JSON.parse(String(globalThis.__sourceVars || '{}')) || {} } catch (e) { return {} }
@@ -692,8 +701,9 @@ function __toJavaMap(text) {
 
 var source = (function () {
   var data = globalThis.__source || {}
-  // 与 java.put / java.get(key) 共用同一张变量表（见 JAVA_PRELUDE 开头的说明）——
-  // 两条路各存一份的话，「脚本里 put、规则里 getVariable」就会读不到
+  // 会话变量表：只给两参写法（source.setVariable(k, v)）与 source.get(k) 用，
+  // 与 java.put / java.get(k) 共用同一张（两条路各存一份的话，脚本里 put 完
+  // 规则里 get(k) 就读不到）。书源自己的 variable 不走这里，见下面 getVariable。
   var vars = globalThis.__varsOut || {}
 
   var obj = {}
@@ -704,14 +714,33 @@ var source = (function () {
   obj.key = data.key === undefined || data.key === null ? '' : String(data.key)
 
   obj.getKey = function () { return String(obj.key || '') }
+  // 书源自己的 variable（Legado 的 BookSource.variable）。起点是空串，由书源自己填。
+  obj.variable = data.variable === undefined || data.variable === null ? '' : String(data.variable)
+
+  // 两种读法，按**参数个数**分派（与 java.get 同一套思路）：
+  //   无参 -> 书源自己的 variable 字符串（Legado 的 getVariable()，线上 126 处）
+  //   有参 -> 会话变量表里的某一项（本引擎以前的形状，source.get(k) 那 8 个源在用）
+  //
+  // 以前无参时回的是**整张会话变量表的 JSON**，而书源把它当自己的配置字符串用：
+  // 读出来的是 {"key":"斗破苍穹"} 这种完全不相干的东西。两条路分不开的话，
+  // 24 个「读配置 → 改配置 → 写回去」的源（🎨漫蛙 / 🌍🔞爱丽丝书屋 / 🏷七猫小说 …）
+  // 每次都要重新初始化，而症状只是「设置好像没保存」。
   obj.getVariable = function (name) {
-    // 不带参数时返回**整个变量表的 JSON 串** —— 七猫小说·API 就是这么读的
-    if (name === undefined || name === null) return JSON.stringify(vars)
-    var v = vars[String(name)]
-    return v === undefined || v === null ? '' : String(v)
+    if (name !== undefined && name !== null) {
+      var v = vars[String(name)]
+      return v === undefined || v === null ? '' : String(v)
+    }
+    return String(obj.variable === undefined || obj.variable === null ? '' : obj.variable)
   }
-  obj.setVariable = function (name, value) {
-    vars[String(name)] = value === undefined || value === null ? '' : String(value)
+  // 同理按参数个数分派：一参是 Legado 的 setVariable(整串)，两参是会话表（老写法）
+  obj.setVariable = function (a, b) {
+    if (arguments.length >= 2) {
+      vars[String(a)] = b === undefined || b === null ? '' : String(b)
+      return
+    }
+    obj.variable = a === undefined || a === null ? '' : String(a)
+    // 记一笔给宿主收走：它负责更新会话、并把值写回库（见 collectSourceVariable）
+    globalThis.__sourceVariableOut = obj.variable
   }
   obj.putVariable = obj.setVariable
   obj.get = obj.getVariable
@@ -1196,6 +1225,12 @@ export interface SandboxLimits {
      * 规则本身也失败时一并附在错误信息里。
      */
     preludeJs?: string
+    /**
+     * `source.setVariable(整串)` 的落库路径（由上层注入，见 `RuleContext`）
+     *
+     * 不注入时书源变量只活在本请求内 —— 「设置成功、下次进来又没了」。
+     */
+    persistSourceVariable?: (value: string) => void | Promise<void>
 }
 
 /**
@@ -1604,6 +1639,7 @@ async function executeInSandbox(
         // 变量要在**销毁 VM 之前**收回：书源里「搜索脚本先 put、后面的规则再 get」
         // 全靠这一步跨过两次求值（见 SandboxSession.vars）
         collectSourceVars(vm, session)
+        await collectSourceVariable(vm, limits)
         releaseHostBridge(vm, runtime)
     }
 }
@@ -1891,6 +1927,41 @@ function resolveSandboxUrl(url: string, http?: SandboxHttp): string {
         return String(http.resolveUrl(String(url)))
     } catch {
         return String(url)
+    }
+}
+
+/**
+ * 把这次求值里改过的**书源变量**交给上层落库
+ *
+ * 读取端是预置脚本写的 `globalThis.__sourceVariableOut`：`source.setVariable(整串)`
+ * 每次都覆盖它。**`undefined` 表示这次求值没碰过它**，所以不能拿「空串」当没设置 ——
+ * 书源清空自己的变量（`setVariable('')`）是合法操作，必须与「没动」分开。
+ *
+ * 只有在上层给了落库路径时才做（`RuleContext.persistSourceVariable`，见 index.ts）：
+ * 引擎自己不该碰数据库。落库**要等**（调用方 await）—— 响应一返回，Worker 会掐掉
+ * 还在飞的 promise，那时用户看到的是「设置成功了」，下次进来却发现没生效。
+ *
+ * 与 `collectSourceVars` 一样：任何一步失败都只能咽掉，结果或错误都已经定了。
+ */
+async function collectSourceVariable(
+    vm: QuickJSAsyncContext,
+    limits: SandboxLimits,
+): Promise<void> {
+    if (!limits.persistSourceVariable) return
+    try {
+        const handle = vm.evalCode(
+            'typeof globalThis.__sourceVariableOut === "string" ? globalThis.__sourceVariableOut : null',
+        )
+        if (handle.error) {
+            handle.error.dispose()
+            return
+        }
+        const dumped = vm.dump(handle.value)
+        handle.value.dispose()
+        if (dumped === null || dumped === undefined) return
+        await limits.persistSourceVariable(String(dumped))
+    } catch {
+        /* 落库失败不影响这次求值的结果（书源那侧已经拿到它要的值了） */
     }
 }
 

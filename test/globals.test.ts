@@ -61,6 +61,21 @@ describe('sourcePayload', () => {
         ).toBe('')
     })
 
+    /**
+     * `variable` 必须**总是**出现在 payload 里（哪怕是空串）
+     *
+     * 它是 `source.getVariable()` 无参时的返回值 —— 而 816 条源里**一条都没有**这个字段
+     * （起点是空串，靠书源自己 `setVariable` 填）。如果按「undefined 就不进 payload」
+     * 的规则把它漏掉，沙箱那侧拿到的是 undefined，`getVariable()` 会回 "undefined"。
+     */
+    it('`variable` 总是作为字符串出现 —— 书源里没有这个字段时是空串', () => {
+        expect((sourcePayload(source) as Record<string, unknown>).variable).toBe('')
+        expect(
+            (sourcePayload({ ...source, variable: '{"线路":2}' }) as Record<string, unknown>)
+                .variable,
+        ).toBe('{"线路":2}')
+    })
+
     it('不透传规则文本：整份书源里带着所有规则，逐次求值序列化它是纯浪费', () => {
         const payload = sourcePayload(source) as Record<string, unknown>
         expect(payload.ruleSearch).toBeUndefined()

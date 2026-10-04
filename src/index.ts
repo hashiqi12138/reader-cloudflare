@@ -23,8 +23,9 @@ import {
     listEnabledSources,
     listEnabledSourcesByIds,
     listSources,
+    persistSourceVariable,
 } from './data/sources'
-import type { RegistryOptions } from './data/sources'
+import type { RegistryOptions, RegisteredSource } from './data/sources'
 import { addToShelf, getProgress, listShelf, removeFromShelf, saveProgress } from './data/library'
 import type { AddToShelfInput, SaveProgressInput } from './data/library'
 import { addBookmark, listBookmarks, removeBookmark, updateBookmarkNote } from './data/bookmarks'
@@ -136,10 +137,21 @@ function registryOf(env: Env): RegistryOptions {
  *
  * 用函数而不是让每个路由自己写 `{ baseUrl, sandbox }`：漏掉 `sandbox` 不会报错，
  * 只会让那次求值临时多实例化一个 WASM 模块 —— 一种「能跑但更贵」的静默退化，
- * 统一从这里出就能避免。
+ * 统一从这里出就能避免。`persistSourceVariable` 同理：漏掉它不会报错，
+ * 只是 `source.setVariable()` 变成「设置成功、下次进来又没了」。
+ *
+ * `db` 与 `source` 都要传进来，是因为书源变量的落库只有这一层知道（见 data/sources.ts）。
  */
-function evalContext(source: { bookSourceUrl: string }, sandbox?: SandboxSession): RuleContext {
-    return { baseUrl: source.bookSourceUrl, sandbox: sandbox ?? createSandboxSession() }
+function evalContext(
+    db: D1Database,
+    source: RegisteredSource,
+    sandbox?: SandboxSession,
+): RuleContext {
+    return {
+        baseUrl: source.bookSourceUrl,
+        sandbox: sandbox ?? createSandboxSession(),
+        persistSourceVariable: (value) => persistSourceVariable(db, source, value),
+    }
 }
 
 /**
@@ -957,7 +969,7 @@ app.get('/api/explore', async (c) => {
     if (!source) return c.json({ error: `找不到书源：${sourceId}` }, 404)
 
     try {
-        const categories = await listExploreCategories(source, evalContext(source))
+        const categories = await listExploreCategories(source, evalContext(c.env.DB, source))
         return c.json({
             sourceId: source.id,
             sourceName: source.bookSourceName,
@@ -981,7 +993,7 @@ app.get('/api/explore/books', async (c) => {
     if (target === '') return c.json({ error: '缺少 url 参数' }, 400)
 
     try {
-        const result = await exploreBooks(source, target, page, evalContext(source))
+        const result = await exploreBooks(source, target, page, evalContext(c.env.DB, source))
         return c.json({
             sourceId: source.id,
             sourceName: source.bookSourceName,
@@ -1093,7 +1105,7 @@ app.post('/api/search', async (c) => {
             const started = Date.now()
             try {
                 const books = await searchBooks(source, keyword, {
-                    ...evalContext(source, session),
+                    ...evalContext(c.env.DB, source, session),
                     key: keyword,
                 })
                 return {
@@ -1153,7 +1165,7 @@ app.get('/api/book', async (c) => {
     if (!target) return c.json({ error: '缺少 url 参数' }, 400)
 
     try {
-        const info = await fetchBookInfo(source, target, evalContext(source))
+        const info = await fetchBookInfo(source, target, evalContext(c.env.DB, source))
         return c.json({ sourceId: source.id, ...info })
     } catch (err) {
         return fail(c, err)
@@ -1186,7 +1198,11 @@ app.get('/api/toc', async (c) => {
             })
         }
 
-        const { chapters, warning } = await fetchChapters(source, target, evalContext(source))
+        const { chapters, warning } = await fetchChapters(
+            source,
+            target,
+            evalContext(c.env.DB, source),
+        )
         return c.json({
             sourceId: source.id,
             count: chapters.length,
@@ -1332,7 +1348,7 @@ app.get('/api/content', async (c) => {
     if (!target) return c.json({ error: '缺少 url 参数' }, 400)
 
     try {
-        const content = await fetchChapterContent(source, target, evalContext(source))
+        const content = await fetchChapterContent(source, target, evalContext(c.env.DB, source))
         const head = { sourceId: source.id, url: target, kind: content.kind }
 
         switch (content.kind) {
