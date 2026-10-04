@@ -6497,11 +6497,17 @@ console.log('\n=== 46. 沙箱里的取网必须跟着这次求值的预算走 ==
  * 整页就等 20 秒（见 ops.ts 里 `SEARCH_TIMEOUT_MS` 旁边那行注释）。
  *
  * 靶子是测试站点新加的 `/fixture/slow?ms=`：很慢才把正文吐出来。
+ *
+ * 三条断言覆盖三层：① 列表规则里的 `@js:` 取网（搜索那趟的 6 秒预算）、
+ * ③ 搜索地址（`searchUrl`）模板里的取网（同一份预算 —— 📂新书本网 那条就是它，
+ * 修之前报的是 `请求超时（>8000ms）`，那是**沙箱默认**的 8 秒）、
+ * ② 一个「快」的对照，防的是把正常取网也一并误伤。
  */
 {
     const slowId = `user:${BASE}/slow-46`
     const okId = `user:${BASE}/slow-46-ok`
-    for (const one of [slowId, okId])
+    const tplId = `user:${BASE}/slow-46-tpl`
+    for (const one of [slowId, okId, tplId])
         await call('DELETE', `/api/sources?id=${encodeURIComponent(one)}`)
 
     await call(
@@ -6530,6 +6536,18 @@ console.log('\n=== 46. 沙箱里的取网必须跟着这次求值的预算走 ==
                     bookUrl: '@css:h3.title a@href',
                 },
             },
+            {
+                // 搜索地址（searchUrl）模板里的取网：📂新书本网 那种「先抓首页读 form[action]」。
+                // 这一层也要按搜索的 6 秒预算走，而不是沙箱默认的 8 秒
+                bookSourceName: '慢取网·搜索地址模板（临时）',
+                bookSourceUrl: `${BASE}/slow-46-tpl`,
+                searchUrl: `{{java.ajax('${BASE}/fixture/slow?ms=12000')}}/fixture/search?q={{key}}`,
+                ruleSearch: {
+                    bookList: '@css:h3.title',
+                    name: '@css:h3.title@text',
+                    bookUrl: '@css:h3.title a@href',
+                },
+            },
         ]),
     )
 
@@ -6553,13 +6571,25 @@ console.log('\n=== 46. 沙箱里的取网必须跟着这次求值的预算走 ==
         JSON.stringify(fast.json?.sources?.[0] ?? {}).slice(0, 150),
     )
 
-    for (const one of [slowId, okId])
+    // ③ 搜索地址模板那一层：📂新书本网 报的 `请求超时（>8000ms）` 就是它漏了预算
+    const tplStarted = Date.now()
+    const tpl = await searchOne(tplId)
+    const tplElapsed = Date.now() - tplStarted
+    const tplHit = tpl.json?.sources?.[0]
+    const budget = /请求超时（>(\d+)ms/.exec(String(tplHit?.error ?? ''))
+    check(
+        tplElapsed < 8000 && budget !== null && Number(budget[1]) <= 6000,
+        '③ 搜索地址模板里的 java.ajax 也按搜索预算（6 秒）走，不是沙箱默认的 8 秒',
+        `${tplElapsed}ms 报的上限=${budget?.[1] ?? '?'} ${String(tplHit?.error ?? '').slice(0, 90)}`,
+    )
+
+    for (const one of [slowId, okId, tplId])
         await call('DELETE', `/api/sources?id=${encodeURIComponent(one)}`)
     check(
         !((await getJson('/api/sources')).json?.sources ?? []).some((s) =>
             String(s.id).includes('slow-46'),
         ),
-        '慢取网的两个测试源已清理',
+        '慢取网的三个测试源已清理',
     )
 }
 
