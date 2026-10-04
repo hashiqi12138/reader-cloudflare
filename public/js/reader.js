@@ -401,26 +401,42 @@ export async function viewRead(host) {
     // ---- 分页与翻页 ----
 
     /**
-     * 每页之间的横向间隔
+     * 一页的左右留白；页与页之间的空档是它的两倍
      *
-     * 分页用的是 CSS 多列：一列就是一页。列与列之间留 gap 是为了给正文两侧留白 ——
-     * 多列容器的 padding 只作用于整块、不作用于每一列，所以留白只能靠 gap：
-     * 列宽 = 可视宽 - gap，翻一页的位移 = 列宽 + gap = 可视宽，正好一屏。
+     * 分页用的是 CSS 多列：一列就是一页。这里有个必须记住的坑 ——
+     * **多列容器会把列撑满可用宽度**，`column-width` 只表示「至少这么宽」，
+     * 当容器里只放得下一列时，这一列会被撑到容器内容宽。所以真正决定列宽的是
+     * 容器的**内边距**，不是 `column-width`：
+     *
+     *     列宽 = 容器内容宽 = 可视宽 - 2 * PAGE_MARGIN
+     *
+     * 而翻一页的位移必须正好等于「列宽 + 列间距」，也就是可视宽：
+     *
+     *     列间距 = 2 * PAGE_MARGIN  →  位移 = (可视宽 - 2M) + 2M = 可视宽
+     *
+     * 早先只设了 gap、没设 padding：列被撑到满宽（正文贴着屏幕边），
+     * 而列间距又在那之上多出 44px —— 于是每翻一页正文就右移 44px，
+     * 页码越大偏得越多（第 10 页已经偏出小半屏），同时 `pageCount` 也被算大。
      */
-    const PAGE_GAP = 44
+    const PAGE_MARGIN = 22
+    const PAGE_GAP = PAGE_MARGIN * 2
 
     function measure() {
         if (mode !== 'page') {
             pageCount = 1
+            // 离开翻页模式要撤掉留白，否则滚动模式下会与 body 的内边距叠加
+            flow.style.removeProperty('padding')
             return
         }
         const width = body.clientWidth
         if (width <= 0) return
-        const columnWidth = Math.max(200, width - PAGE_GAP)
+        const columnWidth = Math.max(60, width - PAGE_GAP)
+        // 留白走 padding（它才是列宽的决定项），间距走 gap（= 2 倍留白）
+        flow.style.padding = `0 ${PAGE_MARGIN}px`
         flow.style.columnGap = `${PAGE_GAP}px`
         flow.style.columnWidth = `${columnWidth}px`
-        // 多列容器的 scrollWidth = n*列宽 + (n-1)*gap
-        pageCount = Math.max(1, Math.round((flow.scrollWidth + PAGE_GAP) / width))
+        // 这样每列都正好占一个可视宽：scrollWidth = n * 可视宽（末列右侧的留白不计入溢出）
+        pageCount = Math.max(1, Math.round(flow.scrollWidth / width))
         page = Math.min(page, pageCount - 1)
     }
 
