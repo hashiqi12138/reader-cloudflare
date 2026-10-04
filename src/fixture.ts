@@ -770,6 +770,34 @@ export async function handleFixture(request: Request, url: URL): Promise<Respons
     }
 
     /**
+     * 登录的两个靶子（第五十七轮）
+     *
+     * `/fixture/login` 收账号密码、回一个 token（书源脚本拿它 `putLoginHeader`）；
+     * `/fixture/need-login` **只在带着那个 token 头时**才回 200（否则 403）。
+     *
+     * 于是「登录一次、之后每趟请求都带着」这件事能被一次链路完整验出来：
+     * 调登录接口 → 落库 → **另一趟请求**（`/api/content`）带上了。
+     */
+    if (pathname === '/fixture/login') {
+        const params = new URLSearchParams(await request.text())
+        const user = params.get('username') ?? ''
+        const password = params.get('password') ?? ''
+        const body =
+            user === 'u1' && password === 'p1'
+                ? { token: 'TK-RC-1', user }
+                : { error: '账号或密码不对' }
+        return new Response(JSON.stringify(body), {
+            headers: { 'Content-Type': 'application/json; charset=utf-8' },
+        })
+    }
+    if (pathname === '/fixture/need-login') {
+        if (request.headers.get('x-rc-token') !== 'TK-RC-1') {
+            return new Response('需要登录（X-RC-Token）', { status: 403 })
+        }
+        return html(fixtureBookPage('1'))
+    }
+
+    /**
      * **防盗链封面**本身：没有 `Referer` 就 403
      *
      * 照线上那几家的规矩写，**不宽容**：少了 `Referer` 就是 403。

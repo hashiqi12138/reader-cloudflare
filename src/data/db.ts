@@ -34,6 +34,10 @@ interface SourceRow {
     variable: string
     /** cookie 罐的 JSON（主机名 → cookie 串），只有 enabledCookieJar 的源才写 */
     cookies: string
+    /** 登录头（一段 JSON：`{"Cookie":"…"}`）；空串表示没登录 */
+    login_header: string
+    /** 登录信息（一段自由文本，源自己 JSON.parse 后按键取） */
+    login_info: string
 }
 
 /**
@@ -79,10 +83,33 @@ function rowToSource(row: SourceRow, db: D1Database): RegisteredSource {
         source.cookieJar = jar
         source.persistCookies = () => saveSourceCookies(db, row.id, dumpJar(jar))
     }
+    /**
+     * 登录态：两列读进来，并装上落库路径
+     *
+     * 与 cookie 罐不同，这里**不按开关过滤**：`putLoginHeader` / `putLoginInfo` 是书源
+     * 自己调的方法（没有对应的书源字段可判），而登录态本来就是「用户主动做了一次登录」的结果 ——
+     * 没登录过时两列都是空串，落库路径也就永远不会被调用。
+     */
+    source.loginHeader = row.login_header ?? ''
+    source.loginInfo = row.login_info ?? ''
+    /**
+     * 落库前先把新值写回内存里这一份 —— 与 `persistSourceVariable` 同一个道理：
+     * **同一次请求里**同一个书源会被求值很多次（登录脚本写完，后面几步立刻要读、要用），
+     * 只写库不写内存的话，那几步看到的还是旧值。
+     */
+    source.persistLogin = (patch: { header?: string; info?: string }) => {
+        if (patch.header !== undefined) source.loginHeader = patch.header
+        if (patch.info !== undefined) source.loginInfo = patch.info
+        return saveSourceLogin(db, row.id, {
+            header: source.loginHeader ?? '',
+            info: source.loginInfo ?? '',
+        })
+    }
     return source
 }
 
-const SELECT_COLUMNS = 'id, name, url, group_name, enabled, sort_order, payload, variable, cookies'
+const SELECT_COLUMNS =
+    'id, name, url, group_name, enabled, sort_order, payload, variable, cookies, login_header, login_info'
 
 /** 全部用户书源，按展示顺序 */
 export async function listUserSources(db: D1Database): Promise<RegisteredSource[]> {
@@ -224,6 +251,24 @@ export async function saveSourceCookies(db: D1Database, id: string, value: strin
     await db
         .prepare('UPDATE sources SET cookies = ?, updated_at = ? WHERE id = ?')
         .bind(value, Date.now(), id)
+        .run()
+}
+
+/**
+ * 写回登录态（`sources.login_header` / `login_info`）
+ *
+ * 两列一起写：它们是一起产生、一起失效的（登录成功时两样都有），分两次 UPDATE
+ * 只会多一次往返。与另外两处落库同理，调用方要 `await` —— 请求一返回，
+ * 还在飞的 promise 会被掐掉，那时用户看到的是「登录成功了」，下次进来却发现没生效。
+ */
+export async function saveSourceLogin(
+    db: D1Database,
+    id: string,
+    value: { header: string; info: string },
+): Promise<void> {
+    await db
+        .prepare('UPDATE sources SET login_header = ?, login_info = ?, updated_at = ? WHERE id = ?')
+        .bind(value.header, value.info, Date.now(), id)
         .run()
 }
 

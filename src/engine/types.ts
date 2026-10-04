@@ -329,6 +329,34 @@ export interface BookSource {
      */
     persistCookies?: () => void | Promise<void>
 
+    /**
+     * 登录头（原项目的 `BookSource.loginHeader`）
+     *
+     * 一段 **JSON**（`{"Cookie":"…"}` / `{"Authorization":"…"}` —— 语料里 15 处
+     * `source.putLoginHeader(...)` 全写成 JSON 字符串）。取网层把它解析成请求头带上，
+     * 落库在 `sources.login_header`。
+     *
+     * 与 cookie 罐的分工：罐子管的是**站点下发**的 `Set-Cookie`（自动收、自动发），
+     * 这里管的是**书源自己算出来/登录时存下**的头 —— 站点不会替你发它。
+     */
+    loginHeader?: string
+
+    /**
+     * 登录信息（原项目的 `BookSource.loginInfo`）
+     *
+     * 一段自由文本，源自己 `JSON.parse` 后按键取（账号、token、uid…）。
+     * 落库在 `sources.login_info`，由沙箱的 `source.getLoginInfo()` / `getLoginInfoMap()` 读。
+     */
+    loginInfo?: string
+
+    /**
+     * 登录态变过之后写回库（由注册表装上，见 `data/db.ts`）
+     *
+     * 与 `persistCookies` 同一条路数（写穿、只在真的变了时调）：
+     * `source.putLoginHeader(...)` / `putLoginInfo(...)` 每改一次就落一次。
+     */
+    persistLogin?: (patch: { header?: string; info?: string }) => void | Promise<void>
+
     /** 搜索地址模板，含 {{key}} / {{page}} */
     searchUrl?: string
     /** 搜索请求选项：charset / headers / method / body */

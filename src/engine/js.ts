@@ -142,6 +142,13 @@ export interface SandboxSession {
      * （见 engine/globals.ts 的 bookVars）。
      */
     bookVars: Record<string, string>
+    /**
+     * 上一次求值的日志（`java.toast` / `java.log` 那些）
+     *
+     * 只有登录接口在用：书源把「登录成功了」「账号密码为空」这类话写成 toast，
+     * 而那句话是用户唯一能看到的结果 —— 接口得把它带回去。
+     */
+    lastLogs?: string[]
 }
 
 export function createSandboxSession(): SandboxSession {
@@ -796,6 +803,15 @@ function __toJavaMap(text) {
   return out
 }
 
+// 登录表单：宿主把用户填的字段以 JSON 注进来（__loginFields），这里包成
+// 「同时支持 result.get(k) 与 result[k]」的对象 —— 语料里两种读法都有
+// （🏷晋江文学 写的是 (typeof result)=="string" ? this.M("账号") : result.get("账号")）。
+// 只在**跑登录脚本**那一次注入了 __loginFields、而且宿主没有另外给 result 时才生效，
+// 平时的规则求值完全不受影响。
+if (globalThis.__loginFields !== undefined && globalThis.result === undefined) {
+  globalThis.result = __toJavaMap(globalThis.__loginFields)
+}
+
 // ---------------------------------------------------------------- book / chapter
 //
 // 当前这本书与这一章。宿主每次求值把客户端带上来的那份 JSON 注进来
@@ -932,10 +948,22 @@ var source = (function () {
   obj.put = obj.setVariable
   obj.getVariableMap = function () { return vars }
   obj.getHeaderMap = function () { return __toJavaMap(obj.header) }
+  /**
+   * 登录态：起点是**库里存着的那一份**（注入的 __loginHeader / __loginInfo），
+   * 每次改动都记一笔给宿主收走落库（见 collectLogin）。
+   *
+   * 以前它们只活在这一次求值里 —— 于是「登录一次、之后每趟请求都带着」根本不成立：
+   * 登录脚本写下的头，下一次求值（乃至下一个请求）读到的都是空串。
+   * 线上 15 处 putLoginHeader / 8 处 putLoginInfo 写、30 处 getLoginHeader* / 28 处
+   * getLoginInfo* 读，两边一直对不上（见「第五十七轮」）。
+   */
+  obj.__loginHeader = String(globalThis.__loginHeader || '')
+  obj.__loginInfo = String(globalThis.__loginInfo || '')
   obj.getLoginHeader = function () { return String(obj.__loginHeader || '') }
   obj.getLoginHeaderMap = function () { return __toJavaMap(obj.__loginHeader) }
   obj.putLoginHeader = function (header) {
     obj.__loginHeader = header === undefined || header === null ? '' : String(header)
+    globalThis.__loginHeaderOut = obj.__loginHeader
   }
   obj.getLoginInfoMap = function () {
     // Legado 那边 getLoginInfoMap() 返回的是一个 Java Map，书源因此写成
@@ -955,6 +983,7 @@ var source = (function () {
     obj.__loginInfo = info === undefined || info === null ? '' : String(info)
     // 重建一份，保证「先 put 再 get」在同一个脚本里就能读到
     obj.__loginInfoMap = __toJavaMap(obj.__loginInfo)
+    globalThis.__loginInfoOut = obj.__loginInfo
   }
   // getLoginInfo() 与 putLoginInfo 配套：上游返回登录信息**字符串**，
   // 源自己 JSON.parse 后按键取。语料 2 处（🎨漫蛙 / 🎨🔞禁漫天堂），都写成
@@ -966,10 +995,15 @@ var source = (function () {
   obj.removeLoginInfo = function () {
     obj.__loginInfo = ''
     obj.__loginInfoMap = __toJavaMap('')
+    // 退出登录也要**落库**：不记这一笔的话，库里那份还在，下一趟请求又带上了
+    globalThis.__loginInfoOut = ''
   }
   // 退出登录：语料 4 处 / 4 源（🌍🔞爱丽丝书屋 / 📂完本神站（登录）/ 🏷七猫小说 /
-  // ⚡📂三五中文，都在 logout / clearLogin 那条路上），与已实现的 putLoginHeader 对称。
-  obj.removeLoginHeader = function () { obj.__loginHeader = '' }
+  // ⚡📂三五中文，都在 logout / clearLogin 那条路上），与 putLoginHeader 对称。
+  obj.removeLoginHeader = function () {
+    obj.__loginHeader = ''
+    globalThis.__loginHeaderOut = ''
+  }
   // source.putConcurrent("并发数/间隔")：上游拿它调**书架刷新**的并发。
   // 语料 2 处（🔞 Linpx / 🔞兽人小说站 的 startShelfRefresh / endShelfRefresh 回调），
   // 本引擎没有书架刷新，空实现。
@@ -1607,6 +1641,13 @@ export interface SandboxLimits {
     cookieJar?: CookieJar
     /** cookie 罐变过之后就写回库（由注册表装上，见 `data/db.ts`） */
     persistCookies?: () => void | Promise<void>
+    /**
+     * 登录态（`source.putLoginHeader` / `putLoginInfo`）的落库路径
+     *
+     * 由注册表装上（见 `data/db.ts` 的 `rowToSource`）：书源那两条列与 cookie 罐不同，
+     * **不按开关过滤** —— 它们本来只在书源真的调过 put* 之后才有值。
+     */
+    persistLogin?: (patch: { header?: string; info?: string }) => void | Promise<void>
 }
 
 /**
@@ -2018,6 +2059,15 @@ async function executeInSandbox(
         await collectSourceVariable(vm, limits)
         await collectBookVars(vm, session, limits)
         await collectCookies(vm, limits)
+        await collectLogin(vm, limits)
+        /**
+         * 把这次求值的日志（`java.toast` / `java.log`）留一份在会话上
+         *
+         * 存在的理由只有一个：**登录接口要把书源自己那句话带回去**
+         * （「已切换线路：xxx」「账号密码为空」）—— 那些提示是书源写给用户看的，
+         * 而它唯一的出口就是 toast。不留这一份，接口只能回一句「跑完了」。
+         */
+        session.lastLogs = logs
         releaseHostBridge(vm, runtime)
     }
 }
@@ -2428,6 +2478,47 @@ async function collectCookies(vm: QuickJSAsyncContext, limits: SandboxLimits): P
         if (changed && limits.persistCookies) await limits.persistCookies()
     } catch {
         /* cookie 收不回来只影响下一次请求带不带它，不该盖掉这次求值的结果 */
+    }
+}
+
+/**
+ * 把这次求值里改过的**登录态**交给上层落库
+ *
+ * 读取端是预置脚本写的 `globalThis.__loginHeaderOut` / `__loginInfoOut`：
+ * `putLoginHeader` / `putLoginInfo` / `removeLogin*` 每改一次就记一笔。
+ *
+ * 为什么必须落库：登录是**一次**动作，而搜索 / 详情 / 目录 / 正文是**四次互不相干的请求** ——
+ * 不落库的话用户看到的是「登录成功了，翻一页又要重新登录」。取网层随后会把
+ * `loginHeader` 解析成请求头带上（见 `planFromResolvedUrl`）。
+ *
+ * 与 `collectCookies` 一样：只有上层给了落库路径才做，落库**要等**（响应一返回，
+ * 还在飞的 promise 会被掐掉），失败只能咽掉。
+ */
+async function collectLogin(vm: QuickJSAsyncContext, limits: SandboxLimits): Promise<void> {
+    const persist = limits.persistLogin
+    if (!persist) return
+    try {
+        const patch: { header?: string; info?: string } = {}
+        for (const [global, key] of [
+            ['__loginHeaderOut', 'header'],
+            ['__loginInfoOut', 'info'],
+        ] as const) {
+            const handle = vm.evalCode(
+                `typeof globalThis.${global} === "string" ? globalThis.${global} : null`,
+            )
+            if (handle.error) {
+                handle.error.dispose()
+                continue
+            }
+            const dumped = vm.dump(handle.value)
+            handle.value.dispose()
+            if (dumped === null || dumped === undefined) continue
+            patch[key] = String(dumped)
+        }
+        if (patch.header === undefined && patch.info === undefined) return
+        await persist(patch)
+    } catch {
+        /* 落库失败不影响这次求值的结果（书源那侧已经拿到它要的值了） */
     }
 }
 

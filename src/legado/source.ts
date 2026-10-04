@@ -13,8 +13,8 @@
 import { runInSandbox, sandboxResultToString } from '../engine/js'
 import { baseGlobals, sourceLimits } from '../engine/globals'
 import type { BookSource, FetchPlan, RuleContext, SandboxHttp } from '../engine/types'
-import { parseLooseJson } from '../lib/json'
 import { defaultHeaders, fetchDetailed, fetchText, UpstreamError } from '../lib/http'
+import { parseLoginHeaders, parseSourceHeaders, requestHeadersFor } from './sourceHeaders'
 import { applyOptionalSegments, findUrlJs } from './urlJs'
 import { splitUrlAndOptions, type UrlOptions } from './urlOptions'
 
@@ -53,31 +53,6 @@ export async function resolveTemplate(template: string, ctx: RuleContext): Promi
 }
 
 /**
- * 把书源级别的请求头解析出来
- *
- * 注意这里**只认 JSON**：书源里 `header` 也可以写成 `<js>...</js>` 让脚本动态生成，
- * 那种情况目前会被当作「没有请求头」静默丢掉（见 README 的「已知缺口」）。
- * 丢请求头会让站点返回不同版本甚至拒绝服务，症状是「搜不到书」而不是报错 ——
- * 这是当前实现里的一处已知短板，不是有意设计。
- */
-function parseSourceHeaders(raw: string | undefined): Record<string, string> {
-    if (!raw) return {}
-    try {
-        const parsed = parseLooseJson<unknown>(raw)
-        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-            const out: Record<string, string> = {}
-            for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
-                out[k] = String(v)
-            }
-            return out
-        }
-    } catch {
-        /* 书源里的 header 写坏很常见，忽略即可 */
-    }
-    return {}
-}
-
-/**
  * 由**已解析**的地址构造请求计划
  *
  * 不含 `{{}}` 模板求值与 URL 选项解析 —— 供沙箱内的 `java.ajax` 复用，
@@ -98,7 +73,9 @@ export function planFromResolvedUrl(
     return {
         url: absolute,
         method: 'GET',
-        headers: { ...defaultHeaders(absolute), ...parseSourceHeaders(source.header) },
+        // 三层请求头（登录头 → 默认头 → 书源自己的 `header`，后面的盖前面的）：
+        // 拆去 `./sourceHeaders` 那个纯函数模块，好让单测逐条钉住（见 test/login.test.ts）
+        headers: requestHeadersFor(absolute, source),
         charset: 'auto',
         webView: false,
         // cookie 罐：书源开着 enabledCookieJar 时注册表才给它建（见 data/db.ts）。
@@ -258,7 +235,12 @@ function hasHeader(headers: Record<string, string>, name: string): boolean {
  */
 export function mediaRequestHeaders(source: BookSource, mediaUrl: string): Record<string, string> {
     const fromSource = parseSourceHeaders(source.header)
-    const headers: Record<string, string> = { ...defaultHeaders(mediaUrl), ...fromSource }
+    // 媒体也要带登录头：不少站点的图片/音频是登录后才给取的（与页面请求同一套三层）
+    const headers: Record<string, string> = {
+        ...parseLoginHeaders(source.loginHeader),
+        ...defaultHeaders(mediaUrl),
+        ...fromSource,
+    }
 
     headers.Accept = '*/*'
 

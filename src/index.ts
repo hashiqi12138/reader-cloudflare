@@ -75,7 +75,9 @@ import {
     type FieldWarning,
 } from './legado/ops'
 import { fetchChapterContent } from './legado/media'
-import { mediaRequestHeaders } from './legado/source'
+import { normalizeLoginScript } from './legado/loginScript'
+import { mediaRequestHeaders, sandboxHttp } from './legado/source'
+import { baseGlobals, sourceLimits } from './engine/globals'
 import { splitUrlAndOptions } from './legado/urlOptions'
 import { UpstreamError } from './lib/http'
 import { USER_HEADER } from './lib/identity'
@@ -466,6 +468,85 @@ app.delete('/api/sources', async (c) => {
         return fail(c, err)
     }
 })
+
+/**
+ * 跑一次书源的登录脚本（`loginUrl`）
+ *
+ * 登录是**一次**动作，而搜索 / 详情 / 目录 / 正文是**四次互不相干的请求** ——
+ * 所以这个接口做的事只有一件：把书源自己写的登录脚本跑一遍，剩下的由两处接住：
+ *
+ *   1. 沙箱那侧 `source.putLoginHeader(...)` / `putLoginInfo(...)` 每改一次就记一笔
+ *      （见 `engine/js.ts` 的 `collectLogin`），落库到 `sources.login_header` / `login_info`
+ *   2. 取网层随后把 `loginHeader` 解析成请求头带上（`planFromResolvedUrl` 的三层请求头）
+ *
+ * 于是「登录一次、之后每趟请求都带着」才成立。请求体：
+ *
+ *   `{ id, fields? }` —— fields 是用户填的表单。书源里两种读法都有
+ *   （`result.get("账号")` 与 `result["账号"]`，🏷晋江文学 还先判 `typeof result`），
+ *   所以沙箱那侧把它包成「同时支持两者」的对象。
+ *   **多数 loginUrl 其实不需要表单**（它们是「切换线路 / 保存设置」那类菜单），
+ *   那种源直接 POST 一个 `{ id }` 就行。
+ */
+app.post('/api/sources/login', async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as { id?: unknown; fields?: unknown }
+    const id = typeof body.id === 'string' ? body.id : ''
+    const origin = new URL(c.req.url).origin
+    const source = await findSource(c.env.DB, origin, id, registryOf(c.env))
+    if (!source) return c.json({ error: `找不到书源：${id}` }, 404)
+    if (typeof source.loginUrl !== 'string' || source.loginUrl.trim() === '') {
+        return c.json({ error: '这个书源没有写登录脚本（loginUrl）' }, 400)
+    }
+    // `loginUrl` 在语料里有两种形态：裸脚本，以及被作者加了 `@js:` / `<js>` 标记的
+    // （那两个标记是**规则字段**的语法）—— 见 legado/loginScript.ts 的说明
+    const loginScript = normalizeLoginScript(source.loginUrl)
+    if (loginScript === '') {
+        return c.json({ error: '这个书源的登录脚本是空的（只有标记）' }, 400)
+    }
+
+    const fields =
+        body.fields && typeof body.fields === 'object' && !Array.isArray(body.fields)
+            ? (body.fields as Record<string, unknown>)
+            : {}
+    const session = createSandboxSession()
+    // `source` 必须显式带上：`evalContext` 只给 baseUrl / sandbox / 落库路径，
+    // 而登录脚本要读 `source.getVariable()`、`source.bookSourceUrl` 这些
+    const ctx: RuleContext = { ...evalContext(c.env.DB, source, session), source }
+
+    try {
+        await runInSandbox(
+            loginScript,
+            {
+                ...baseGlobals(ctx),
+                __loginFields: JSON.stringify(fields),
+            },
+            { http: sandboxHttp(source, source.bookSourceUrl), ...sourceLimits(ctx) },
+        )
+    } catch (err) {
+        return c.json(
+            {
+                error: err instanceof Error ? err.message : String(err),
+                message: toastTextOf(session),
+            },
+            502,
+        )
+    }
+
+    return c.json({
+        sourceId: source.id,
+        ok: true,
+        // 书源自己那句提示（toast）—— 登录成功与否，书源比我们清楚
+        message: toastTextOf(session),
+        loggedIn: (source.loginHeader ?? '') !== '' || (source.loginInfo ?? '') !== '',
+    })
+})
+
+/** 把这次求值里的 toast 文本拼起来（书源写给用户看的那句话就在里面） */
+function toastTextOf(session: SandboxSession): string {
+    return (session.lastLogs ?? [])
+        .map((line) => line.replace(/^\[toast\]\s*/, ''))
+        .filter((line) => line !== '')
+        .join('\n')
+}
 
 /**
  * 书架

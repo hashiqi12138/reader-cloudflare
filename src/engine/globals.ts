@@ -99,6 +99,15 @@ export function sourceGlobals(ctx: RuleContext): Record<string, unknown> {
          * 与书源自己声明的取舍一致。求值结束后 `collectCookies` 把改动收回罐子并落库。
          */
         __cookieJar: JSON.stringify(ctx.source?.cookieJar?.hosts ?? {}),
+        /**
+         * 登录态（`source.putLoginHeader` / `putLoginInfo` 存下来的那两样）
+         *
+         * 起点是**库里存着的那一份**（`sources.login_header` / `login_info`），
+         * 于是「登录一次、之后每趟请求都带着」才成立：沙箱里 `source.getLoginHeader()`
+         * 读得到、取网层也会把头带上（见 `planFromResolvedUrl` 的三层请求头）。
+         */
+        __loginHeader: String(ctx.source?.loginHeader ?? ''),
+        __loginInfo: String(ctx.source?.loginInfo ?? ''),
     }
 }
 
@@ -181,5 +190,7 @@ export function sourceLimits(ctx: RuleContext): SandboxLimits {
         // cookie 罐：书源没开 enabledCookieJar 时它压根不存在，沙箱那侧就退回老行为
         ...(ctx.source?.cookieJar ? { cookieJar: ctx.source.cookieJar } : {}),
         ...(ctx.source?.persistCookies ? { persistCookies: ctx.source.persistCookies } : {}),
+        // 登录态（`putLoginHeader` / `putLoginInfo` 的落库路径）
+        ...(ctx.source?.persistLogin ? { persistLogin: ctx.source.persistLogin } : {}),
     }
 }
