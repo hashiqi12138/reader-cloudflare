@@ -746,6 +746,8 @@ console.log('\n=== 6. 前端静态资源 ===')
         '/js/replace.js',
         '/js/replaceSync.js',
         '/js/search.js',
+        '/js/searchPlan.js',
+        '/js/sourcesCache.js',
         '/js/zoom.js',
     ]) {
         const response = await fetch(BASE + asset)

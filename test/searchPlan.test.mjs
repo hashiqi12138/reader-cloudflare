@@ -3,7 +3,10 @@ import {
     SEARCH_MIN_PAGE,
     SEARCH_PAGE_SIZE,
     isCpuLimitError,
+    matchSources,
     nextPageSize,
+    normalizeSelection,
+    searchableSources,
 } from '../public/js/searchPlan.js'
 
 describe('nextPageSize', () => {
@@ -59,5 +62,74 @@ describe('isCpuLimitError', () => {
         expect(isCpuLimitError({ status: 400 })).toBe(false)
         expect(isCpuLimitError(null)).toBe(false)
         expect(isCpuLimitError(undefined)).toBe(false)
+    })
+})
+
+/** 一页书源摘要的样本（字段与 `/api/sources` 一致） */
+const SOURCES = [
+    { id: 'a', name: '甲书源', group: '玄幻', enabled: true, hasSearch: true },
+    { id: 'b', name: '乙书源', group: '', enabled: false, hasSearch: true },
+    { id: 'c', name: '丙书源', group: '玄幻', enabled: true, hasSearch: false },
+    { id: 'd', name: '丁听书', group: '有声', enabled: true, hasSearch: true },
+]
+
+describe('searchableSources', () => {
+    it('只留「启用的 + 有搜索规则的」', () => {
+        expect(searchableSources(SOURCES).map((one) => one.id)).toEqual(['a', 'd'])
+    })
+
+    it('保持服务端给的顺序（与「书源」页看到的顺序一致）', () => {
+        const reversed = [...SOURCES].reverse()
+        expect(searchableSources(reversed).map((one) => one.id)).toEqual(['d', 'a'])
+    })
+
+    it('垃圾输入给空数组，而不是抛错', () => {
+        expect(searchableSources(null)).toEqual([])
+        expect(searchableSources(undefined)).toEqual([])
+        expect(searchableSources('不是数组')).toEqual([])
+        expect(searchableSources([null, undefined])).toEqual([])
+    })
+})
+
+describe('matchSources', () => {
+    it('关键词为空就全给', () => {
+        expect(matchSources(SOURCES, '')).toHaveLength(4)
+        expect(matchSources(SOURCES, '   ')).toHaveLength(4)
+        expect(matchSources(SOURCES, undefined)).toHaveLength(4)
+    })
+
+    it('按名字匹配，去空白、不区分大小写', () => {
+        expect(matchSources(SOURCES, ' 乙 ').map((one) => one.id)).toEqual(['b'])
+        expect(matchSources([{ id: 'x', name: 'ABC' }], 'abc').map((one) => one.id)).toEqual(['x'])
+    })
+
+    it('分组也参与匹配', () => {
+        expect(matchSources(SOURCES, '有声').map((one) => one.id)).toEqual(['d'])
+        expect(matchSources(SOURCES, '玄幻').map((one) => one.id)).toEqual(['a', 'c'])
+    })
+
+    it('没匹配上给空数组', () => {
+        expect(matchSources(SOURCES, '不存在的名字')).toEqual([])
+    })
+})
+
+describe('normalizeSelection', () => {
+    it('丢掉已经不在清单里的 id —— 书源被删 / 停用 / 没了搜索规则', () => {
+        expect(normalizeSelection(['a', 'b', 'c', 'z'], SOURCES)).toEqual(['a'])
+    })
+
+    it('去重，并保持原来的先后顺序', () => {
+        expect(normalizeSelection(['d', 'a', 'd'], SOURCES)).toEqual(['d', 'a'])
+    })
+
+    it('空输入给空数组（也就是「不限定范围」）', () => {
+        expect(normalizeSelection([], SOURCES)).toEqual([])
+        expect(normalizeSelection(null, SOURCES)).toEqual([])
+    })
+
+    it('id 不是字符串也能对上（localStorage 里可能是数字）', () => {
+        expect(
+            normalizeSelection([1], [{ id: 1, name: '一号', enabled: true, hasSearch: true }]),
+        ).toEqual(['1'])
     })
 })
