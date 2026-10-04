@@ -270,6 +270,20 @@ export const JAVA_SURFACE: JavaMember[] = [
         support: 'implemented',
     },
     {
+        /**
+         * 这个名字**上游也没有**（表里的 `upstream` 一栏是从上游源码原样抄的，
+         * `base64Decode` / `base64DecodeToByteArray` 都在，独独没有 `base64Decoder`）。
+         * 唯一的调用方 ⚡📂顾淮小说 是在正文规则里无条件调的，多半是 `base64Decode` 的笔误。
+         *
+         * 登记成 `absent` 而不是放着不管，图的是**报错能指对方向**：
+         * 缺着的话书源只会得到 `TypeError: not a function`，看不出是名字写错了。
+         */
+        name: 'base64Decoder',
+        upstream: null,
+        support: 'absent',
+        reason: '上游也没有这个名字，疑似 base64Decode 的笔误',
+    },
+    {
         name: 'base64Encode',
         upstream: 'str: String | str: String, flags: Int',
         support: 'implemented',
@@ -616,6 +630,18 @@ export const JAVA_SURFACE: JavaMember[] = [
     { name: 'refreshExplore', upstream: null, support: 'implemented' },
     { name: 'refreshTocUrl', upstream: null, support: 'implemented', note: '目录按需重取，忽略' },
     {
+        /**
+         * `loginUrl` 里常见的一步：刷新登录界面（🏷七猫小说 的 `changeMenu` 里调的）。
+         * 本引擎没有 App 界面，也就没有「登录界面」可刷 —— 报出名字，别让脚本
+         * 只拿到一句 `not a function`。
+         */
+        name: 'reLoginView',
+        upstream: null,
+        support: 'absent',
+        platform: 'ui',
+        reason: '需要 App 界面（上游用它刷新登录界面）',
+    },
+    {
         name: 'replaceFont',
         upstream:
             'text: String, errorQueryTTF: QueryTTF?, correctQueryTTF: QueryTTF?, filter: Boolean | text: String, errorQueryTTF: QueryTTF?, correctQueryTTF: QueryTTF?',
@@ -637,6 +663,17 @@ export const JAVA_SURFACE: JavaMember[] = [
         note: '设过之后 getString / getElements 在它上面求值（上游在 WebView 里生效）',
     },
     { name: 'sleep', upstream: null, support: 'implemented', note: 'Worker 里不能阻塞线程，忽略' },
+    {
+        /**
+         * 把一个内联页面（HTML + 脚本 + 配置）用 WebView 显示出来 ——
+         * 🏷晋江文学 的书评、登录都靠它。本引擎没有 WebView，报出名字并说明缺什么。
+         */
+        name: 'showBrowser',
+        upstream: null,
+        support: 'absent',
+        platform: 'webview',
+        reason: '需要 WebView（上游用它把一段 HTML 连同脚本显示出来）',
+    },
     {
         name: 'startBrowser',
         upstream: 'url: String, title: String | url: String, title: String, html: String?',
