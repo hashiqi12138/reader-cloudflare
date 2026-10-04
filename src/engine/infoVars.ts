@@ -19,18 +19,27 @@
  * Node 单测里跑不起来。所以 `@put:` 的值规则由 `analyze.ts` 求值后回填。
  */
 
-import type { RuleContext } from './types'
+import type { BookSource, RuleContext } from './types'
 
 /**
  * 读一个变量
  *
- * 优先级与 `globals.ts` 里注入沙箱的那份一致（`ctx.vars` 覆盖会话表）：
+ * 三级，顺序不能换：
+ *   1. `ctx.vars`（调用方显式注入的那一张）
+ *   2. 会话表（本次请求里 `java.put` / `@put:` 写过的）
+ *   3. **书的变量**（`book_variables` 里存着的）—— 跨请求那一路
+ *
+ * 第 3 级是「跨请求的 put / get」的读端：`ruleBookInfo` 里写的 `bid`，
+ * 到 `ruleToc` 那次请求才读 —— 会话早没了，只能落到这本书上（见 `writeInfoVar`）。
+ * 前两处与 `globals.ts` 注入沙箱那份的优先级保持一致（`ctx.vars` 覆盖会话表）：
  * 两处不一致的话，`java.get(k)` 与 `@get:{k}` 会读到不同的值。
  */
 export function readInfoVar(ctx: RuleContext, key: string): string {
     const fromCtx = ctx.vars?.[key]
     if (fromCtx !== undefined) return fromCtx
-    return ctx.sandbox?.vars?.[key] ?? ''
+    const fromSession = ctx.sandbox?.vars?.[key]
+    if (fromSession !== undefined) return fromSession
+    return ctx.bookVars?.[key] ?? ''
 }
 
 /**
@@ -39,13 +48,56 @@ export function readInfoVar(ctx: RuleContext, key: string): string {
  * 有会话（正常请求）就写会话表 —— 这样**下一个求值**（哪怕是 `<js>` 里的
  * `java.get`）也读得到；没有会话（单测、纯规则求值）就退到 `ctx.vars`，
  * 保证同一次求值里的后一个 `@get:` 仍然读得到。
+ *
+ * **跨请求的键另外落一次库**（`ctx.infoVarCrossKeys` 里那几个）：这是唯一能穿过
+ * 「搜索 / 详情 / 目录 / 正文是四次请求」的通道，走的是「书的变量」（`book_variables`，
+ * 按书存、按书取）。三条约束都是必要的：
+ *   - **只在有书上下文的请求里落**：搜索没有这本书，`ruleSearch` 里逐条写同一个键
+ *     本来就是有损的（最后一条覆盖前面），落库也救不回来，还会写 N 次
+ *   - **只落「别的请求会读」的键**（由调用方算好）：全量落会把目录那种逐章求值的
+ *     写法变成几百次 D1 写
+ *   - **每个键一次请求只落一次**（取第一个值）：把上一条再兜一层
  */
 export function writeInfoVar(ctx: RuleContext, key: string, value: string): void {
     if (ctx.sandbox) {
         ;(ctx.sandbox.vars ??= {})[key] = value
-        return
+    } else {
+        ;(ctx.vars ??= {})[key] = value
     }
-    ;(ctx.vars ??= {})[key] = value
+
+    if (value === '') return
+    if (!ctx.persistBookVariable || !ctx.infoVarCrossKeys?.has(key)) return
+    const saved = (ctx.infoVarSaved ??= new Set<string>())
+    if (saved.has(key)) return
+    saved.add(key)
+    if (ctx.bookVars?.[key] === value) return // 库里已经是这个值，不必再写一次
+    ctx.persistBookVariable(key, value)
+    ;(ctx.bookVars ??= {})[key] = value
+}
+
+/**
+ * 这个源里「**别的组**会读的变量键」
+ *
+ * 引擎一次请求只跑一组规则（搜索 → ruleSearch、详情 → ruleBookInfo、目录 → ruleToc、
+ * 正文 → ruleContent），所以「读的组 ≠ 当前组」就是**真的跨请求** —— 这类键才需要落库。
+ * 线上 12 处跨请求里，8 处是这一路（`ruleBookInfo` 写 `bid`、`ruleToc.chapterUrl` 读），
+ * 另有 4 处写在 `ruleSearch` 里（逐条写同一个键、有损），不做。
+ *
+ * 传入的 `current` 是这次请求跑的组名；只扫**别的组**的规则文本，代价是几次正则。
+ */
+export function crossRequestInfoKeys(source: BookSource, current: string): Set<string> {
+    const keys = new Set<string>()
+    const groups = ['ruleSearch', 'ruleBookInfo', 'ruleToc', 'ruleContent', 'ruleExplore'] as const
+    for (const group of groups) {
+        if (group === current) continue
+        const block = source[group] as Record<string, unknown> | undefined
+        if (!block || typeof block !== 'object') continue
+        for (const value of Object.values(block)) {
+            if (typeof value !== 'string' || value === '') continue
+            for (const hit of findGetDirectives(value)) keys.add(hit.key)
+        }
+    }
+    return keys
 }
 
 /** `@put:{` 的位置（大小写不敏感）；找不到返回 -1 */

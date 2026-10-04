@@ -16,6 +16,7 @@ import {
 import type { BookSource, Chapter, RuleContext, SearchBook } from '../engine/types'
 import { SEARCH_TIMEOUT_MS, UpstreamError, fetchText } from '../lib/http'
 import { buildPlan, sandboxHttp } from './source'
+import { crossRequestInfoKeys } from '../engine/infoVars'
 
 /** 把规则取到的地址补全成绝对地址（书源里相对路径很常见） */
 export function resolveUrl(value: string, base: string): string {
@@ -98,6 +99,9 @@ export async function searchBooks(
         page,
         baseUrl: base,
         http: sandboxHttp(source, base),
+        // 搜索里的 `@put:` 是**逐条**写同一个键（最后一条覆盖前面），本来就是有损的；
+        // 而且搜索没有「这本书」可挂。所以这一组不落库 —— 见 `infoVars.writeInfoVar`
+        infoVarCrossKeys: crossRequestInfoKeys(source, 'ruleSearch'),
     }
     const sel = rootSelection(html)
     const items = await analyzeSelections(sel, rule.bookList, searchCtx)
@@ -173,6 +177,9 @@ export async function fetchBookInfo(
         ...ctx,
         baseUrl: plan.url,
         http: sandboxHttp(source, plan.url),
+        // 详情页里写的变量，目录 / 正文那两次请求可能还要读（线上 8 处）——
+        // 这类键才会落进「书的变量」，见 `infoVars.writeInfoVar`
+        infoVarCrossKeys: crossRequestInfoKeys(source, 'ruleBookInfo'),
     }
 
     /**
@@ -249,6 +256,9 @@ export async function fetchChapters(
     let warning: string | undefined
 
     let currentUrl = tocUrl
+    // 目录这一组里写的跨请求键（比如 `🏛名著阅读` 的 `img`，正文那次请求要读）：
+    // 在循环外算一次；`writeInfoVar` 每个键一次请求只落一次，所以逐页求值也不会写爆
+    const crossKeys = crossRequestInfoKeys(source, 'ruleToc')
     for (let page = 0; page < MAX_TOC_PAGES; page += 1) {
         if (visitedTocUrls.has(currentUrl)) break
         visitedTocUrls.add(currentUrl)
@@ -274,6 +284,7 @@ export async function fetchChapters(
             ...ctx,
             baseUrl: plan.url,
             http: sandboxHttp(source, plan.url),
+            infoVarCrossKeys: crossKeys,
         }
 
         const items = await analyzeSelections(sel, rule.chapterList, tocCtx)
@@ -351,6 +362,7 @@ export async function collectContentPages(
             ...ctx,
             baseUrl: plan.url,
             http: sandboxHttp(source, plan.url),
+            infoVarCrossKeys: crossRequestInfoKeys(source, 'ruleContent'),
         }
 
         const values = await analyzeStrings(sel, rule.content, contentCtx)

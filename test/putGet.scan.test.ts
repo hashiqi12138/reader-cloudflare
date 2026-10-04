@@ -104,6 +104,21 @@ describeOrSkip('`@put:` / `@get:` / `init`（全量账本）', () => {
         expect(n).toBeGreaterThanOrEqual(60)
     })
 
+    it('`@put:` 的值大多是规则；字面量（纯数字 / 以 `{` 开头）单独登记', () => {
+        // 值是按**规则**求值的，所以字面量会被求成空 —— 线上有没有这种情况要能看见。
+        // 判据刻意窄：`[property$=book_name]@content` 也以 `[` 开头，但那是**属性选择器**（规则）
+        const literal: string[] = []
+        for (const p of puts) {
+            const { puts: pairs } = splitPutDirectives(p.rule)
+            for (const pair of pairs) {
+                const v = pair.rule.trim()
+                if (/^-?\d+(\.\d+)?$/.test(v) || v.startsWith('{'))
+                    literal.push(`${p.source} ${p.path} :: ${pair.key}=${v.slice(0, 40)}`)
+            }
+        }
+        expect(literal).toEqual([])
+    })
+
     it('`@get:{键}` 整段才是「段」—— 嵌在文字里的不算（这一条钉住那条分界）', () => {
         expect(asGetSegment('@get:{a}')).toBe('a')
         expect(asGetSegment('编号：@get:{a}')).toBeNull()

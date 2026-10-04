@@ -97,6 +97,24 @@ export interface RuleContext {
     vars?: Record<string, string>
 
     /**
+     * 这次请求里**要落库**的变量键（`@put:` 写、**别的请求**的 `@get:` 读的那些）
+     *
+     * 会话变量只活一次请求，而搜索 / 详情 / 目录 / 正文是四次 —— `ruleBookInfo` 里
+     * `@put:{bid:…}`、`ruleToc.chapterUrl` 里 `@get:{bid}` 这种写法（线上 8 处）就断了。
+     * 由调用方按源算好放进来（见 `infoVars.ts` 的 `crossRequestInfoKeys`），
+     * **只落这几个键**：全量落会把目录那种逐章求值的写法变成几百次 D1 写。
+     */
+    infoVarCrossKeys?: ReadonlySet<string>
+
+    /**
+     * 这次请求已经落过库的变量键（内部记账，调用方不用管）
+     *
+     * 只放在 `RuleContext` 上、不放会话表里：会话表会被整份注入沙箱的 `__sourceVars`
+     * （见 `globals.ts`），把记账信息混进去会让脚本看见一堆莫名的键。
+     */
+    infoVarSaved?: Set<string>
+
+    /**
      * 当前这本书。`@js:` 规则里以 `book` 暴露（`book.name` / `book.author` / …）
      *
      * 线上用得很多：`book.name` 54 处 / 39 源、`book.author` 27 处 / 18 源、

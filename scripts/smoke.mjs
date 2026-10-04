@@ -4535,6 +4535,97 @@ console.log('\n=== 28. `init` 换掉求值的根 ===')
     await call('DELETE', `/api/sources?id=${encodeURIComponent(idBadInit)}`)
 }
 
+console.log('\n=== 29. 跨请求的 `@put:` / `@get:`（走「书的变量」） ===')
+{
+    /**
+     * 会话变量只活一次请求，而搜索 / 详情 / 目录 / 正文是四次。线上 12 处真的跨请求里，
+     * 8 处是这条形状：`ruleBookInfo` 里 `@put:{bid:…}` 存一个站内 id，
+     * `ruleToc.chapterUrl` 里 `@get:{bid}` 取回来拼地址（`⚡📂趣悦小说`、`🎨武芊漫画`、
+     * `🔞Jk小说`、`📂猪猪小说`…）。
+     *
+     * 这里验三件事：
+     *   ① **详情那次请求写下的值，目录那次请求读得到** —— 只能靠「书的变量」穿过去
+     *   ② **换一本书就读不到**（作用域是这本书，不是全局）
+     *   ③ 没传书上下文（`book`）时也读不到 —— 也就不会拿错别人的值
+     */
+    const idCross = `user:${BASE}/cross-put-get`
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(idCross)}`)
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: '跨请求变量（临时）',
+                bookSourceUrl: `${BASE}/cross-put-get`,
+                ruleBookInfo: {
+                    // 详情页里把「目录地址」存进变量表 —— 落库到「这本书」
+                    init: '@put:{bid:".toc-link@href"}',
+                    name: '.book-name@text',
+                    tocUrl: '.toc-link@href',
+                },
+                ruleToc: {
+                    chapterList: 'ul.chapter-list li',
+                    chapterName: 'a@text',
+                    // 目录的章节地址要读详情那次请求写下的变量。
+                    // 用 `##$##…` 追加而不是整条替换：三个 `li` 各是各的地址，
+                    // 整条替换会让三章变成同一个地址，而引擎按地址去重 → 只剩一章
+                    chapterUrl: 'a@href##$##?bid=@get:{bid}',
+                },
+            },
+        ]),
+    )
+
+    const bookCtx = (url) => `&book=${encodeURIComponent(JSON.stringify({ bookUrl: url }))}`
+    const bookUrl = `${BASE}/fixture/book/1`
+    const tocUrl = `${BASE}/fixture/toc/1`
+
+    const detail = await getJson(
+        `/api/book?sourceId=${encodeURIComponent(idCross)}&url=${encodeURIComponent(bookUrl)}${bookCtx(bookUrl)}`,
+    )
+    check(
+        detail.json?.name === '测试小说·甲',
+        '详情这次请求正常跑完（它顺手把站内 id 存了下来）',
+        detail.json?.error ?? JSON.stringify(detail.json?.name),
+    )
+
+    const tocSame = await getJson(
+        `/api/toc?sourceId=${encodeURIComponent(idCross)}&url=${encodeURIComponent(tocUrl)}${bookCtx(bookUrl)}`,
+    )
+    const sameChapters = tocSame.json?.chapters ?? []
+    check(
+        sameChapters.length === 3 &&
+            String(sameChapters[0]?.url ?? '').endsWith('?bid=/fixture/toc/1'),
+        '同一本书：目录读到了详情那次写的变量（`?bid=/fixture/toc/1`）',
+        tocSame.json?.error ?? JSON.stringify(sameChapters[0]?.url),
+    )
+
+    const tocOther = await getJson(
+        `/api/toc?sourceId=${encodeURIComponent(idCross)}&url=${encodeURIComponent(tocUrl)}${bookCtx(`${BASE}/fixture/book/2`)}`,
+    )
+    const otherChapters = tocOther.json?.chapters ?? []
+    check(
+        otherChapters.length === 3 && String(otherChapters[0]?.url ?? '').endsWith('?bid='),
+        '换一本书：读不到别的书写下的变量（作用域是这本书）',
+        JSON.stringify(otherChapters[0]?.url),
+    )
+
+    const tocNoBook = await getJson(
+        `/api/toc?sourceId=${encodeURIComponent(idCross)}&url=${encodeURIComponent(tocUrl)}`,
+    )
+    check(
+        String((tocNoBook.json?.chapters ?? [])[0]?.url ?? '').endsWith('?bid='),
+        '没传书上下文时也读不到（不会拿错别的书的值）',
+        JSON.stringify((tocNoBook.json?.chapters ?? [])[0]?.url),
+    )
+
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(idCross)}`)
+    const leftCross = (await getJson('/api/sources')).json?.sources ?? []
+    check(
+        !leftCross.some((s) => String(s.id).startsWith(`user:${BASE}/cross-put-get`)),
+        '跨请求变量的测试源已清理',
+    )
+}
+
 console.log('\n=== 结果 ===')
 if (failures.length === 0) {
     console.log(

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
     asGetSegment,
+    crossRequestInfoKeys,
     findGetDirectives,
     readInfoVar,
     splitPutDirectives,
@@ -107,5 +108,88 @@ describe('`@get:{…}` 的识别与变量表', () => {
         expect(readInfoVar(ctx, 'a')).toBe('甲')
         // `ctx.vars` 优先（与 globals.ts 注入沙箱时的合并顺序一致）
         expect(readInfoVar({ ...ctx, vars: { a: '乙' } } as RuleContext, 'a')).toBe('乙')
+    })
+})
+
+/**
+ * 跨请求的 put / get（线上 12 处里那 8 处 `ruleBookInfo` 写、`ruleToc` 读）
+ *
+ * 会话变量只活一次请求，而搜索 / 详情 / 目录 / 正文是四次 —— 只有「书的变量」
+ * （`book_variables`，按书存按书取）能穿过去。三条约束都在这一组里钉住。
+ */
+describe('跨请求的变量：书的变量那一路', () => {
+    const source = (rules: Record<string, unknown>) => rules as never
+
+    it('`crossRequestInfoKeys`：算的是**别的组**里被 `@get:` 读的键', () => {
+        const src = source({
+            ruleBookInfo: { name: '@get:{n}', tocUrl: 'x@get:{bid}' },
+            ruleToc: { chapterUrl: 'https://x/?b=@get:{bid}', chapterName: 'text@get:{n}' },
+            ruleContent: { content: '.c@html' },
+        })
+        // 详情这次请求：别的组（目录）读了 bid 与 n
+        expect([...crossRequestInfoKeys(src, 'ruleBookInfo')].sort()).toEqual(['bid', 'n'])
+        // 正文这次请求：别的组（详情）同样读了这两个 —— 只要**别的组会读**就得落库，
+        // 因为落库是为了让别人读得到；这一组自己读不读无所谓
+        expect([...crossRequestInfoKeys(src, 'ruleContent')].sort()).toEqual(['bid', 'n'])
+        // 没有任何一组用 `@get:` 时才是空集
+        expect([
+            ...crossRequestInfoKeys(source({ ruleContent: { content: '.c@html' } }), 'x'),
+        ]).toEqual([])
+    })
+
+    it('读：会话里没有时退到「书的变量」', () => {
+        const ctx = { baseUrl: '', bookVars: { bid: '123' } } as RuleContext
+        expect(readInfoVar(ctx, 'bid')).toBe('123')
+        // 会话里有就先用会话的（本次请求刚算出来的更新）
+        const session = {
+            module: Promise.resolve({}),
+            queue: Promise.resolve(),
+            vars: { bid: '456' },
+        }
+        expect(readInfoVar({ ...ctx, sandbox: session } as unknown as RuleContext, 'bid')).toBe(
+            '456',
+        )
+    })
+
+    it('写：跨请求的键会落库，且一个键一次请求只落一次', () => {
+        const saved: Array<[string, string]> = []
+        const ctx = {
+            baseUrl: '',
+            bookVars: {},
+            infoVarCrossKeys: new Set(['bid']),
+            persistBookVariable: (k: string, v: string) => saved.push([k, v]),
+        } as unknown as RuleContext
+
+        writeInfoVar(ctx, 'bid', '123')
+        writeInfoVar(ctx, 'bid', '999') // 同键第二次：不落库（取第一个值）
+        writeInfoVar(ctx, 'other', 'x') // 不在跨请求集合里：不落库
+        expect(saved).toEqual([['bid', '123']])
+        // 会话表照旧更新（本次请求内后续求值读到的是最新的）
+        expect(readInfoVar(ctx, 'bid')).toBe('999')
+    })
+
+    it('写：库里已经是这个值时不重复落库（目录逐章求值经常给出同一个值）', () => {
+        const saved: Array<[string, string]> = []
+        const ctx = {
+            baseUrl: '',
+            bookVars: { img: 'https://a/1.jpg' },
+            infoVarCrossKeys: new Set(['img']),
+            persistBookVariable: (k: string, v: string) => saved.push([k, v]),
+            sandbox: { module: Promise.resolve({}), queue: Promise.resolve(), vars: {} },
+        } as unknown as RuleContext
+        writeInfoVar(ctx, 'img', 'https://a/1.jpg')
+        expect(saved).toEqual([])
+    })
+
+    it('写：没有书上下文（搜索）时不落库', () => {
+        const saved: Array<[string, string]> = []
+        const ctx = {
+            baseUrl: '',
+            infoVarCrossKeys: new Set(['bookid']),
+            // 搜索路由没有 persistBookVariable
+        } as unknown as RuleContext
+        writeInfoVar(ctx, 'bookid', '1')
+        expect(saved).toEqual([])
+        expect(readInfoVar(ctx, 'bookid')).toBe('1')
     })
 })
