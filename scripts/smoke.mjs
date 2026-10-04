@@ -853,6 +853,24 @@ console.log('\n=== 6. 前端静态资源 ===')
         '/api/sources 带上对不上的 ETag 时照旧回完整列表',
         `status=${listStale.status}`,
     )
+
+    /**
+     * 版本与更新记录
+     *
+     * 前端页脚与「关于」页都读它。两处对不上**不会报错** —— 界面只是显示一个不对的号，
+     * 而人对着错的版本排查是最亏的，所以这里直接比 `changelog[0]` 与 `version`。
+     */
+    const info = await getJson('/api/version')
+    check(
+        info.status === 200 && typeof info.json?.version === 'string' && info.json.version !== '',
+        '/api/version 带上了版本号',
+        `status=${info.status} version=${info.json?.version}`,
+    )
+    check(
+        info.json?.changelog?.length > 0 && info.json.changelog[0].version === info.json.version,
+        '更新记录非空，且最新一条与当前版本号一致',
+        `条数=${info.json?.changelog?.length ?? 0} 最新=${info.json?.changelog?.[0]?.version}`,
+    )
 }
 
 console.log('\n=== 7. 账号、书架、阅读进度与书签 ===')
