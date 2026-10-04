@@ -75,6 +75,29 @@ export function fixtureSource(origin: string): RegisteredSource {
 }
 
 /**
+ * 同一个测试站点，改用 **POST 表单** 提交搜索关键字
+ *
+ * 规则与 CSS 版**完全相同**，只换搜索地址 —— 这样「多方言对照」那一组断言仍然要求
+ * 它与别的源给出逐字相同的结果，而它走的却是完全不同的请求形态（POST + 表单体）。
+ *
+ * 它守的是「带请求体必须自己声明 Content-Type」：测试站点那边**故意不宽容**，
+ * 不是 `application/x-www-form-urlencoded` 就当作没收到参数（返回空结果页），
+ * 与 PHP 的 `$_POST` 一致。少了这一行，这条源就会搜到 0 本 —— 而这个失败是静默的，
+ * 正是它在线上藏了那么久的原因（见 src/lib/http.ts 的 requestHeaders）。
+ */
+export function fixturePostFormSource(origin: string): RegisteredSource {
+    return {
+        ...fixtureSource(origin),
+        id: 'builtin:fixture-post-form',
+        sortOrder: 12,
+        bookSourceName: '内置测试站点（POST 表单搜索）',
+        bookSourceComment:
+            '同一个测试站点，搜索走 POST 表单；用来守住「带请求体必须声明 Content-Type」',
+        searchUrl: `${origin}/fixture/search-post,{"method":"POST","body":"q={{key}}"}`,
+    }
+}
+
+/**
  * 同一个测试站点，改用 XPath 规则
  *
  * 存在的意义是**对照验证**：两套方言打同一个页面，提取结果必须完全一致。
@@ -627,6 +650,7 @@ export function builtinSources(origin: string): RegisteredSource[] {
         fixtureAudioNoRuleSource(origin),
         fixtureFileSource(origin),
         fixtureExploreSource(origin),
+        fixturePostFormSource(origin),
     ]
 }
 

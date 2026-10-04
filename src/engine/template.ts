@@ -84,9 +84,34 @@ export function hasRuleSyntax(skeleton: string): boolean {
     return false
 }
 
-/** 匹配一段模板。**每次新建**：带 `lastIndex` 的全局正则在并发请求之间会互相踩 */
+/**
+ * 匹配一段模板。**每次新建**：带 `lastIndex` 的全局正则在并发请求之间会互相踩
+ *
+ * 两种形态：
+ *   `{{...}}`   —— 主线，线上 939 处
+ *   `{$.路径}`  —— **单花括号**。线上 63 处、28 个源（磨铁中文的
+ *                  `/pc/book/{$.id}/catalog`、新小书亭的 `<br>{$.introduction}`、
+ *                  新人漫画的 `/worksinfos/{$.attributes.wid}`）。这些字段旧实现是
+ *                  **静默取空**：整段被当成选择器去解析。
+ *
+ * 单花括号**只认「内容以 `$.` 开头」这一种**，不放宽成任意 `{...}`：
+ * 单花括号在别处太常见了 —— JSON、CSS 的 `{color:red}`、以及 JS 的模板串。
+ * 尤其 `${...}` 必须排除（`(?<!\$)`，注意它要写在 `\{` **前面** ——
+ * 写在后面的话，回看的那个字符是 `{` 自己，等于没判）：
+ * `` `${$.id}` `` 是货真价实的 JS 模板串，把它当字段模板展开会把脚本改坏。
+ */
 export function templatePattern(): RegExp {
-    return /\{\{([\s\S]*?)\}\}/g
+    return /\{\{([\s\S]*?)\}\}|(?<!\$)\{(\$[^{}]*)\}/g
+}
+
+/** 取一段模板里的内容 —— 两个分支各是一个捕获组 */
+export function templateBody(match: RegExpExecArray): string {
+    return match[1] ?? match[2] ?? ''
+}
+
+/** 规则里有没有模板（两种形态都算）。用来走「有模板」那条求值路径 */
+export function hasTemplate(text: string): boolean {
+    return templatePattern().test(text)
 }
 
 /**

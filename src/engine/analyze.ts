@@ -24,8 +24,10 @@ import type { SandboxGetElements, SandboxGetString, SandboxLimits } from './js'
 import {
     classifyTemplate,
     hasRuleSyntax,
+    hasTemplate,
     skeletonOf,
     stripRuleMarker,
+    templateBody,
     templatePattern,
 } from './template'
 import { splitJsTail, splitRuleText } from './ruleText'
@@ -98,8 +100,12 @@ function splitJsBlocks(rule: string): Array<{ kind: 'selector' | 'js'; text: str
     return parts.map((p) => (p.kind === 'selector' ? { kind: p.kind, text: p.text.trim() } : p))
 }
 
-/** 判断这条规则该用哪种选择器 */
-function detectKind(rule: string): {
+/**
+ * 判断这条规则该用哪种选择器
+ *
+ * 导出只为**能被单测逐条钉住**（判错的后果是静默走错解析器，见 test/ruleKind.test.ts）。
+ */
+export function detectKind(rule: string): {
     kind: 'css' | 'jsoup' | 'json' | 'xpath' | 'allinone'
     body: string
 } {
@@ -149,8 +155,10 @@ function isJsoupShorthand(rule: string): boolean {
     // class.x / id.x / tag.x / text.x（按文字找元素）/ children，可带 `-` 反向前缀
     if (/^-?(?:class|id|tag|text|children)(?:\.|$)/.test(selector)) return true
 
-    // 裸标签名，可带位置下标：`a`、`a.0`、`a[0]`
-    return /^[A-Za-z][\w:-]*(?:\.-?\d+|\[[^\]]*\])?$/.test(selector)
+    // 裸标签名，可带位置下标：`a`、`a.0`、`a[0]`、以及 `dd.2:3`（点号后面再跟 `:N`，
+    // 线上 📂阳光小说 的 kind —— 以前这里不认，整条规则被当成 CSS 去解析，
+    // 报出来的是「CSS 选择器无效」，方向完全指错）
+    return /^[A-Za-z][\w:-]*(?:\.-?\d+(?::-?[\d%]*)?|\[[^\]]*\])?$/.test(selector)
 }
 
 /** 拆分 `@css:` 规则里的选择器与取值：`@css:div.item a@href` → (`div.item a`, `href`) */
@@ -378,7 +386,7 @@ async function expandTemplates(
         const plain = rule.slice(last, match.index)
         expanded += plain
         skeleton += plain
-        expanded += await evalTemplate(sel, match[1] ?? '', ctx)
+        expanded += await evalTemplate(sel, templateBody(match), ctx)
         last = match.index + match[0].length
     }
     const tail = rule.slice(last)
@@ -402,7 +410,10 @@ export async function analyzeStrings(
     const trimmed = rule.trim()
     if (trimmed === '') return []
 
-    if (!trimmed.includes('{{')) return evalRule(sel, trimmed, null, ctx)
+    // 两种模板形态都要走「有模板」这条路（`{{...}}` 与单花括号的 `{$.路径}`）：
+    // 只用 `includes('{{')` 判断的话，`/pc/book/{$.id}/catalog` 这种会被当纯选择器
+    // 直接求值，结果是**静默取空**
+    if (!hasTemplate(trimmed)) return evalRule(sel, trimmed, null, ctx)
 
     // 模板先展开：`{{}}` 里可能有 `||`、`##`，先展开才不会把它们当成分隔符
     // 把规则切碎（`{{$.a||$.b}}`、`{{$.desc##x##y}}` 都是真实写法）

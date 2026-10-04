@@ -88,6 +88,12 @@ export async function getUserSource(
  *   单是解析这一步就可能吃掉免费计划那 10 ms 的 CPU 预算）
  * - 排序把「连续失败 5 次以上」的源放到最后 —— 额度先花在还活着的源上，
  *   但它们**不会被永久跳过**（网络抖一下不该让一个源永远出局）
+ *
+ * 排序里 `(last_ok_at = 0)` 这一项是**正信号**，别删：光按 `fail_streak` 排的话，
+ * 线上 816 个源里有 810 个是「从没搜过」（两个计数都是 0），排序就退化成了导入顺序 ——
+ * 用户点「继续加载」只是在同一个角落里按源名往下翻，好的源（真的搜到过书的那几个）
+ * 混在中间，翻很久也碰不到。把「搜到过书的」提到没试过的前面，第一页就有结果。
+ * 组内再按最近成功倒序：刚验证过还能用的排最前。
  */
 export async function listUserSourcePage(
     db: D1Database,
@@ -98,7 +104,7 @@ export async function listUserSourcePage(
         .prepare(
             `SELECT ${SELECT_COLUMNS} FROM sources
              WHERE enabled = 1
-             ORDER BY (fail_streak >= 5), fail_streak, sort_order, name
+             ORDER BY (fail_streak >= 5), (last_ok_at = 0), fail_streak, last_ok_at DESC, sort_order, name
              LIMIT ? OFFSET ?`,
         )
         .bind(limit, offset)

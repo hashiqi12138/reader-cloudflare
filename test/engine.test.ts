@@ -49,6 +49,15 @@ describe('JSOUP 默认规则解析', () => {
         ])
     })
 
+    it('点号位置后面还能跟 `:N`（`dd.2:3`）—— 与方括号写法同解析', () => {
+        // 线上 📂阳光小说 的 ruleSearch.kind。以前这里解析不出来，整条规则被判为 CSS，
+        // 报的是「CSS 选择器无效」：错误信息把方向指到了 CSS 上
+        expect(parseJsoupRule('dd.2:3@text')).toEqual(parseJsoupRule('dd[2:3]@text'))
+        expect(parseJsoupRule('dd.2:3@text').steps).toEqual([
+            { by: 'tag', name: 'dd', index: { picks: [[2, 3, null]] } },
+        ])
+    })
+
     it('解析区间与排除位置', () => {
         expect(parseJsoupRule('tag.div[-1:0]').steps[0]!.index).toEqual({ picks: [[-1, 0, null]] })
         expect(parseJsoupRule('tag.li[!0,2]').steps[0]!.index).toEqual({ excludes: [0, 2] })

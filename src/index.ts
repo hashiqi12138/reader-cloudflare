@@ -1442,7 +1442,8 @@ export default {
 
         // 内置测试站点：默认关闭，只在本地开发与 CI 里打开
         if (env.ENABLE_FIXTURE === 'true') {
-            const handled = handleFixture(request, url)
+            // 测试站点里有需要读请求体的端点（POST 表单搜索），所以是异步的
+            const handled = await handleFixture(request, url)
             if (handled) return handled
         }
 

@@ -64,12 +64,24 @@ export function sourcePayload(
 
 /** 沙箱里与书源有关的全局变量 */
 export function sourceGlobals(ctx: RuleContext): Record<string, unknown> {
-    const variables = ctx.vars ?? {}
+    const variables = { ...sessionVars(ctx), ...(ctx.vars ?? {}) }
     return {
         __source: sourcePayload(ctx.source, ctx.key ?? ''),
         __sourceVars: JSON.stringify(variables),
         __infoMap: ctx.infoMap ?? {},
     }
+}
+
+/**
+ * 本次请求里已经写过的书源变量
+ *
+ * `java.put` / `source.setVariable` 写进会话（见 `SandboxSession.vars`），
+ * 下一次求值再把它们注回沙箱 —— 书源里「搜索脚本先存、字段规则后读」靠的就是这一步。
+ * 会话不存在（比如单测里只调 sourceGlobals）时给空表，行为与以前一样。
+ */
+function sessionVars(ctx: RuleContext): Record<string, string> {
+    const session = ctx.sandbox as { vars?: Record<string, string> } | undefined
+    return session?.vars ?? {}
 }
 
 /**

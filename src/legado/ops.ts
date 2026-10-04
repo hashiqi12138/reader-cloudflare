@@ -13,7 +13,7 @@ import {
     type Selection,
 } from '../engine/analyze'
 import type { BookSource, Chapter, RuleContext, SearchBook } from '../engine/types'
-import { UpstreamError, fetchText } from '../lib/http'
+import { SEARCH_TIMEOUT_MS, UpstreamError, fetchText } from '../lib/http'
 import { buildPlan, sandboxHttp } from './source'
 
 /** 把规则取到的地址补全成绝对地址（书源里相对路径很常见） */
@@ -86,7 +86,8 @@ export async function searchBooks(
 
     const page = ctx.page ?? 1
     const plan = await buildPlan(source.searchUrl, source, { ...ctx, key: keyword, page })
-    const html = await fetchText(plan)
+    // 搜索用更短的超时：一页几个源并发，整页的等待等于最慢的那个源（见 lib/http.ts）
+    const html = await fetchText({ ...plan, timeoutMs: SEARCH_TIMEOUT_MS })
 
     const base = plan.url
     // 把取网能力一并注入：书源脚本里的 java.ajax 需要它，缺了会明确报错

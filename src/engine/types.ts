@@ -316,4 +316,11 @@ export interface FetchPlan {
     charset: string
     /** 需要 WebView 渲染的站点，本引擎不支持，会明确报错而不是静默返回空 */
     webView: boolean
+    /**
+     * 这次请求的超时（毫秒），不写就用取网层的默认值
+     *
+     * 之所以放在计划里而不是写死：**搜索要单独收紧**。搜索是一页几个源并发跑的，
+     * 整页的等待取决于最慢的那个源，所以它的超时该比「读一章正文」短得多。
+     */
+    timeoutMs?: number
 }

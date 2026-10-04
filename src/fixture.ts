@@ -111,6 +111,40 @@ ${items}
 }
 
 /**
+ * **POST 表单搜索**：专门守住「带请求体必须声明 Content-Type」这一条
+ *
+ * 真实站点绝大多数是 PHP，而 PHP 只在 `application/x-www-form-urlencoded`（或
+ * multipart）下才把请求体填进 `$_POST`；`fetch` 对字符串 body 默认补的是
+ * `text/plain;charset=UTF-8`，于是站点收到的是「没有关键字」，返回一个**空结果页** ——
+ * 引擎那侧的表现是「搜索成功、0 条、不报错」，用户看到的是「这个源搜不到书」。
+ *
+ * 这不是推理出来的：`curl -X POST -H 'Content-Type: text/plain' -d 'a=1&b=2'
+ * https://httpbin.org/post` 回的是 `"form": {}`，换成表单类型才有 `"form": {...}`。
+ * 线上 320 个源（39%）用的是 POST 搜索，其中只有 4 个自己声明了 Content-Type。
+ *
+ * 所以这个端点**刻意照 PHP 的样子写**：不是表单类型就当作没有参数，返回空列表 ——
+ * 而不是宽容地拿原始 body 去解析。少了这个「不宽容」，用例就守不住这个坑。
+ */
+async function formSearchPage(request: Request): Promise<string> {
+    const contentType = (request.headers.get('content-type') ?? '').toLowerCase()
+    const isForm = contentType.startsWith('application/x-www-form-urlencoded')
+
+    if (!isForm) {
+        // 没收到参数时的样子：页面结构完整、结果列表为空
+        return page(
+            '搜索：',
+            `<h1>搜索结果</h1>
+<div class="search-meta" data-keyword="" data-page="1">共 0 条</div>
+<div class="result-list">
+</div>`,
+        )
+    }
+
+    const keyword = new URLSearchParams(await request.text()).get('q') ?? ''
+    return fixtureSearchPage(keyword, 1)
+}
+
+/**
  * 发现页（探索）
  *
  * 每个分类是一页书目：第 1 页底部有「下一页」，翻到最后一页就没有 ——
@@ -530,7 +564,7 @@ export function fixtureSearchJson(keyword: string, pageNo: number): string {
 }
 
 /** 路由分派；返回 null 表示不是本站点的路径 */
-export function handleFixture(request: Request, url: URL): Response | null {
+export async function handleFixture(request: Request, url: URL): Promise<Response | null> {
     const pathname = url.pathname
     if (!pathname.startsWith('/fixture/')) return null
 
@@ -545,6 +579,9 @@ export function handleFixture(request: Request, url: URL): Response | null {
             ),
         )
     }
+
+    // POST 表单搜索：照 PHP 的行为写，见 formSearchPage 的说明
+    if (pathname === '/fixture/search-post') return html(await formSearchPage(request))
 
     const book = /^\/fixture\/book\/(\w+)$/.exec(pathname)
     if (book) return html(fixtureBookPage(book[1]!))

@@ -111,6 +111,20 @@ export interface SandboxSession {
     module: Promise<QuickJSAsyncWASMModule>
     /** 本会话内的串行链（只在本请求的上下文里串，不会跨请求） */
     queue: Promise<unknown>
+    /**
+     * **会话级书源变量**：`java.put` / `java.get(key)` / `source.setVariable` 共用这一张表
+     *
+     * 为什么要有它：书源里「先存后取」是常规写法 —— 搜索地址的脚本里
+     * `java.put('单', …)` 记下这次搜索的形态，同一个源后面的字段规则再
+     * `java.get('单')` 读回来分情况处理。变量只活在单次求值里的话，后一次读到空串，
+     * 规则会**静默**走到另一条分支。语料上这类调用是 130 处 `java.put` + 141 处一参
+     * `java.get`，不是边角。
+     *
+     * 生命周期刻意与 cookie/cache 不同（那两个是「单次求值」，见 GLOBALS_PRELUDE 的说明）：
+     * 变量是**按请求**活的，因为要跨求值。仍然**不落库、不跨请求** ——
+     * 真正的跨请求持久化需要一张按书源隔离的表，那是另一件事。
+     */
+    vars: Record<string, string>
 }
 
 export function createSandboxSession(): SandboxSession {
@@ -123,6 +137,7 @@ export function createSandboxSession(): SandboxSession {
             return module
         },
         queue: Promise.resolve(),
+        vars: {},
     }
 }
 
@@ -152,6 +167,16 @@ export class SandboxError extends Error {
  * 底层会挂起脚本去发请求。
  */
 const JAVA_PRELUDE = `
+// ---------------------------------------------------------------- 书源变量
+//
+// java.put(k, v) / java.get(k) / source.setVariable 共用这一张表。
+// 求值开始时由宿主注入（__sourceVars 里带着本次请求前面几次求值写过的值），
+// 求值结束时宿主再把它收回去 —— 「搜索脚本先存、字段规则后读」就靠这一步跨过去。
+// 注意：这一段是模板字符串的一部分，注释里**不能写反引号**。
+var __varsOut = (function () {
+  try { return JSON.parse(String(globalThis.__sourceVars || '{}')) || {} } catch (e) { return {} }
+})()
+
 var java = {
   base64Encode: function (s) { return __host.b64encode(String(s)) },
   base64Decode: function (s) { return __host.b64decode(String(s)) },
@@ -297,7 +322,22 @@ var java = {
     return res.body
   },
   ajax: function (url) { return java.__req({ url: String(url) }) },
-  get: function (url, headers) { return java.__req({ url: String(url), headers: headers || {} }) },
+  // java.get(key) 读变量、java.get(url, headers) 取网 —— Legado 里是**同名两个重载**，
+  // 所以这里按**参数个数**分派，而不是猜参数像不像地址。
+  // 语料上：一参 141 处全是变量名（java.get('bid')、java.get("单")），
+  // 二参 35 处才是地址（java.get(baseUrl, headers)）。早先一律当取网，
+  // 于是 if (java.get("单") == '') 会去**请求一个叫「单」的地址**：必然失败，
+  // 而且报出来的是一个与书源毫无关系的网络错误。
+  get: function (a, b) {
+    if (arguments.length >= 2) return java.__req({ url: String(a), headers: b || {} })
+    var v = __varsOut[String(a)]
+    return v === undefined || v === null ? '' : String(v)
+  },
+  // 存变量。线上 130 处 —— 本引擎以前**根本没有这个函数**，所以每一处都是
+  // TypeError: not a function（QuickJS 还说不出是哪一个）。
+  put: function (key, value) {
+    __varsOut[String(key)] = value === undefined || value === null ? '' : String(value)
+  },
   post: function (url, body, headers) {
     return java.__req({ url: String(url), method: 'POST', body: String(body), headers: headers || {} })
   },
@@ -467,6 +507,48 @@ var java = {
   queryTTF: function () { throw new Error('本引擎不支持 java.queryTTF（字体混淆）') },
   alert: function (s) { __host.log('[alert] ' + String(s)) },
   logType: function (s) { __host.log(String(s)) },
+
+  // ---------------------------------------------------------------- 语料里在调、但没法实现
+  //
+  // 这些是扫全量书源**数出来**的（java.xxx( 的分布），都属于「需要 App / Android /
+  // 浏览器」的能力。给它们一个**带名字**的报错，因为 QuickJS 只会说
+  // TypeError: not a function，不说哪一个 —— 脚本动辄几十行，照那句话定位不到。
+  //
+  // 为什么是报错而不是返回空：这里没有一个「安全的中性值」。拿空 UA 去拼签名、
+  // 拿空验证码去登录，错误都会跑到下游，症状离原因更远。宁可在这里失败，
+  // 让报错直接说出缺的是哪一个能力。
+  //
+  // **唯一故意留空的是 java.ajaxTestAll**：🔞 Linpx 与 🔞兽人小说站用它做能力探测
+  // （typeof java.ajaxTestAll === 'function'）。给它一个函数，探测就会从
+  // 「没有这个能力 → 走另一条路」变成「有 → 调用 → 抛错」，把本来能跑的源弄坏。
+  // 不确定的成员，缺着比乱补安全。
+  androidId: function () { throw new Error('java.androidId 需要 Android 运行时，本引擎没有') },
+  getVerificationCode: function () {
+    throw new Error('java.getVerificationCode 需要图形验证码界面，本引擎没有')
+  },
+  showBrowser: function () { throw new Error('java.showBrowser 需要浏览器界面，本引擎没有') },
+  head: function () { throw new Error('java.head 本引擎没有实现（现有的是 ajax / get / post）') },
+  getCookie: function () { throw new Error('java.getCookie 本引擎没有实现（用 cookie.getCookieMap 代替）') },
+  getStrResponse: function () {
+    throw new Error('java.getStrResponse 需要 App 的响应对象，本引擎没有')
+  },
+  HMacBase64: function () { throw new Error('java.HMacBase64 本引擎没有实现') },
+  ruleUrl: function () { throw new Error('java.ruleUrl 需要 App 的界面跳转，本引擎没有') },
+  webview: function () { throw new Error('本引擎不支持 java.webview（需要 WebView 渲染）') },
+
+  // 当前使用的 UA。getWebViewUA 之外的两个别名，线上另有 4 处 java.getUserAgent
+  getUserAgent: function () { return java.getWebViewUA() },
+  getUA: function () { return java.getWebViewUA() },
+
+  // 字节数组 → 字符串（按 UTF-8），strToBytes 的反向。线上 5 处（丁丁小说等）
+  bytesToStr: function (bytes) {
+    var esc = ''
+    for (var i = 0; i < bytes.length; i++) {
+      var b = Number(bytes[i]) & 255
+      esc += '%' + (b < 16 ? '0' : '') + b.toString(16)
+    }
+    try { return decodeURIComponent(esc) } catch (e) { return esc }
+  },
 }
 `
 
@@ -508,11 +590,9 @@ function __toJavaMap(text) {
 
 var source = (function () {
   var data = globalThis.__source || {}
-  var vars = {}
-  try {
-    var raw = globalThis.__sourceVars
-    if (raw) vars = JSON.parse(String(raw)) || {}
-  } catch (e) { vars = {} }
+  // 与 java.put / java.get(key) 共用同一张变量表（见 JAVA_PRELUDE 开头的说明）——
+  // 两条路各存一份的话，「脚本里 put、规则里 getVariable」就会读不到
+  var vars = globalThis.__varsOut || {}
 
   var obj = {}
   for (var k in data) {
@@ -1018,7 +1098,9 @@ export async function runInSandbox(
      * 都应当从 `RuleContext.sandbox` 传进来。
      */
     const session = limits.session ?? createSandboxSession()
-    return withSession(session, () => executeInSandbox(session.module, code, globals, limits))
+    return withSession(session, () =>
+        executeInSandbox(session.module, code, globals, limits, session),
+    )
 }
 
 async function executeInSandbox(
@@ -1026,6 +1108,7 @@ async function executeInSandbox(
     code: string,
     globals: Record<string, unknown>,
     limits: SandboxLimits,
+    session: SandboxSession,
 ): Promise<unknown> {
     const timeoutMs = limits.timeoutMs ?? DEFAULT_TIMEOUT_MS
     const memoryLimit = limits.memoryLimitBytes ?? DEFAULT_MEMORY_LIMIT
@@ -1352,7 +1435,35 @@ async function executeInSandbox(
         }
         throw err
     } finally {
+        // 变量要在**销毁 VM 之前**收回：书源里「搜索脚本先 put、后面的规则再 get」
+        // 全靠这一步跨过两次求值（见 SandboxSession.vars）
+        collectSourceVars(vm, session)
         releaseHostBridge(vm, runtime)
+    }
+}
+
+/**
+ * 把这次求值里更新过的书源变量收回到会话
+ *
+ * 读取端是预置脚本里的 `globalThis.__varsOut`（一张普通对象表）。
+ * 任何一步失败都只能咽掉 —— 这里发生在求值之后，结果或错误都已经定了，
+ * 再抛一个「收变量失败」只会把真正的失败原因盖掉。
+ */
+function collectSourceVars(vm: QuickJSAsyncContext, session: SandboxSession): void {
+    try {
+        const handle = vm.evalCode('JSON.stringify(globalThis.__varsOut || {})')
+        if (handle.error) {
+            handle.error.dispose()
+            return
+        }
+        const text = String(vm.dump(handle.value) ?? '')
+        handle.value.dispose()
+        const parsed = JSON.parse(text) as Record<string, unknown>
+        for (const key of Object.keys(parsed)) {
+            session.vars[key] = String(parsed[key] ?? '')
+        }
+    } catch {
+        /* 收不回来不影响这次求值的结果 */
     }
 }
 

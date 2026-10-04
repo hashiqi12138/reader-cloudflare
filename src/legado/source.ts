@@ -145,6 +145,41 @@ export function planFromResolvedUrl(
 }
 
 /**
+ * 请求选项里的 `{{}}` 也要展开
+ *
+ * 这一条漏了很久：URL 段一直是展开的，选项段却没有。于是
+ * `"body":"searchkey={{key}}&page={{page}}"` —— Legado「URL 参数详解」里 POST 的标准写法 ——
+ * 会**原样把 `{{key}}` 这四个字符发给站点**。站点按关键字 `{{key}}` 去查，自然一条也没有，
+ * 而引擎那侧是「跑通、0 条、不报错」：正好是「书源搜不到书」最常见的那个样子。
+ *
+ * 只处理字符串字段，而且**放在拆出选项之后**做：要做的是「让选项里的模板生效」，
+ * 不是「把选项 JSON 整段丢进模板解析器」—— 关键字里出现一个 `,{` 就足以把选项切断。
+ */
+async function resolveOptionsTemplate(
+    options: Partial<UrlOptions>,
+    ctx: RuleContext,
+): Promise<Partial<UrlOptions>> {
+    let out = options
+
+    if (out.body !== undefined && out.body.includes('{{')) {
+        out = { ...out, body: await resolveTemplate(out.body, ctx) }
+    }
+
+    if (out.headers) {
+        const headers = out.headers
+        if (Object.keys(headers).some((name) => headers[name]!.includes('{{'))) {
+            const resolved: Record<string, string> = {}
+            for (const name of Object.keys(headers)) {
+                resolved[name] = await resolveTemplate(headers[name]!, ctx)
+            }
+            out = { ...out, headers: resolved }
+        }
+    }
+
+    return out
+}
+
+/**
  * 把一条书源 URL 变成可直接执行的请求计划
  *
  * @param rawUrl 书源里的原始 URL 文本（可能带 `{{}}` 与请求选项）
@@ -218,7 +253,8 @@ export async function buildPlan(
     } else {
         const split = splitUrlAndOptions(rawUrl)
         resolvedUrl = await resolveTemplate(split.url, templateCtx)
-        options = split.options
+        // 选项里的 `{{}}` 同样要展开：POST 的关键字基本都写在 body 里（见上面的说明）
+        options = await resolveOptionsTemplate(split.options, templateCtx)
     }
 
     const plan = planFromResolvedUrl(resolvedUrl, source, source.bookSourceUrl)
@@ -288,6 +324,9 @@ export function sandboxHttp(source: BookSource, baseUrl: string): SandboxHttp {
                 ...plan,
                 method: (options.method ?? urlOptions.method ?? 'GET').toUpperCase(),
                 body: options.body ?? urlOptions.body,
+                // 书源里 `,{"charset":"gbk"}` 指的是**响应编码**（见 Legado 的「URL 参数详解」），
+                // 这里以前漏掉了它，凡是走 java.ajax/java.post 的 GBK 站点都会拿到乱码
+                charset: urlOptions.charset ?? plan.charset,
                 headers: {
                     ...plan.headers,
                     ...(urlOptions.headers ?? {}),

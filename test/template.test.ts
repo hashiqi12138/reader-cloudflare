@@ -13,7 +13,9 @@ import { describe, expect, it } from 'vitest'
 import {
     classifyTemplate,
     hasRuleSyntax,
+    hasTemplate,
     stripRuleMarker,
+    templateBody,
     templatePattern,
 } from '../src/engine/template'
 
@@ -150,5 +152,59 @@ describe('模板正则', () => {
         first.exec('{{a}}')
         expect(first.lastIndex).toBeGreaterThan(0)
         expect(second.lastIndex).toBe(0)
+    })
+})
+
+/**
+ * 单花括号的 `{$.路径}`
+ *
+ * 线上 63 处、28 个源（磨铁中文 `/pc/book/{$.id}/catalog`、新小书亭
+ * `<br>{$.introduction}`、新人漫画 `/worksinfos/{$.attributes.wid}`）。
+ * 旧实现把它整段当选择器解析 → **静默取空**。
+ *
+ * 这里同时钉住「不能放宽」的另一面：单花括号在别处太常见，认错了会改坏别的东西。
+ */
+describe('单花括号模板', () => {
+    const bodies = (text: string): string[] =>
+        [...text.matchAll(templatePattern())].map((m) => templateBody(m as RegExpExecArray))
+
+    it('`{$.路径}` 认成模板（真实书源里的三种形态）', () => {
+        expect(bodies('/pc/book/{$.id}/catalog')).toEqual(['$.id'])
+        expect(bodies('<br>{$.introduction}')).toEqual(['$.introduction'])
+        expect(bodies('/worksinfos/{$.attributes.wid}?include=chapters')).toEqual([
+            '$.attributes.wid',
+        ])
+    })
+
+    it('一条规则里的多个单花括号模板各自成段', () => {
+        expect(bodies('/pc/book/{$.id}/catalog||/pc/book/{$.bookId}/catalog')).toEqual([
+            '$.id',
+            '$.bookId',
+        ])
+    })
+
+    it('双花括号优先：`{{$.id}}` 不会被切成一个单花括号', () => {
+        expect(bodies('{{$.id}}')).toEqual(['$.id'])
+    })
+
+    it('JS 模板串里的 `${...}` 不算 —— 那本来就是脚本代码', () => {
+        // 少年梦阅读 / 得间小说就是这种写法，展开它等于把脚本改坏
+        expect(bodies('`BookID=${$.data.id}&UserID=${uid}`')).toEqual([])
+        expect(bodies('`${host}/category?categoryId=${$.categoryId}`')).toEqual([])
+    })
+
+    it('JSON、CSS、以及不以 `$.` 开头的花括号都不算', () => {
+        // JSON 里只有那对双花括号是模板，外层的 `{` 一动不能动
+        expect(bodies('{"method":"POST","body":"q={{key}}"}')).toEqual(['key'])
+        expect(bodies('.x{color:red}')).toEqual([])
+        expect(bodies('{key}')).toEqual([])
+        expect(bodies('{{java.put("a",1)}}')).toEqual(['java.put("a",1)'])
+    })
+
+    it('`hasTemplate` 对两种形态都成立（它决定走不走模板那条求值路径）', () => {
+        expect(hasTemplate('{{$.id}}')).toBe(true)
+        expect(hasTemplate('/pc/book/{$.id}/catalog')).toBe(true)
+        expect(hasTemplate('h1@text')).toBe(false)
+        expect(hasTemplate('`${$.id}`')).toBe(false)
     })
 })

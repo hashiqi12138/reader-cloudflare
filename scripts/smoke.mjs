@@ -130,6 +130,28 @@ if (list.length === 0) {
     process.exit(1)
 }
 
+/**
+ * POST 表单搜索：守住「带请求体必须声明 Content-Type」
+ *
+ * 测试站点这个端点照 PHP 的样子写 —— 不是 `application/x-www-form-urlencoded` 就
+ * 当作没收到参数、直接返回空结果页。所以这一条一旦红了，说明引擎发 POST 时又没带上
+ * 那个头：线上 320 个源（39%）是 POST 搜索，全都会变成「跑通但 0 条」且不报错。
+ */
+const formSearchSource = list.find((s) => s.id === 'builtin:fixture-post-form')
+check(Boolean(formSearchSource), '内置 POST 表单搜索源已注册', formSearchSource?.name ?? '未找到')
+if (formSearchSource) {
+    const formSearch = await call('POST', '/api/search', {
+        keyword: '测试',
+        sourceIds: [formSearchSource.id],
+    })
+    const per = formSearch.json?.sources?.[0]
+    check(
+        per?.ok === true && (per?.count ?? 0) > 0,
+        'POST 表单搜索能搜到书（请求体带上了表单 Content-Type）',
+        `ok=${per?.ok} count=${per?.count} ${per?.error ?? ''}`,
+    )
+}
+
 /** 跑完整条链路，返回各步结果 */
 async function runChain(source, label) {
     const searchResponse = await fetch(`${BASE}/api/search`, {
@@ -2797,6 +2819,75 @@ console.log('\n=== 15b. java.setContent / digestHex / 一批 UI 动作 ===')
         coverErr.includes('SHA512') && coverErr.includes('不支持'),
         '`digestHex` 遇到没实现的算法时明确报错（而不是给空值）',
         JSON.stringify(coverErr.slice(0, 120)),
+    )
+
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+}
+
+console.log('\n=== 15c. java.put / java.get(k) 变量表，以及未实现能力的报错 ===')
+{
+    /**
+     * 两条都是**扫全量语料数出来**的（`java.xxx(` 的分布），不是想当然：
+     *
+     *  1. `java.put(k, v)` 130 处、一参 `java.get(k)` 141 处、二参 `java.get(url, h)` 35 处。
+     *     也就是说 Legado 的 `get` 是**同名两个重载**：一参读变量、二参取网。
+     *     本引擎以前把 `get` 一律当取网（于是 `if (java.get("单") == '')` 会去请求一个
+     *     叫「单」的**地址**），而 `put` 根本不存在（130 处全是 not a function）。
+     *  2. 变量必须能**跨求值**：搜索地址的脚本先存，后面的字段规则再读回来 ——
+     *     这正是 `SandboxSession.vars` 存在的理由。
+     *
+     * 还有一条边界：**没实现的成员要报出名字**，而不是让 QuickJS 说一句
+     * `TypeError: not a function`（它不说哪一个，几十行的脚本里根本定位不到）。
+     */
+    const id = `user:${BASE}`
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: '变量表与报错测试源',
+                bookSourceUrl: BASE,
+                // 这一步与下面的字段规则是**两次求值**：跨求值没生效的话，author 会是空串
+                searchUrl: `@js:java.put('谁', '甲'); java.put('页码', String(page)); '${BASE}/fixture/search?q=' + encodeURIComponent(key) + '&p=' + page`,
+                ruleSearch: {
+                    bookList: '@css:div.result-item',
+                    name: '@css:h3.title@text',
+                    bookUrl: '@css:h3.title a@href',
+                    author: `@js:java.get('谁') + '/' + java.get('页码')`,
+                    // 一参 get 读变量；没存过的变量给空串，**不是**去请求一个叫这个名字的地址
+                    kind: `@js:java.get('没存过的') === '' ? 'EMPTY-OK' : 'EMPTY-BAD'`,
+                    // 二参 get 仍然是取网（用真能搜到书的词，否则断言自己会假红）
+                    lastChapter: `@js:java.get('${BASE}/fixture/api/search?q=' + encodeURIComponent('测试') + '&p=1', {}).indexOf('测试小说') >= 0 ? 'HTTP-OK' : 'HTTP-BAD'`,
+                    // 未实现的能力报出名字
+                    intro: `@js:(function(){try{java.androidId();return 'NO-ERROR'}catch(e){return String(e.message || e)}})()`,
+                },
+            },
+        ]),
+    )
+
+    const search = await call('POST', '/api/search', { keyword: '测试', sourceIds: [id] })
+    const per = search.json?.sources?.[0]
+    const authors = (per?.books ?? []).map((b) => b.author)
+    check(
+        authors.length === 2 && authors.every((a) => a === '甲/1'),
+        '`java.put` 存的值能被**另一次求值**的规则读到（搜索脚本先存、字段规则后读）',
+        JSON.stringify(authors),
+    )
+    check(
+        (per?.books ?? []).every((b) => b.kind === 'EMPTY-OK'),
+        '一参 `java.get(名字)` 读变量：没存过给空串，而不是去请求一个同名地址',
+        JSON.stringify((per?.books ?? []).map((b) => b.kind)),
+    )
+    check(
+        (per?.books ?? []).every((b) => b.lastChapter === 'HTTP-OK'),
+        '二参 `java.get(url, headers)` 仍然是取网',
+        JSON.stringify((per?.books ?? []).map((b) => b.lastChapter)),
+    )
+    check(
+        (per?.books ?? []).every((b) => String(b.intro ?? '').includes('androidId')),
+        '未实现的 `java.*` 报出**名字**（而不是「not a function」）',
+        JSON.stringify((per?.books ?? [])[0]?.intro ?? ''),
     )
 
     await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
