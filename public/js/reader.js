@@ -545,6 +545,8 @@ export async function viewRead(host) {
         }
         page = next
         applyPage(true, step < 0 ? 'prev' : 'next')
+        // 翻页之后锚点跟着走：读者看到的已经是另一段文字了（第六十二轮）
+        anchorNode = visibleAnchor()
     }
 
     // ---- 字号缩放 ----
@@ -732,11 +734,104 @@ export async function viewRead(host) {
     }
     window.addEventListener('keydown', onKey)
 
-    const onResize = () => {
-        measure()
-        applyPage(false)
+    /**
+     * 当前这一屏最上面那一段（用来「锚在文字上」而不是「锚在页码上」）
+     *
+     * 量的是**可见那一列里的碎片**：正文是横向多列，跨列的段落会有多个矩形，
+     * 上一列的碎片在屏幕外（左边缘是负的），所以按「左边缘落在当前列里」筛。
+     */
+    function visibleAnchor() {
+        const base = body.getBoundingClientRect().left
+        const pitch = pagePitch()
+        if (!(pitch > 0)) return null
+        let best = null
+        let bestTop = Infinity
+        for (const paragraph of flow.children) {
+            for (const rect of paragraph.getClientRects()) {
+                if (rect.left < base - 1 || rect.left >= base + pitch - 1) continue
+                if (rect.top < bestTop) {
+                    bestTop = rect.top
+                    best = paragraph
+                }
+            }
+        }
+        return best
     }
-    window.addEventListener('resize', onResize)
+
+    /**
+     * 「读者现在读到哪儿」——重排时要找回来的那一段
+     *
+     * 用**黏性**的：上一次定位用的那一段只要还在当前这一页上，就继续用它。
+     * 每次重排都改锚点会一层层往回漂 —— 因为重排后的页顶往往比锚点靠前
+     * （锚点落在那一列的中间），下次拿新页顶当锚点，位置就又往前挪了一点
+     * （实测：改一次字号页顶从「第33段」滑到「第31段」，再改一次滑到「第25段」）。
+     */
+    let anchorNode = null
+
+    function stickyAnchor() {
+        if (anchorNode && columnOf(anchorNode) === page) return anchorNode
+        return visibleAnchor()
+    }
+
+    /**
+     * 盒子变了（旋屏 / 地址栏收起 / 软键盘 / 改字号行距）之后重量一次，
+     * 并让读者停在**同一段文字**上
+     *
+     * 列是跟着盒子重排的：盒子一变，`page` 这个数字指到的文字就换了 ——
+     * 用户看到的是「内容自己跳了一段」。所以重量之后要拿章内搜索跳页那套
+     * `columnOf()` 把锚点找回来（它量的就是「这个节点落在第几列」）。
+     *
+     * 定位策略是「**先按比例，再用锚点兜底**」：
+     *   - 按页码比例折算（与旧行为一致）能保证「改大再改回来」回到原处，不来回漂
+     *   - 但如果折算出来的那一页**看不到**锚点那一段，就以锚点为准 ——
+     *     宁可少翻一点，也别把读者看的那段甩到屏幕外（排版不匀时比例会偏得很远）
+     */
+    function relayout() {
+        if (mode !== 'page') {
+            measure()
+            applyPage(false)
+            return
+        }
+        const before = page
+        const beforeCount = pageCount
+        // 先在**旧**布局里定下锚点（此刻 `columnOf` 的判断与屏幕上的位移是一致的）
+        const anchor = stickyAnchor()
+        measure()
+        // 再到**新**布局里量它落到第几列：屏幕上的位移还是「旧页码 × 列距」，
+        // 所以必须显式把旧页码传给 `columnOf`（见它的量法说明）
+        const target = anchor ? columnOf(anchor, before) : -1
+        page =
+            beforeCount > 0
+                ? Math.min(pageCount - 1, Math.round((before / beforeCount) * pageCount))
+                : 0
+        if (target >= 0 && target !== page) {
+            page = Math.max(0, Math.min(pageCount - 1, target))
+        }
+        anchorNode = anchor ?? visibleAnchor()
+        applyPage(false)
+        settlePageCount(anchor)
+    }
+
+    /**
+     * 盒子一变就重新分页（移动端主要靠这条）
+     *
+     * 只监听 `window.resize` 在移动端不够用：地址栏收起/展开、软键盘弹出、旋屏
+     * 都可能只改布局盒、不派发 `resize`（各浏览器还不一致），而列已经重排了。
+     * 盯**盒子本身**最稳 —— 观察 `.reader-body`；回调用 rAF 合并，
+     * 免得「一帧里来一串」时量好几次（也顺手断掉「重量 → 又触发观察」这类循环）。
+     */
+    let boxFrame = 0
+    const boxWatcher =
+        typeof ResizeObserver === 'function'
+            ? new ResizeObserver(() => {
+                  if (mode !== 'page' || boxFrame !== 0) return
+                  boxFrame = requestAnimationFrame(() => {
+                      boxFrame = 0
+                      relayout()
+                  })
+              })
+            : null
+    boxWatcher?.observe(body)
 
     // ---- 进度上报（去抖：连续翻页只报最后一次）----
 
@@ -881,11 +976,15 @@ export async function viewRead(host) {
      * 用**折叠 Range** 而不是 `getBoundingClientRect()`：一个段落如果跨列断开，
      * 元素矩形是几段碎片的并集，左边缘会落在上一列 —— 量出来是错的。
      * 折叠 Range 量的是「这个字符站在哪一列」，正是要问的问题。
+     *
+     * `atPage` 是「屏幕上的位移现在对应哪一页」：量法要把它加回去才能还原出**列号**
+     * （见下面 `offset` 那一行）。默认就是当前页；重排之后要拿旧页码量的那种情形
+     * 显式传进来（`relayout`）。
      */
-    function columnOf(node) {
+    function columnOf(node, atPage = page) {
         // 与翻页共用同一个「一列有多宽」：两处各算一份的话，跳过去的页码会差一列
         const width = pagePitch()
-        if (!(width > 0)) return page
+        if (!(width > 0)) return atPage
         const anchor = node.nodeType === 3 || node.firstChild === null ? node : node.firstChild
         let left
         try {
@@ -896,7 +995,7 @@ export async function viewRead(host) {
         } catch {
             left = node.getBoundingClientRect().left
         }
-        const offset = left - body.getBoundingClientRect().left + page * width
+        const offset = left - body.getBoundingClientRect().left + atPage * width
         return Math.floor((offset + 1) / width)
     }
 
@@ -933,6 +1032,8 @@ export async function viewRead(host) {
             const previous = page
             page = Math.max(0, Math.min(pageCount - 1, columnOf(node)))
             applyPage(previous !== page, page < previous ? 'prev' : 'next')
+            // 跳到命中处也算一次「读者的位置变了」，锚点跟着走
+            anchorNode = visibleAnchor()
         } else {
             node.scrollIntoView({ block: 'center', behavior: 'smooth' })
         }
@@ -2271,13 +2372,16 @@ export async function viewRead(host) {
     /**
      * 把页数追到「稳定」为止（最多三帧）
      *
-     * 字号/行距写在 `<html>` 的自定义属性上，而**列的重排要等这一帧渲染完**
-     * 才落进布局 —— 实测同一台机器上 16ms 时量到的还是旧列数、40ms 才是新的，
-     * 所以「补一帧」不够：计数器会停在旧页数上（第六十二轮）。
-     * 这里改成盯 `scrollWidth`：变了就重量、连续一帧没变就停，最多三帧。
-     * 捏合改字号是每帧一次，靠 `relayoutAgain` 合并，同一时间只跑一条。
+     * 字号/行距写在 `<html>` 的自定义属性上、`.paged` 是刚加上的 class，
+     * 而**列的重排要等这一帧渲染完**才落进布局 —— 实测同一台机器上 16ms 时量到的
+     * 还是旧列数、40ms 才是新的，所以「补一帧」不够：计数器会停在旧页数上
+     * （第六十二轮）。这里改成盯 `scrollWidth`：变了就重量、连续一帧没变就停，
+     * 最多三帧。捏合改字号是每帧一次，靠 `relayoutAgain` 合并，同一时间只跑一条。
+     *
+     * `anchor` 是「这次重排要保住的那一段」（见 `relayout`）：追的每一帧也照着它定位，
+     * 否则页数追对了、位置却是错的。
      */
-    function settlePageCount() {
+    function settlePageCount(anchor = null) {
         if (relayoutAgain !== 0) return
         let tries = 0
         let seen = flow.scrollWidth
@@ -2292,21 +2396,13 @@ export async function viewRead(host) {
                 if (now !== seen) {
                     seen = now
                     measure()
+                    if (anchor) page = Math.max(0, Math.min(pageCount - 1, columnOf(anchor)))
                     applyPage(false)
                 }
                 step()
             })
         }
         step()
-    }
-
-    /** 改了字号/行距之后重新分页，并尽量停在原来的位置 */
-    function relayout() {
-        const ratio = pageCount > 0 ? page / pageCount : 0
-        measure()
-        page = Math.min(pageCount - 1, Math.round(ratio * pageCount))
-        applyPage(false)
-        settlePageCount()
     }
 
     shell.append(sheetHost)
