@@ -34,7 +34,8 @@
 | 媒体代取（防盗链 / 混合内容 / 跨域）                                                                | 已实现（签名地址 + Range 透传；**防盗链封面**也走它 —— 带选项的封面签发 `coverProxyUrl`，见「第四十七轮」）                                                                                                                                                                                                                                     |
 | 沙箱里的 `source` / `book` / `chapter` / `cookie` / `cache` / `infoMap` 全局                        | 已实现（见「沙箱里的全局对象」；`source.getKey()` 线上用了 413 次；`getLoginInfoMap()` / `putLoginInfo` 给的是 Map 语义；这五个对象的**方法面**有一张登记表 `test/sandboxSurface.ts`、语料差集必须为空 —— 见「第五十一 / 五十三轮」）                                                                                                           |
 | **cookie 罐**（`enabledCookieJar` 的源：收 `Set-Cookie` / 请求自动带 `Cookie` / 按源落库）          | 已实现（816 条源里 457 条开着这个东西；「搜索那一趟拿到的会话 cookie 能不能带到详情那一趟」就靠它 —— 见「`cookie` 罐」与「第五十四轮」）                                                                                                                                                                                                        |
-| **HTTP 重定向**（自己跟：每一跳的 `Set-Cookie` 都收，第一跳的 `Location` 交回给脚本）               | 已实现（`fetch` 的 `follow` 会把这两样都吃掉 —— 线上 11 个源的 `searchUrl` 正是靠那个 `Location` 找真正的搜索页地址；见「第五十五轮」）                                                                                                                                                                                                         |
+| **HTTP 重定向**（自己跟：每一跳的 `Set-Cookie` 都收，第一跳的 `Location` 交回给脚本）                | 已实现（`fetch` 的 `follow` 会把这两样都吃掉 —— 线上 11 个源的 `searchUrl` 正是靠那个 `Location` 找真正的搜索页地址；见「第五十五轮」）                                                                                                                                                                                                      |
+| **目录里的标注**：`isVip` / `isPay` / `isVolume` / `updateTime`                                     | 已实现（45 / 7 / 25 / 74 个源在用；VIP 标记、卷分组、更新时间都会显示在目录里，`chapter.isVip()` 也第一次拿到真值 —— 见「第五十六轮」）                                                                                                                                                                                                       |
 | 书源自带的 `jsLib` 全局函数库                                                                       | 已实现（35 条源在用；作为沙箱前置脚本执行，失败不中断但会说明原因）                                                                                                                                                                                                                                                                             |
 | 沙箱里的 `book` / `chapter` 上下文与**书的变量**（`book.getVariable` / `putVariable`）              | 已实现（`book.name` 54 处 / 39 源、`chapter.title` 32 处 / 30 源；变量落 `book_variables`，见「第三十五轮」）                                                                                                                                                                                                                                   |
 | `org.jsoup.Jsoup` + Element/Elements API                                                            | 已实现（宿主桥 + cheerio 句柄；写操作是空操作，未实现的方法报出方法名；`<script>` / `<style>` 也是元素 —— 见「第四十九轮」）                                                                                                                                                                                                                    |
@@ -4633,7 +4634,8 @@ this.classNames = className.trim().split("\\s+");   // 然后要求**每一个**
   **第五十四轮做掉了**（cookie 罐：收 / 发 / 存），见那一轮
 - **登录状态没有实现**：`putLoginHeader` / `putLoginInfo` 只在**本次求值**里有效
   （第四十一 / 五十一 / 五十三轮都只是让它别抛一个指错方向的错）
-- **`chapter.isVip` 缺信息**：章节上下文里没有 vip 标记（见上）
+- **`chapter.isVip` 缺信息**：章节上下文里没有 vip 标记（见上）。**第五十六轮做掉了**
+  —— `ruleToc.isVip` 现在会一路带到前端、再随正文请求带回来
 - `parseFragments` 把「整篇文档」当一段的怪相、选项里 `{{}}` 与 `body` 混用、
   `media.ts` 的两条多行地址路、`java.get(键)` 读不到持久化的书变量 —— 都还挂着（前几轮记的）
 - **WebView 那一族（16 个名字）**：本平台的取舍就是没有 WebView
@@ -4838,6 +4840,88 @@ java.get(url, {}).header('Location')        = https://httpbin.org/cookies
 - 前几轮挂着的那几笔（`parseFragments` 的怪相、选项里 `{{}}` 与 `body` 混用、
   `media.ts` 的两条多行地址路、`java.get(键)`、`chapter.isVip` 缺证据、
   **WebView 那一族（16 个名字）**）都没动
+
+### 第五十六轮：目录里的 `isVip` / `isPay` / `isVolume` / `updateTime` —— 规则写了，引擎没读
+
+第五十五轮末了那份「还没做」的单子里有一条 `chapter.isVip` 缺证据 —— 它其实是**两笔账**：
+沙箱那侧的 `chapter.isVip()` 一直返回 `false`（第五十三轮记的），而目录规则里的
+`ruleToc.isVip` 引擎**根本没读**。这一轮把两笔一起还了。
+
+**一、先量 `ruleToc` 的字段。** 不是只有「列表 / 章节名 / 章节地址 / 翻页」四样：
+
+| 字段 | 源数 | 其中规则本身要走沙箱 | 引擎 |
+| --- | --- | --- | --- |
+| `chapterList` / `chapterName` / `chapterUrl` | 810 / 810 / 790 | — | 取 |
+| `nextTocUrl` | 218 | 52 | 取 |
+| **`updateTime`** | **74** | 34 | 以前**不读** |
+| **`isVip`** | **45** | 17 | 以前**不读** |
+| **`isVolume`** | **25** | 4 | 以前**不读** |
+| **`isPay`** | **7** | 2 | 以前**不读** |
+| `preUpdateJs` | 5 | 1 | 明确不取（见下） |
+
+四个「以前不读」的都是**逐条求值**的规则（与 `chapterName` 同层），产出了东西却没人接：
+症状是「目录里看不出哪一章要钱、也看不到卷」，**不报任何错** —— 第四十九轮那个形状的重演。
+
+**二、判据：非空**且不是 `false` / `0`。** 这一条不能省。** 语料里两套写法都真实存在：
+
+```
+标记文本型    🌍🔞UAA小说    @css:.ndc-acc@text##注册会员
+              ⚡📂企鹅阅读     .list@.lock@html（锁图标的 HTML）
+              🏷磨铁中文      ¥{{$.free}}##¥true（免费章被替换成空串）
+脚本布尔型    🏷晋江文学      <js> vip = ("{{$.isvip}}"!="0"); … </js>
+              🔞书耽         @js:!{{$.auth_access}}
+```
+
+只按「非空即真」判，脚本明明回了 `false` 的章会被当成要付费 —— 前端于是去拦一个
+本来能读的章。判据在 `src/legado/chapterFields.ts`，两边写法都进了单测。
+
+**三、连带改的两处。**
+
+1. **卷标题以前会被丢掉**：它通常没有正文地址（`chapterUrl` 在那一行取到的是卷名那段文本），
+   而判据是「没地址就丢」。改成「**既没地址又不是卷**才丢」，去重也只在有地址时做
+   （卷标题多半都是空地址，按空串去重会把它们合并成一条）。
+2. **`isVip` 要一路走到底**：目录 → `/api/toc` → 前端 → 打开正文时随 `chapter` 带回来 →
+   引擎那侧的 `chapter.isVip()`。🏷起点(部分可看) 的正文规则就按它选分支，
+   以前那个分支**永远走的是免费章那一条**。
+
+前端（`reader.js`）顺带把三样显示出来：卷标题渲染成分组标题（不可点）、
+VIP / 已购 一个小标记、更新时间右侧一小段灰字。序号按**真章节**数（跳过卷标题），
+但点开时用的仍是**数组下标** —— 引擎那侧的 `chapter.index` 也是数组下标，两边必须一致。
+
+**四、量出来的代价，以及一个上限。** 这几条字段是**逐条**求值的，写成 `@js:` / `{{}}`
+时每一条都要进一次沙箱。冒烟第 43 段实测：**300 条 × 三条 `@js:` 字段（约 900 次求值）
+≈ 7.1 秒**，也就是一次求值 4～8ms。一本两千章的书就是上万次求值，必然把整次目录请求拖超时。
+
+而它们都只是**标注**：没有它们目录照样能读。所以加了 `MAX_MARKED_CHAPTERS = 300`：
+超过就停下，并在 `warning` 里说清楚（**不静默** —— 前端本来就会显示 `warning`）。
+真要读超长的书，该先解决的是「每次求值都要重新解析一遍 50KB 的预置脚本」，
+而不是在这里赌平台会放过我们。
+
+**五、验证。**
+
+- 单测 **801 → 806**（`test/chapterFields.test.ts`：两套写法、`false`/`0`、空串、
+  `tocText` 的原样保留）
+- 账本 **17 → 18 条**（新增 `test/ruleTocFields.scan.test.ts`：**目录里的每个字段名都要被认领**
+  —— 取了，或明确不取并写明理由；再钉住「逐条字段里确实有要走沙箱的」，
+  因为那个上限就建立在这上面）
+- 冒烟**新增第 43 段**，五件事一起验：① 四个字段的值 ② 卷标题留在列表里且没有地址
+  ③ `chapter.isVip()` 拿到真值（付费章 / 免费章各一） ④ 300 条走沙箱的耗时（打印出来）
+  ⑤ 超过上限之后照样取得回来、而且 `warning` 说了「后面的没取」
+- 靶子是测试站点新加的 `/fixture/api/toc?n=`（第 3 条是卷，每 3 条一处 `isVip`、
+  每 6 条一处 `isPay`，每条都有更新时间）
+
+**六、线上核验**（`/api/probe` 报 `0.46.0`）：见下
+
+**这一轮仍然没做完的**
+
+- **`MAX_MARKED_CHAPTERS` 是有损的**：超过 300 条的目录，后面的章节没有标注
+  （已用 `warning` 说清）。根治要动「一次求值重新解析一遍预置」
+- **`preUpdateJs` 明确不取**（5 源）：它是 App 侧「更新目录前跑一段脚本」，
+  本引擎没有那套流程 —— 登记在账本里，名分清楚
+- **`isVolume` 只做到「当分组标题显示」**：没有做「按卷折叠 / 只看某卷」那类交互
+- **登录流程仍然没有入口**（第五十二 / 五十三 / 五十四 / 五十五轮都记着）
+- 前几轮挂着的那几笔（`parseFragments` 的怪相、选项里 `{{}}` 与 `body` 混用、
+  `media.ts` 的两条多行地址路、`java.get(键)`、**WebView 那一族（16 个名字）**）都没动
 
 ## 验证
 
@@ -5058,7 +5142,7 @@ B 导入 → B 的书架、阅读位置（含「停在第几页」）、书签�
 ### 用真实书源全量扫描
 
 冒烟跑的是内置站点 —— 它证明「运行时可跑」，但证明不了「线上 800 多条书源里没有漏网的」。
-有些结论只能拿整份集合去量，现在有十七个扫描（各自独立，都默认跳过）：
+有些结论只能拿整份集合去量，现在有十八个扫描（各自独立，都默认跳过）：
 
 | 扫描                            | 量什么                                                                                           |
 | ------------------------------- | ------------------------------------------------------------------------------------------------ |
@@ -5079,6 +5163,7 @@ B 导入 → B 的书架、阅读位置（含「停在第几页」）、书签�
 | `sandboxObjects.scan.test.ts`   | `source`/`book`/`chapter`/`cookie`/`cache` 上用到的方法都在表里吗（同上，第五十三轮）            |
 | `cookieJar.scan.test.ts`        | 只读 cookie（靠站点下发）的源有没有关掉 `enabledCookieJar`；开关与各方法的用量分布（第五十四轮） |
 | `redirect.scan.test.ts`         | 谁在读响应头里的 `Location`、写在哪个字段、是不是「先取网、再读头」（第五十五轮）                |
+| `ruleTocFields.scan.test.ts`    | 目录规则里的字段：每一个都被认领了吗（取了 / 明确不取并写明理由）；逐条字段要不要走沙箱（第五十六轮） |
 
 ```bash
 # 导出一份书源（wrangler --json 的原样输出即可，也接受裸数组或探索结果的 json）
@@ -5089,7 +5174,8 @@ SOURCES_DUMP=sources.json npx vitest run test/ruleSplitting.scan.test.ts test/ru
   test/listMarker.scan.test.ts test/resultHtml.scan.test.ts test/jsTailList.scan.test.ts \
   test/listExtract.scan.test.ts test/listCssHeadIndex.scan.test.ts test/bangIndex.scan.test.ts \
   test/fieldCssStops.scan.test.ts test/putGet.scan.test.ts test/javaSurface.scan.test.ts \
-  test/sandboxObjects.scan.test.ts test/cookieJar.scan.test.ts test/redirect.scan.test.ts
+  test/sandboxObjects.scan.test.ts test/cookieJar.scan.test.ts test/redirect.scan.test.ts \
+  test/ruleTocFields.scan.test.ts
 ```
 
 **默认整组跳过**，所以 CI 与日常 `npm test` 不受影响，书源也不会进仓库（dump 在 `.gitignore` 里）。
