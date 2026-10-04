@@ -174,6 +174,19 @@ export async function fetchBookInfo(
         http: sandboxHttp(source, plan.url),
     }
 
+    /**
+     * **`init` 先跑，只取其副作用**
+     *
+     * 线上 116 处 / 109 个源的 `ruleBookInfo.init` 是「一次性把字段算好存进变量表」：
+     * 顶格 `@put:{…}`（23 处）或脚本里的 `java.put`（47 处），其余字段写成 `@get:{键}`
+     * 直接读回来。`init` 不跑的话，这些源的 name / author / kind / intro … **整片空着**，
+     * 而且不报错。
+     *
+     * 顺序要紧：它必须与后面的字段共用同一个 `infoCtx`（同一张会话变量表），
+     * 否则 `@get:{n}` 读的是另一个请求里的空表。返回值本身丢掉 —— `init` 的作用就是副作用。
+     */
+    if (rule.init) await analyzeString(sel, rule.init, infoCtx)
+
     const tocUrlRaw = await analyzeAddress(sel, rule.tocUrl ?? '', infoCtx)
 
     return {

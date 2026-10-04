@@ -4382,6 +4382,60 @@ console.log('\n=== 26. 字段规则里的 CSS 式「首段 + `@` 步骤」 ===')
     )
 }
 
+console.log('\n=== 27. `@put:` / `@get:` 与 `ruleBookInfo.init` ===')
+{
+    /**
+     * `ruleBookInfo.init` 是「一次性把字段算好存进变量表」的那个字段（线上 116 处 / 109 个源）：
+     * 顶格 `@put:{…}` 或脚本里的 `java.put`，其余字段写成 `@get:{键}` 读回来
+     * （`@get:` 全量 184 处 / 40 个源、`@put:` 52 处 / 46 个源）。
+     * 两条指令共用**同一张会话变量表**，与 `java.put` / `java.get(键)` 是同一张。
+     *
+     * 三个形状一起验：
+     *   ① `init` 里顶格 `@put:{…}` → 后面 `@get:{键}` 读回来
+     *   ② 文字里嵌 `@get:{键}`（`作者：@get:{a}`）—— 以前整段被当 CSS 选择器，**静默取空**
+     *   ③ `@put:` 当**后缀**（`.book-intro@put:{…}`）时，字段自身仍是前缀那条规则的值
+     */
+    const idPut = `user:${BASE}/put-get`
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(idPut)}`)
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: '变量指令·@put/@get（临时）',
+                bookSourceUrl: `${BASE}/put-get`,
+                ruleBookInfo: {
+                    init: '@put:{n:".book-name@text", a:".book-author@text"}',
+                    name: '@get:{n}',
+                    author: '作者：@get:{a}',
+                    intro: '.book-intro@put:{al:".book-name@text"}',
+                    tocUrl: '.toc-link@href',
+                },
+            },
+        ]),
+    )
+    const bookPut = await getJson(
+        `/api/book?sourceId=${encodeURIComponent(idPut)}&url=${encodeURIComponent(`${BASE}/fixture/book/1`)}`,
+    )
+    const v = bookPut.json ?? {}
+    check(
+        v.name === '测试小说·甲' && v.author === '作者：作者甲',
+        '`init` 顶格 `@put:{…}` 写的变量，`@get:{键}` 读得到（含嵌在文字里的那种）',
+        bookPut.json?.error ?? JSON.stringify({ name: v.name, author: v.author }),
+    )
+    check(
+        v.intro === '这是一本用于验证链路的小说。',
+        '`@put:` 当后缀时不吃掉规则本身的值（`.book-intro@put:{…}`）',
+        JSON.stringify(v.intro),
+    )
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(idPut)}`)
+    const leftPut = (await getJson('/api/sources')).json?.sources ?? []
+    check(
+        !leftPut.some((s) => String(s.id).startsWith(`user:${BASE}/put-get`)),
+        '变量指令的测试源已清理',
+    )
+}
+
 console.log('\n=== 结果 ===')
 if (failures.length === 0) {
     console.log(

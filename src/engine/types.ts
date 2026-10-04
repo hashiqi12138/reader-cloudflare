@@ -22,6 +22,15 @@ export interface SandboxSession {
     module: Promise<unknown>
     /** 本会话内的串行链 */
     queue: Promise<unknown>
+    /**
+     * 会话变量：`java.put` / `java.get(键)` / `@put:{…}` / `@get:{键}` **共用这一张表**
+     *
+     * 这里只声明形状（可选），实体在 `js.ts` 的 `SandboxSession` 上 ——
+     * 引擎这一层要能读写它（见 `infoVars.ts`），但不该为此把 WASM 拉进来。
+     */
+    vars?: Record<string, string>
+    /** 书的变量（`book.putVariable` / `getVariable`），同样只声明形状 */
+    bookVars?: Record<string, string>
 }
 
 /**
@@ -276,6 +285,21 @@ export interface BookSource {
     }
 
     ruleBookInfo?: {
+        /**
+         * **初始化规则**：求值一次、**只取其副作用**（`@put:{…}` / 脚本里的 `java.put`），
+         * 其它字段再用 `@get:{键}` 读回来。
+         *
+         * 线上 116 处 / 109 个源，其中顶格 `@put:{…}` 23 处、`<js>` 脚本 29 处、
+         * `@js:` 脚本 18 处。典型形状（⚡📂万象书城 / 📂夜伴书屋）：
+         *
+         *   init:   @put:{n:"[property$=book_name]@content", a:"[property$=author]@content", …}
+         *   name:   @get:{n}
+         *   author: @get:{a}
+         *
+         * 另有 42 处写的是选择器 / 路径（`$.data`、`data.book`），当「**换掉求值的根**」用 ——
+         * 那要求 JSONPath 与裸字段名都能相对某个子树求值，是另一件事（见 README 的待办）。
+         */
+        init?: string
         name?: string
         author?: string
         kind?: string

@@ -38,6 +38,14 @@ import {
     templatePattern,
 } from './template'
 import { splitJsTail, splitRuleText } from './ruleText'
+import {
+    asGetSegment,
+    findGetDirectives,
+    readInfoVar,
+    splitPutDirectives,
+    writeInfoVar,
+    type PutPair,
+} from './infoVars'
 import { matchDirective, ruleHasJs } from './directives'
 import {
     RESULT_AS_JSOUP,
@@ -448,7 +456,35 @@ async function expandTemplates(
     expanded += tail
     skeleton += tail
 
-    return { expanded, skeleton }
+    return {
+        expanded: substituteGetVars(expanded, ctx, false),
+        skeleton: substituteGetVars(skeleton, ctx, true),
+    }
+}
+
+/**
+ * 把嵌在文字里的 `@get:{键}` 换成变量的值（骨架那一路换成空串）
+ *
+ * 两件事必须同时成立，所以和模板走同一套「展开 + 骨架」机制：
+ *   - `编号：@get:{bookid}`、`...&bid=@get:{bid}&order=0` → 展开后是**字面文本**，
+ *     直接当结果（骨架里没有规则语法 → `evalRule` 走字面那条分支）
+ *   - 规则**开头**那一个**不换**：交给求值那侧的「段」分支，它才能当后续
+ *     `@js:` / `<js>` 的输入（`@get:{img}@js:…`、`@get:{d}\n<js>…</js>\na@href`）
+ *
+ * 不换的话，`...&bid=@get:{bid}&order=0` 会被整段当成 CSS 选择器，**静默取空**。
+ */
+function substituteGetVars(text: string, ctx: RuleContext, blank: boolean): string {
+    const hits = findGetDirectives(text)
+    if (hits.length === 0) return text
+    let out = ''
+    let last = 0
+    for (const hit of hits) {
+        out += text.slice(last, hit.start)
+        const isLeading = text.slice(0, hit.start).trim().replace(/^@+/, '') === ''
+        out += isLeading ? text.slice(hit.start, hit.end) : blank ? '' : readInfoVar(ctx, hit.key)
+        last = hit.end
+    }
+    return out + text.slice(last)
 }
 
 /**
@@ -462,18 +498,43 @@ export async function analyzeStrings(
     rule: string,
     ctx: RuleContext,
 ): Promise<string[]> {
-    const trimmed = rule.trim()
+    // `@put:{...}` 先摘下来：它只是副作用（写变量），摘完的规则才继续照常求值。
+    // 摘的顺序很要紧 —— 留着它会被当成规则语法，整条规则静默取空。
+    const put = splitPutDirectives(rule)
+    if (put.puts.length > 0) await applyPutDirectives(sel, put.puts, ctx)
+
+    const trimmed = put.rule.trim()
     if (trimmed === '') return []
 
-    // 两种模板形态都要走「有模板」这条路（`{{...}}` 与单花括号的 `{$.路径}`）：
-    // 只用 `includes('{{')` 判断的话，`/pc/book/{$.id}/catalog` 这种会被当纯选择器
-    // 直接求值，结果是**静默取空**
-    if (!hasTemplate(trimmed)) return evalRule(sel, trimmed, null, ctx)
+    // 三种模板形态都要走「有模板」这条路（`{{...}}`、单花括号的 `{$.路径}`、
+    // 以及文字里嵌着的 `@get:{键}`）：只用 `includes('{{')` 判断的话，
+    // `/pc/book/{$.id}/catalog` 与 `...&bid=@get:{bid}` 都会被当纯选择器求值，
+    // 结果是**静默取空**
+    if (!hasTemplate(trimmed) && !trimmed.includes('get:')) {
+        return evalRule(sel, trimmed, null, ctx)
+    }
 
     // 模板先展开：`{{}}` 里可能有 `||`、`##`，先展开才不会把它们当成分隔符
     // 把规则切碎（`{{$.a||$.b}}`、`{{$.desc##x##y}}` 都是真实写法）
     const { expanded, skeleton } = await expandTemplates(sel, trimmed, ctx)
     return evalRule(sel, expanded, skeleton, ctx)
+}
+
+/**
+ * 求值 `@put:{...}` 里的每一条值规则，写进变量表
+ *
+ * 表与 `java.put` / `java.get(key)` **共用**（见 `infoVars.ts` 的说明）：
+ * 书源里「`init` 里 `<js>` 先 `java.put`、字段规则再 `@get:{键}`」的写法靠的就是这一点。
+ */
+async function applyPutDirectives(
+    sel: Selection,
+    puts: PutPair[],
+    ctx: RuleContext,
+): Promise<void> {
+    for (const pair of puts) {
+        const values = await analyzeStrings(sel, pair.rule, ctx)
+        writeInfoVar(ctx, pair.key, values.filter((v) => v !== '').join('\n'))
+    }
 }
 
 /**
@@ -787,6 +848,19 @@ async function evalSingleSegment(
     // 冗余的 `@` 标记（`{{@@h1@text}}`、`div.x@@js:代码` 这类）从尾部去掉一个 `@`：
     // 选择器自己不会以 `@` 结尾，尾巴上那个 `@` 只可能属于标记
     const head = segment.replace(/@$/, '')
+
+    /**
+     * 整段就是 `@get:{键}` 时，直接给变量的值
+     *
+     * 这条分支要**排在分派之前**：`@get:{a}` 里没有选择器，落到 `detectKind` 会被当成
+     * CSS 选择器去 cheerio 里找一个叫 `@get:{a}` 的元素 —— 静默 0 条。
+     *
+     * 它同时也是「`@get:{键}` 当后续 `@js:` / `<js>` 的输入」那条路的入口：
+     * `@get:{img}@js:…` 在前一层被拆成「前缀 + `@js:` 尾巴」，前缀递归回到这里拿到值，
+     * 脚本的 `result` 就是它。
+     */
+    const getKey = asGetSegment(head)
+    if (getKey !== null) return [readInfoVar(ctx, getKey)]
 
     let kind = detectKind(head)
 
