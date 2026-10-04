@@ -193,6 +193,34 @@ export function fixtureScriptTocPage(): string {
 }
 
 /**
+ * **两个类名**的靶子：`class.A B` 的意思是「这两个类都要有」
+ *
+ * jsoup 的 `getElementsByClass(名字)` 把参数按空白拆开、要求**每一个**都命中（AND），
+ * 所以 `class.tags text-truncate` 等于 CSS 的 `.tags.text-truncate`。
+ * 线上这个形状共 **151 处 / 71 源**（`class.comics-card__title text-truncate`、
+ * `class.playlist clearfix` 这类「主类 + 工具类」）。以前整段被当成**一个**类名去转义
+ * （`.tags\ text-truncate`），cheerio 不报错、**静默返回 0 条**（第五十轮）。
+ *
+ * 页面刻意给三块：两个类都有的、只有主类的、只有工具类的 —— 于是冒烟 §38 能同时钉住
+ * 「命中 1 个」与「不是 OR、也不是后代」。
+ */
+export function fixtureTwoClassPage(): string {
+    const rows: Array<[string, string, string]> = [
+        ['comics-card__title text-truncate', '甲', '1'],
+        ['comics-card__title', '乙', '2'],
+        ['text-truncate', '丙', '3'],
+    ]
+    const items = rows
+        .map(
+            ([cls, name, id]) =>
+                `<div class="${cls}"><a href="/fixture/book/${id}">${name}</a></div>`,
+        )
+        .join('\n')
+
+    return page('两个类名', `<div class="list">\n${items}\n</div>`)
+}
+
+/**
  * **POST 表单搜索**：专门守住「带请求体必须声明 Content-Type」这一条
  *
  * 真实站点绝大多数是 PHP，而 PHP 只在 `application/x-www-form-urlencoded`（或
@@ -673,6 +701,9 @@ export async function handleFixture(request: Request, url: URL): Promise<Respons
 
     // 目录写在 <script> 里的靶子（见 fixtureScriptTocPage 的说明）
     if (pathname === '/fixture/script-toc') return html(fixtureScriptTocPage())
+
+    // 两个类名的靶子（见 fixtureTwoClassPage 的说明）
+    if (pathname === '/fixture/two-class') return html(fixtureTwoClassPage())
 
     /**
      * **防盗链封面**本身：没有 `Referer` 就 403

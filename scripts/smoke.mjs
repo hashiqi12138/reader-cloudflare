@@ -5500,6 +5500,67 @@ console.log('\n=== 37. `<script>` / `<style>` 也是元素（`getElement("script
     )
 }
 
+console.log('\n=== 38. JSOUP 简写 `class.A B`：两个类都要有 ===')
+{
+    /**
+     * jsoup 的 `getElementsByClass(名字)` 把参数按空白拆开、要求**每一个**都命中（AND），
+     * 所以 `class.tags text-truncate` 等价于 CSS 的 `.tags.text-truncate`。
+     * 线上这个形状共 **151 处 / 71 源**（`class.comics-card__title text-truncate`、
+     * `class.playlist clearfix` 这类「主类 + 工具类」）。
+     *
+     * 以前整段被当成**一个**类名去转义，得到 `.tags\ text-truncate` —— 那是
+     * 「类名里带空格」，现实里不存在：cheerio 不报错、**静默返回 0 条**。
+     *
+     * fixture 里给了三块（两个类都有 / 只有主类 / 只有工具类），验两件事：
+     *   ① 命中的是**两个类都有**的那一块（`count=1`，书名「甲」）
+     *   ② 不是 OR、也不是后代 —— 否则会得到 3 条或 0 条
+     */
+    const id = `user:${BASE}/two-class`
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: '两个类名（临时）',
+                bookSourceUrl: `${BASE}/two-class`,
+                searchUrl: '/fixture/two-class',
+                ruleSearch: {
+                    bookList: 'class.comics-card__title text-truncate',
+                    name: 'a@text',
+                    bookUrl: 'a@href',
+                },
+            },
+        ]),
+    )
+
+    const res = await fetch(`${BASE}/api/search`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ keyword: '测试', sourceIds: [id] }),
+    })
+    const one = (await res.json()).sources?.[0]
+
+    check(
+        one?.ok === true && one?.count === 1 && one?.books?.[0]?.name === '甲',
+        '`class.A B` 圈到的是两个类都有的那一块',
+        `count=${one?.count} name=${String(one?.books?.[0]?.name ?? '')}`,
+    )
+    check(
+        one?.books?.[0]?.bookUrl === `${BASE}/fixture/book/1`,
+        '而且就是那一块自己的地址（不是别的块）',
+        String(one?.books?.[0]?.bookUrl ?? ''),
+    )
+
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+    check(
+        !((await getJson('/api/sources')).json?.sources ?? []).some((s) =>
+            String(s.id).includes('two-class'),
+        ),
+        '两个类名的测试源已清理',
+    )
+}
+
 console.log('\n=== 结果 ===')
 if (failures.length === 0) {
     console.log(

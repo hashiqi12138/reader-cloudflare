@@ -24,8 +24,28 @@ function cssEscapeIdent(name: string): string {
 
 function stepToCss(step: JsoupStep): string | null {
     switch (step.by) {
-        case 'class':
-            return step.name ? `.${cssEscapeIdent(step.name)}` : null
+        case 'class': {
+            if (!step.name) return null
+            /**
+             * **`class.A B`：空格表示「这两个类都要有」**
+             *
+             * jsoup 的 `getElementsByClass(名字)` 内部是
+             * `className.trim().split("\\s+")`，然后要求**每一个**都命中（AND），
+             * 所以 `class.tags text-truncate` 等价于 CSS 的 `.tags.text-truncate`。
+             * 线上这个形状共 **151 处 / 71 源**，横跨五个分组
+             * （`class.comics-card__title text-truncate`、`class.playlist clearfix`
+             * 这类「主类 + 工具类」的写法）。
+             *
+             * 以前整段当成**一个**类名去转义，得到 `.tags\ text-truncate`
+             * —— 那是「类名里带空格」，现实里不存在，cheerio 不报错、**静默返回 0 条**。
+             */
+            return step.name
+                .trim()
+                .split(/\s+/)
+                .filter(Boolean)
+                .map((name) => `.${cssEscapeIdent(name)}`)
+                .join('')
+        }
         case 'id':
             return step.name ? `#${cssEscapeIdent(step.name)}` : null
         case 'tag':

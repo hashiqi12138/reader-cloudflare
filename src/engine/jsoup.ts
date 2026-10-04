@@ -6,6 +6,8 @@
  *   - 每段最多三部分：类型、名称、位置。类型有 class / id / tag / text / children
  *   - 最后一段通常是「取什么」：text / textNodes / ownText / html / href / src / 任意属性名
  *   - 位置写法有三种：`class.odd.0`（点号）、`tag.div[0]`（方括号）、`[!1,3]`（排除）
+ *   - `class.A B` 里的**空格表示「这两个类都要有」**（jsoup 的 `getElementsByClass`
+ *     把参数按空白拆开、要求每一个都命中），线上 151 处 / 71 源
  *   - 规则最前面加 `-` 表示把整个结果列表倒置（有些站的目录是倒着排的）
  *
  * 这里只做**解析**，不碰 cheerio：把规则翻译成一份与解析器无关的计划，

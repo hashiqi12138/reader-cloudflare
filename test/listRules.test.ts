@@ -236,3 +236,49 @@ describe('CSS 式首段带 JSOUP 位置后缀', () => {
         expect(await analyzeStrings(items[0]!, 'text', ctx)).toEqual(['乙'])
     })
 })
+
+/**
+ * JSOUP 简写：`class.A B` 里的空格 = **「这两个类都要有」**
+ *
+ * jsoup 的 `getElementsByClass(名字)` 内部把参数按空白拆开、要求**每一个**都命中（AND），
+ * 所以 `class.tags text-truncate` 等价于 CSS 的 `.tags.text-truncate`。
+ * 线上这个形状共 **151 处 / 71 源**，横跨五个分组（ruleBookInfo 68、ruleSearch 32、
+ * ruleToc 29、ruleContent 13、ruleExplore 9），是「主类 + 工具类」那种写法：
+ * `class.comics-card__title text-truncate`、`class.playlist clearfix`。
+ *
+ * 以前整段当成**一个**类名去转义，得到 `.tags\ text-truncate`
+ * —— 那是「类名里带空格」，现实里不存在：cheerio 不报错、**静默返回 0 条**。
+ */
+describe('JSOUP 简写：`class.A B` 是「两个类都要有」', () => {
+    const PAGE = `<html><body>
+<div class="playlist clearfix"><a href="/1">甲</a></div>
+<div class="playlist"><a href="/2">乙</a></div>
+<div class="clearfix"><a href="/3">丙</a></div>
+</body></html>`
+
+    it('列表规则：圈到的是两个类都有的那个', async () => {
+        const items = await analyzeSelections(rootSelection(PAGE), 'class.playlist clearfix@a', ctx)
+        expect(items).toHaveLength(1)
+        expect(await analyzeStrings(items[0]!, 'text', ctx)).toEqual(['甲'])
+    })
+
+    it('字段规则：同一条转换，`@` 后面接着取文本', async () => {
+        expect(
+            await analyzeStrings(rootSelection(PAGE), 'class.playlist clearfix@a@text', ctx),
+        ).toEqual(['甲'])
+    })
+
+    it('是 AND：只带一个类的元素不命中，也不是「后代」', async () => {
+        // 单类各命中 2 个（甲、乙 与 甲、丙），两个类一起只命中 1 个（甲）。
+        // 若实现成 OR 会得到 3 条，实现成后代选择器（`.playlist clearfix`）会得到 0 条。
+        expect(await analyzeStrings(rootSelection(PAGE), 'class.playlist@text', ctx)).toHaveLength(
+            2,
+        )
+        expect(await analyzeStrings(rootSelection(PAGE), 'class.clearfix@text', ctx)).toHaveLength(
+            2,
+        )
+        expect(
+            await analyzeStrings(rootSelection(PAGE), 'class.playlist clearfix@text', ctx),
+        ).toEqual(['甲'])
+    })
+})
