@@ -12,10 +12,19 @@
 
 import type { AppEnv } from './types'
 
+/**
+ * Workers 的 Cache API 挂在 `caches.default` 上，但 `wrangler types` 生成的那份声明里没有它
+ * ——那里生成的是 `declare abstract class CacheStorage`（类，没法用接口合并补成员），
+ * 所以只能在这里就地收窄一次。收窄只发生在这一个文件里：业务侧拿到的仍然是 `PlatformCache`。
+ */
+const defaultCache = (caches as unknown as { default: Cache }).default
+
 export function cloudflareEnv(env: Env): AppEnv {
     return {
         DB: env.DB,
         ASSETS: env.ASSETS,
+        // 边缘缓存按机房生效，不是全局的 —— 全局那份要 R2（见 TODO.md）
+        CACHE: defaultCache,
         ENGINE_VERSION: env.ENGINE_VERSION,
         ENABLE_FIXTURE: env.ENABLE_FIXTURE,
     }

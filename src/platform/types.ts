@@ -52,6 +52,19 @@ export interface PlatformAssets {
 }
 
 /**
+ * 边缘缓存（媒体那一条路在用）
+ *
+ * 只是 `match` / `put` 两件事：媒体由服务端代取，热门封面会被反复回源，
+ * 这一层让边缘自己记住它。Workers 上就是 `caches.default`
+ * （见 `platform/cloudflare.ts`）—— 它**按机房**生效，不是全局的，
+ * 想要全局、可持久的那一层得另上 R2（见 TODO.md）。
+ */
+export interface PlatformCache {
+    match(request: Request): Promise<Response | undefined>
+    put(request: Request, response: Response): Promise<void>
+}
+
+/**
  * 应用跑起来需要的那份环境
  *
  * `ENGINE_VERSION` / `ENABLE_FIXTURE` 是部署级配置（前者是界面「关于」页显示的版本号，
@@ -60,6 +73,7 @@ export interface PlatformAssets {
 export interface AppEnv {
     DB: PlatformDb
     ASSETS: PlatformAssets
+    CACHE: PlatformCache
     ENGINE_VERSION?: string
     ENABLE_FIXTURE?: string
 }

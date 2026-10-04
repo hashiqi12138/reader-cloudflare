@@ -88,6 +88,13 @@ import { splitUrlAndOptions } from './legado/urlOptions'
 import { matchesEtag } from './lib/etag'
 import { UpstreamError } from './lib/http'
 import { USER_HEADER } from './lib/identity'
+import {
+    MEDIA_CACHE_STATUS_HEADER,
+    MEDIA_CACHE_TTL_SECONDS,
+    canCacheMediaRequest,
+    canCacheMediaResponse,
+    mediaCacheKey,
+} from './lib/mediaCache'
 import { MediaTokenError, signMediaToken, verifyMediaToken } from './lib/signing'
 import type { MediaTokenPayload } from './lib/signing'
 
@@ -1979,6 +1986,34 @@ app.get('/api/media/:token', async (c) => {
     const range = c.req.header('range')
     if (range) headers.Range = range
 
+    // 封面绝不能被当成「文件下载」：`<img>` 遇到 `Content-Disposition: attachment` 是不显示的。
+    // 同一个文件源既有封面又有下载文件，所以这个区别由令牌里的 `cover` 记着（见 signing.ts）
+    const isFileSource =
+        !payload.cover && (source.bookSourceType ?? SOURCE_TYPE.text) === SOURCE_TYPE.file
+
+    /**
+     * 这一趟要不要走共享缓存（判据与理由逐条写在 `lib/mediaCache.ts`）
+     *
+     * 命中就直接回、连上游都不碰 —— 缓存的收益只有这一处。键从**验签之后的载荷**算：
+     * 令牌里带过期时间，同一张图每次签发出来的地址都不一样，拿地址当键永远命不中。
+     */
+    const cacheKey = canCacheMediaRequest({
+        loggedIn: (source.loginHeader ?? '') !== '' || (source.loginInfo ?? '') !== '',
+        fileSource: isFileSource,
+        ranged: Boolean(range),
+    })
+        ? await mediaCacheKey(c.req.url, payload)
+        : null
+
+    if (cacheKey) {
+        const hit = await c.env.CACHE.match(cacheKey)
+        if (hit) {
+            const hitHeaders = new Headers(hit.headers)
+            hitHeaders.set(MEDIA_CACHE_STATUS_HEADER, 'hit')
+            return new Response(hit.body, { status: hit.status, headers: hitHeaders })
+        }
+    }
+
     let upstream: Response
     try {
         upstream = await fetch(split.url, {
@@ -1995,14 +2030,39 @@ app.get('/api/media/:token', async (c) => {
         return c.json({ error: `上游取媒体返回 HTTP ${upstream.status}` }, 502)
     }
 
-    // 封面绝不能被当成「文件下载」：`<img>` 遇到 `Content-Disposition: attachment` 是不显示的。
-    // 同一个文件源既有封面又有下载文件，所以这个区别由令牌里的 `cover` 记着（见 signing.ts）
-    const isFileSource =
-        !payload.cover && (source.bookSourceType ?? SOURCE_TYPE.text) === SOURCE_TYPE.file
-    return new Response(upstream.body, {
-        status: upstream.status,
-        headers: mediaResponseHeaders(upstream, split.url, isFileSource),
-    })
+    const outHeaders = mediaResponseHeaders(upstream, split.url, isFileSource)
+    const store =
+        cacheKey !== null &&
+        canCacheMediaResponse({
+            status: upstream.status,
+            contentType: outHeaders.get('Content-Type'),
+            contentLength: upstream.headers.get('content-length'),
+        })
+    // 这一条是观测用的：命中与未命中的响应体一模一样，从外面只看得到它
+    // （`miss` 是存了、`skip` 是这次没存 —— 后者既有「请求本身不该缓存」，也有「响应不配存」）
+    outHeaders.set(MEDIA_CACHE_STATUS_HEADER, store ? 'miss' : 'skip')
+
+    const response = new Response(upstream.body, { status: upstream.status, headers: outHeaders })
+
+    if (store && cacheKey) {
+        /**
+         * 存进去的那份把 TTL 换掉
+         *
+         * 上游那份 `public, max-age=86400` 是给**浏览器**的承诺；共享缓存该记多久由我们定。
+         * 两者眼下一致，但这个值不该跟着上游变（上游改小一点就白丢了这一层）。
+         */
+        const stored = new Response(response.clone().body, {
+            status: response.status,
+            headers: new Headers({
+                ...Object.fromEntries(outHeaders),
+                'Cache-Control': `public, max-age=${MEDIA_CACHE_TTL_SECONDS}`,
+            }),
+        })
+        // 写缓存要等响应体收完，所以交给 waitUntil —— 不能让它拖住这次响应
+        c.executionCtx.waitUntil(c.env.CACHE.put(cacheKey, stored))
+    }
+
+    return response
 })
 
 /** 其余路径交给静态资源（含 SPA 回退） */
