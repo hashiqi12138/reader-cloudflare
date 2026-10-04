@@ -30,6 +30,62 @@ export function resolveUrl(value: string, base: string): string {
 }
 
 /**
+ * 地址尾部 `,{...}` 请求选项的起点；`(?<!<)` 是给 URL 里的可选段 `<,{{page}}>` 让路
+ *
+ * 判据与 `urlOptions.ts` 的 `splitUrlAndOptions` **必须一致** —— 两处认的不是同一个
+ * `,` 时，一边拆开、另一边又拼回去，仍然是坏的。
+ */
+const ADDRESS_OPTIONS_AT = /(?<!<),\s*\{/
+
+/** 地址字段里那一段请求选项（原样，含前导 `{`）；没有就是 '' */
+function optionsPartOf(value: string): { url: string; options: string } {
+    const match = ADDRESS_OPTIONS_AT.exec(value)
+    if (!match) return { url: value.trim(), options: '' }
+    return {
+        url: value.slice(0, match.index).trim(),
+        options: value.slice(match.index + 1).trim(),
+    }
+}
+
+/**
+ * 地址类字段：**先拆请求选项，再补全地址，然后把选项原样接回去**
+ *
+ * 顺序不能反，这是这一段的全部要点。`new URL()` 会把 `{` `"` 百分号编码，选项段一旦
+ * 被编码，`splitUrlAndOptions` 就再也认不出那个 `,{` —— 选项于是变成地址的一部分被请求：
+ *
+ *   https://guiwb.nnmh.info/cover/1.jpg,%7B%22headers%22:%7B%22Referer%22:…%7D%7D
+ *
+ * 它**不报错**，只是请求了一个不存在的路径（404），症状是「搜不到书 / 目录空 / 封面挂」。
+ * 线上这个形状共 **33 处 / 20 个源**：🎭🎬露西弗同人站 的目录与章节（`{"method":"POST"}`）、
+ * 🏷纵横中文 的书籍地址、🔞书耽 的三个字段（`{"headers":…}`）、⚡📂丁丁小说 的搜索地址。
+ *
+ * 「原样接回去」而不是 `JSON.stringify`：选项里可能有 `{{}}` 模板（要在 `buildPlan`
+ * 那一层展开），也可能有书源自己的写法。这里只负责**不破坏它**，解析与校验统一留在
+ * `splitUrlAndOptions` —— 那才是唯一该判「选项合法不合法」的地方。
+ */
+export function resolveAddress(value: string, base: string): string {
+    const { url, options } = optionsPartOf(value)
+    const resolved = resolveUrl(url, base)
+    return options === '' ? resolved : `${resolved},${options}`
+}
+
+/**
+ * 封面地址：**丢掉**请求选项，只把地址补全
+ *
+ * 封面与链路地址的去处不同：它被前端当成 `<img src>` **由浏览器直接加载**（见
+ * `public/js/core.js` 的 `coverNode`），浏览器既不会带书源指定的 `Referer`，也不认
+ * `,{...}` 这种写法 —— 带着选项的地址在浏览器里同样是坏的（百分号编码之后请求一个
+ * 不存在的路径）。
+ *
+ * 所以这里取「至少是一个合法图片地址」：`📂品书斋` / `🎨楠楠漫画` 那 8 处封面能少一层
+ * 必然 404。真要让防盗链封面可用，得把封面也走 `/api/media` 代取 —— 那是**另一件事**，
+ * 代价是每一张封面多一次签名与一次子请求（见 README 的待办）。
+ */
+export function resolveCoverAddress(value: string, base: string): string {
+    return resolveUrl(optionsPartOf(value).url, base)
+}
+
+/**
  * 取**单值**，用于地址类字段
  *
  * `analyzeString` 会把所有匹配到的值用换行拼起来 —— 正文需要这个行为（多个段落要合起来），
@@ -147,9 +203,10 @@ export async function booksFromItems(
             lastChapter: (await analyzeString(item, rule.lastChapter ?? '', ctx)) || undefined,
             intro: (await analyzeString(item, rule.intro ?? '', ctx)) || undefined,
             coverUrl:
-                resolveUrl(await analyzeAddress(item, rule.coverUrl ?? '', ctx), base) || undefined,
+                resolveCoverAddress(await analyzeAddress(item, rule.coverUrl ?? '', ctx), base) ||
+                undefined,
             wordCount: (await analyzeString(item, rule.wordCount ?? '', ctx)) || undefined,
-            bookUrl: resolveUrl(bookUrlRaw, base),
+            bookUrl: resolveAddress(bookUrlRaw, base),
             sourceName: source.bookSourceName,
             sourceUrl: source.bookSourceUrl,
         })
@@ -205,11 +262,14 @@ export async function fetchBookInfo(
     const tocUrlRaw = await analyzeAddress(infoSel, rule.tocUrl ?? '', infoCtx)
 
     return {
-        tocUrl: tocUrlRaw ? resolveUrl(tocUrlRaw, plan.url) : plan.url,
+        tocUrl: tocUrlRaw ? resolveAddress(tocUrlRaw, plan.url) : plan.url,
         name: await analyzeString(infoSel, rule.name ?? '', infoCtx),
         author: await analyzeString(infoSel, rule.author ?? '', infoCtx),
         intro: await analyzeString(infoSel, rule.intro ?? '', infoCtx),
-        coverUrl: resolveUrl(await analyzeAddress(infoSel, rule.coverUrl ?? '', infoCtx), plan.url),
+        coverUrl: resolveCoverAddress(
+            await analyzeAddress(infoSel, rule.coverUrl ?? '', infoCtx),
+            plan.url,
+        ),
     }
 }
 
@@ -292,7 +352,7 @@ export async function fetchChapters(
             const name = await analyzeString(item, rule.chapterName ?? 'text', tocCtx)
             const urlRaw = await analyzeAddress(item, rule.chapterUrl ?? 'tag.a@href', tocCtx)
             if (!name || !urlRaw) continue
-            const url = resolveUrl(urlRaw, plan.url)
+            const url = resolveAddress(urlRaw, plan.url)
             if (seenChapterUrls.has(url)) continue
             seenChapterUrls.add(url)
             chapters.push({ name, url })
@@ -303,7 +363,7 @@ export async function fetchChapters(
 
         const nextRaw = await analyzeAddress(sel, rule.nextTocUrl, tocCtx)
         if (!nextRaw) break
-        const nextUrl = resolveUrl(nextRaw, plan.url)
+        const nextUrl = resolveAddress(nextRaw, plan.url)
         // 指向自己或已经去过的页就停：写错规则的书源不该把 Worker 拖死
         if (nextUrl === currentUrl || visitedTocUrls.has(nextUrl)) break
         currentUrl = nextUrl
@@ -374,7 +434,7 @@ export async function collectContentPages(
 
         const nextRaw = await analyzeAddress(sel, rule.nextContentUrl, contentCtx)
         if (!nextRaw) break
-        const nextUrl = resolveUrl(nextRaw, plan.url)
+        const nextUrl = resolveAddress(nextRaw, plan.url)
         // 指向自己或已经取过的页就停
         if (nextUrl === currentUrl || visitedUrls.has(nextUrl)) break
         currentUrl = nextUrl

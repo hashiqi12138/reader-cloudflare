@@ -70,6 +70,7 @@ import { exploreBooks, listExploreCategories } from './legado/explore'
 import { fetchBookInfo, fetchChapters, searchBooks } from './legado/ops'
 import { fetchChapterContent } from './legado/media'
 import { mediaRequestHeaders } from './legado/source'
+import { splitUrlAndOptions } from './legado/urlOptions'
 import { UpstreamError } from './lib/http'
 import { USER_HEADER } from './lib/identity'
 import { MediaTokenError, signMediaToken, verifyMediaToken } from './lib/signing'
@@ -1510,9 +1511,24 @@ app.get('/api/media/:token', async (c) => {
     const source = await findSource(c.env.DB, origin, payload.sourceId, registryOf(c.env))
     if (!source) return c.json({ error: `找不到书源：${payload.sourceId}` }, 404)
 
+    /**
+     * 签名时的地址可能带着 `,{请求选项}`（书源给这张图上写了 `Referer` 之类的）
+     *
+     * 媒体地址由 `ops.ts` 的 `resolveAddress` 保留选项传到这里，**必须在这里拆开**：
+     * `new URL()` 会把选项段百分号编码，编码之后就再也不是一个能请求的地址了
+     * （线上 `📂品书斋` / `🎨楠楠漫画` / `🎨咚漫` 的封面、以及图片源里带防盗链头的那些）。
+     * 选项里的 `headers` 合并进请求头 —— 这正是书源写它的目的。
+     */
+    let split: ReturnType<typeof splitUrlAndOptions>
+    try {
+        split = splitUrlAndOptions(payload.url)
+    } catch (err) {
+        return fail(c, err)
+    }
+
     let target: URL
     try {
-        target = new URL(payload.url)
+        target = new URL(split.url)
     } catch {
         return c.json({ error: '媒体地址不是合法 URL' }, 400)
     }
@@ -1520,14 +1536,22 @@ app.get('/api/media/:token', async (c) => {
         return c.json({ error: `不支持的媒体协议：${target.protocol}` }, 400)
     }
 
-    const headers = mediaRequestHeaders(source, payload.url)
+    const headers: Record<string, string> = {
+        ...mediaRequestHeaders(source, split.url),
+        ...(split.options.headers ?? {}),
+    }
     // 透传 Range，音频才能拖进度条
     const range = c.req.header('range')
     if (range) headers.Range = range
 
     let upstream: Response
     try {
-        upstream = await fetch(payload.url, { headers, redirect: 'follow' })
+        upstream = await fetch(split.url, {
+            method: (split.options.method ?? 'GET').toUpperCase(),
+            headers,
+            body: split.options.body,
+            redirect: 'follow',
+        })
     } catch (err) {
         return c.json({ error: `取媒体失败：${describe(err)}` }, 502)
     }
@@ -1539,7 +1563,7 @@ app.get('/api/media/:token', async (c) => {
     const isFileSource = (source.bookSourceType ?? SOURCE_TYPE.text) === SOURCE_TYPE.file
     return new Response(upstream.body, {
         status: upstream.status,
-        headers: mediaResponseHeaders(upstream, payload.url, isFileSource),
+        headers: mediaResponseHeaders(upstream, split.url, isFileSource),
     })
 })
 

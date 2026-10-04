@@ -20,7 +20,7 @@ import { runInSandbox } from '../engine/js'
 import type { BookSource, RuleContext, SearchBook } from '../engine/types'
 import { UpstreamError, fetchText } from '../lib/http'
 import { parseExploreCategories, type ExploreCategory } from './exploreParse'
-import { analyzeAddress, booksFromItems, resolveUrl, type BookListRule } from './ops'
+import { analyzeAddress, booksFromItems, resolveAddress, type BookListRule } from './ops'
 import { buildPlan, sandboxHttp } from './source'
 import { findUrlJs } from './urlJs'
 
@@ -109,7 +109,7 @@ export async function exploreBooks(
     if (rule.nextPageUrl) {
         const rawNext = await analyzeAddress(sel, rule.nextPageUrl, listCtx)
         if (rawNext) {
-            const resolved = resolveUrl(rawNext, base)
+            const resolved = resolveAddress(rawNext, base)
             // 指向自己的「下一页」会被当成无底洞，挡掉
             if (resolved !== base) nextUrl = resolved
         }

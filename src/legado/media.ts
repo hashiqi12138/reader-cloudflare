@@ -31,13 +31,20 @@ import {
 } from '../engine/types'
 import { UpstreamError, fetchText } from '../lib/http'
 import { extractImageLinks } from './mediaLinks'
-import { collectContentPages, fetchContent, normalizeContent, resolveUrl } from './ops'
+import { collectContentPages, fetchContent, normalizeContent, resolveAddress } from './ops'
 import { buildPlan, sandboxHttp } from './source'
 
-/** 从下载地址里推出文件名，纯粹为了给用户一个可读的下载项标题 */
+/**
+ * 从下载地址里推出文件名，纯粹为了给用户一个可读的下载项标题
+ *
+ * 地址尾部可能带着 `,{"headers":…}` 请求选项（见 `ops.ts` 的 `resolveAddress`），
+ * 不先摘掉的话文件名会变成 `book.txt,%7B%22headers%22…%7D` —— 下载项标题是给用户看的，
+ * 不能带这串东西。
+ */
 function fileNameOf(url: string): string | undefined {
     try {
-        const last = new URL(url).pathname.split('/').filter(Boolean).pop() ?? ''
+        const bare = url.replace(/(?<!<),\s*\{[\s\S]*$/, '').trim()
+        const last = new URL(bare).pathname.split('/').filter(Boolean).pop() ?? ''
         if (last === '') return undefined
         return decodeURIComponent(last)
     } catch {
@@ -58,7 +65,7 @@ async function fetchImages(
     for (const page of pages) {
         // 相对地址按**它自己那一页**补全：翻页之后图片常常挂在更深一层的目录下
         for (const link of extractImageLinks(page.raw, (candidate) =>
-            resolveUrl(candidate, page.url),
+            resolveAddress(candidate, page.url),
         )) {
             if (seen.has(link.url)) continue
             seen.add(link.url)
@@ -104,7 +111,7 @@ async function fetchAudio(
     // 章节地址本身就是音频直链。这是规范内的正常写法，不是缺配置。
     if (candidate === '') candidate = chapterUrl
 
-    const url = resolveUrl(candidate, pageUrl)
+    const url = resolveAddress(candidate, pageUrl)
     if (!/^https?:\/\//i.test(url)) {
         const hint = rule?.sourceRegex
             ? '该书源用 sourceRegex 从 WebView 流量里嗅探音频地址，本引擎没有 WebView，因此取不到。'
@@ -155,7 +162,7 @@ async function fetchDownloads(
         for (const line of value.split('\n')) {
             const raw = line.trim()
             if (raw === '') continue
-            const url = resolveUrl(raw, plan.url)
+            const url = resolveAddress(raw, plan.url)
             if (!/^https?:\/\//i.test(url)) continue
             if (seen.has(url)) continue
             seen.add(url)

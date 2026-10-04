@@ -4731,6 +4731,203 @@ console.log('\n=== 30. `<js>` 段 + JSONPath 尾段（`$[*]` / `$[:n]`） ===')
     )
 }
 
+console.log('\n=== 31. 地址类字段里的请求选项（`地址,{选项}`） ===')
+{
+    /**
+     * 书源给一条地址写请求选项很常见（线上 **33 处 / 20 个源**）：
+     *
+     *   /api/chapter_info,{"method":"POST","body":"chapter_id=1"}
+     *   /cover/1.jpg,{"headers":{"Referer":"https://…/"}}
+     *
+     * 而地址类字段拿到的是**相对**地址，得先补成绝对地址。改前那一步是 `new URL()`，
+     * 它会把 `{` `"` 百分号编码 —— 选项段一编码，下游 `splitUrlAndOptions` 就再也认不出
+     * 那个 `,{`，于是选项变成地址的一部分被请求：**不报错**，只是 404
+     * （症状是「搜不到书 / 目录空 / 封面挂」）。
+     *
+     * 这里验四件事：
+     *   ① 搜索结果的 bookUrl **原样**带着选项（没有被百分号编码）
+     *   ② 详情那次请求真的带上了选项里的请求头（靶子是 /fixture/echo-request）
+     *   ③ 目录那次请求真的是 POST（同一张靶子回显的方法）
+     *   ④ 封面地址**丢掉**选项（浏览器直接加载，带选项等于必然 404）
+     */
+    const id = `user:${BASE}/addr-options`
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: '地址带请求选项（临时）',
+                bookSourceUrl: `${BASE}/addr-options`,
+                searchUrl: '/fixture/search?q={{key}}',
+                ruleSearch: {
+                    bookList: 'div.result-item',
+                    name: 'h3.title@text',
+                    // 详情页：地址带着一个自定义请求头，靠它证明选项真的到了请求上
+                    bookUrl: `a@href@js:'/fixture/echo-request,{"headers":{"X-RC-Probe":"addr-opt"}}'`,
+                    // 封面：同样带选项，验证它被丢掉（浏览器直连）
+                    coverUrl: `a@href@js:result + ',{"headers":{"Referer":"https://example.com/"}}'`,
+                },
+                ruleBookInfo: {
+                    // 详情页回显的请求头 → 书名；tocUrl 带 POST 选项 → 目录那次是 POST
+                    name: '#probe@text',
+                    tocUrl: `@js:'/fixture/echo-request,{"method":"POST","body":"x=1"}'`,
+                },
+                ruleToc: {
+                    // 取整个 html，好让章节名与章节地址都能在条目里取到
+                    chapterList: 'html',
+                    chapterName: '#method@text',
+                    chapterUrl: '#url@text',
+                },
+            },
+        ]),
+    )
+
+    const res = await fetch(`${BASE}/api/search`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ keyword: '测试', sourceIds: [id] }),
+    })
+    const per = (await res.json()).sources?.[0]
+    const book = per?.books?.[0]
+    check(per?.ok === true && Boolean(book), '搜索跑通', per?.error ?? `count=${per?.count}`)
+    check(
+        String(book?.bookUrl ?? '').endsWith(',{"headers":{"X-RC-Probe":"addr-opt"}}'),
+        'bookUrl **原样**带着请求选项（以前会被编码成 %7B…，下游再也拆不出来）',
+        String(book?.bookUrl ?? ''),
+    )
+    check(
+        !String(book?.coverUrl ?? '').includes('{'),
+        '封面地址丢掉了选项（浏览器直接加载，带选项必然 404）',
+        String(book?.coverUrl ?? ''),
+    )
+
+    const detail = await getJson(
+        `/api/book?sourceId=${encodeURIComponent(id)}&url=${encodeURIComponent(book.bookUrl)}`,
+    )
+    check(
+        detail.json?.name === 'addr-opt',
+        '详情那次请求真的带上了选项里的请求头（靶子回显 X-RC-Probe）',
+        detail.json?.error ?? JSON.stringify(detail.json?.name),
+    )
+
+    const toc = await getJson(
+        `/api/toc?sourceId=${encodeURIComponent(id)}&url=${encodeURIComponent(detail.json?.tocUrl ?? '')}`,
+    )
+    const chapters = toc.json?.chapters ?? []
+    check(
+        chapters.length === 1 && chapters[0]?.name === 'POST',
+        '目录那次请求真的是 POST（选项里的 method 生效了）',
+        toc.json?.error ?? JSON.stringify(chapters.map((c) => c.name)),
+    )
+
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+    check(
+        !((await getJson('/api/sources')).json?.sources ?? []).some((s) =>
+            String(s.id).includes('addr-options'),
+        ),
+        '地址选项的测试源已清理',
+    )
+
+    /**
+     * 线上最主流的形状其实不是 `@js:` 拼出来的，而是**模板拼出来的字面地址**：
+     *
+     *   https://api.midureader.com/fiction/book/getDetail,{ "method": "POST",
+     *     "body": "app=midu&book_id={{$..book_id}}" }
+     *
+     * 它走的是另一条路（`{{}}` 展开后是字面文本 → `evalRule` 直接当结果），
+     * 所以再验一次：选项要在**模板这条路**上也活下来。
+     */
+    const tid = `user:${BASE}/addr-options-tpl`
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(tid)}`)
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: '地址选项·模板拼出来的（临时）',
+                bookSourceUrl: `${BASE}/addr-options-tpl`,
+                searchUrl: '/fixture/api/search?q={{key}}',
+                ruleSearch: {
+                    bookList: '$.data.list',
+                    name: '$.name',
+                    bookUrl: `/fixture/echo-request?from={{$.id}},{"headers":{"X-RC-Probe":"tpl-opt"}}`,
+                },
+                ruleBookInfo: { name: '#probe@text', tocUrl: '#url@text' },
+            },
+        ]),
+    )
+    const tplRes = await fetch(`${BASE}/api/search`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ keyword: '测试', sourceIds: [tid] }),
+    })
+    const tplBook = (await tplRes.json()).sources?.[0]?.books?.[0]
+    check(
+        String(tplBook?.bookUrl ?? '').endsWith(',{"headers":{"X-RC-Probe":"tpl-opt"}}'),
+        '模板拼出来的地址：选项同样原样留着',
+        String(tplBook?.bookUrl ?? ''),
+    )
+    const tplDetail = await getJson(
+        `/api/book?sourceId=${encodeURIComponent(tid)}&url=${encodeURIComponent(tplBook?.bookUrl ?? '')}`,
+    )
+    check(
+        tplDetail.json?.name === 'tpl-opt',
+        '模板那条路上，选项里的请求头也真的发出去了',
+        tplDetail.json?.error ?? JSON.stringify(tplDetail.json?.name),
+    )
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(tid)}`)
+
+    /**
+     * 媒体代取那一侧：图片 / 音频 / 文件源的地址同样可能带选项，而它走的是**另一条路**
+     * （`/api/media/:token`，不是 `buildPlan`）—— 所以单独验一次：
+     * 选项里的请求头要真的发到上游，下载项的文件名还不能把选项带进去。
+     */
+    const mid = `user:${BASE}/addr-options-media`
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(mid)}`)
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: '地址选项·媒体代取（临时）',
+                bookSourceUrl: `${BASE}/addr-options-media`,
+                bookSourceType: 3,
+                ruleBookInfo: {
+                    name: '.book-name@text',
+                    downloadUrls: `@js:'/fixture/echo-request,{"headers":{"X-RC-Probe":"media-opt"}}'`,
+                },
+            },
+        ]),
+    )
+    const filePage = `${BASE}/fixture/book/file1`
+    const mediaRes = await getJson(
+        `/api/content?sourceId=${encodeURIComponent(mid)}&url=${encodeURIComponent(filePage)}`,
+    )
+    const dl = mediaRes.json?.downloads?.[0]
+    check(
+        mediaRes.json?.kind === 'downloads' && Boolean(dl),
+        '文件源取到下载项（地址里带请求选项）',
+        mediaRes.json?.error ?? JSON.stringify(mediaRes.json),
+    )
+    check(dl?.name === 'echo-request', '下载项的文件名不含选项那串东西', JSON.stringify(dl?.name))
+    const proxied = await fetch(`${BASE}${dl?.proxyUrl ?? ''}`)
+    const proxyBody = await proxied.text()
+    check(
+        proxied.status === 200 && proxyBody.includes('media-opt'),
+        '媒体代取会拆开地址里的请求选项（选项里的请求头真的发出去了）',
+        `status=${proxied.status} body=${JSON.stringify(proxyBody.slice(0, 60))}`,
+    )
+
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(mid)}`)
+    check(
+        !((await getJson('/api/sources')).json?.sources ?? []).some((s) =>
+            String(s.id).includes('addr-options'),
+        ),
+        '媒体代取的测试源已清理',
+    )
+}
+
 console.log('\n=== 结果 ===')
 if (failures.length === 0) {
     console.log(
