@@ -1100,12 +1100,15 @@ OpenCC 的 `TSCharacters.txt` 有几千条、且带「一简对多繁」的分�
 
 ### 明确报错的那些
 
-`java.webView` / `java.setContent` / `java.startBrowserAwait` / `java.getFile` / `java.queryTTF`
+`java.webView` / `java.setContent` / `java.startBrowserAwait` / `java.showBrowser` /
+`java.reLoginView` / `java.getFile` / `java.queryTTF`
 都需要 WebView、浏览器或私有文件系统，引擎里没有对应能力，**一律抛出带名字的错误**。
 `java.connect` 已实现基础形态；`java.createSymmetricCrypto` / `java.aesBase64DecodeToString`
 见上（AES 与 DES 的 CBC / ECB，CFB、ISO10126Padding、DESede 会带名字报错）。
 `java.t2s` / `java.s2t`(简繁转换) 没有字典表，返回原文并记一条日志 ——
 「降级但内容正确」比抛错让整条规则失败要好。
+`java.base64Decoder` 是**上游也没有的名字**（疑似 `base64Decode` 的笔误），
+登记它是为了让报错说出来，而不是只给一句 `not a function`（见「第五十二轮」）。
 
 ## 真实书源验证
 
@@ -4400,12 +4403,80 @@ this.classNames = className.trim().split("\\s+");   // 然后要求**每一个**
 而不是一个把人往「引擎坏了」方向带的 `not a function`。
 这一轮修的正是后者：让书源自己的判断**走得下去**。
 
+### 第五十二轮：反过来把「表外私货」也钉住 —— 没登记的名字
+
+第五十一轮那条 `not a function` 不是孤例的形状：书源只要调了一个我们**没登记**的名字，
+拿到的都是 QuickJS 那句**不带名字**的错。所以这一轮把它**反着量了一遍** ——
+语料里用到的 `java.*` 名字，与兼容层那张表（`JAVA_SURFACE`）对差集。
+
+**一、量（816 条源）。** 语料里出现过的 `java.*` 名字 **63 个**，表里登记 **112 个**。
+差集只有 **3 个**，各 1 源：
+
+| 名字            | 处数 | 谁在用       | 判断                                                 |
+| --------------- | ---- | ------------ | ---------------------------------------------------- |
+| `showBrowser`   | 3    | 🏷晋江文学    | 把一段 HTML+脚本交给 WebView 显示 → **平台能力缺失** |
+| `reLoginView`   | 1    | 🏷七猫小说    | 刷新登录界面 → **平台能力缺失**                      |
+| `base64Decoder` | 1    | ⚡📂顾淮小说 | **上游也没有这个名字** —— 源自己的笔误               |
+
+第三个的判断依据是这张表自己：表里的 `upstream` 一栏是**从上游源码原样抄下来的签名**，
+`base64Decode` / `base64DecodeToByteArray` 都在，独独没有 `base64Decoder`。
+
+**二、改法：三个都登记进表。** 前两个是 `absent`（生成带名字的桩：
+`java.showBrowser：本引擎没有这个能力（需要 WebView…）`）；第三个也登记成 `absent`，
+但把 `reason` 写成**「上游也没有这个名字，疑似 base64Decode 的笔误」** ——
+它其实不是「平台能力缺失」，登记它是图**报错能指对方向**：
+缺着的话书源只会拿到 `not a function`，看不出是名字写错了。
+
+（顺带量到：表里 `keep-absent` 那一批 —— 当初特意留成 `undefined` 好让书源用
+`typeof` 探测分支的 —— 在当前的 816 条语料里**用量是 0**。）
+
+**三、加了一条账本（第 14 条全量扫描）。** `test/javaSurface.scan.test.ts`：
+**「语料用到的 `java.*` 名字」减「表里登记的名字」必须为空**。以后语料里冒出个新名字，
+这条就红，逼着人明确决定它属于 `implemented` / `absent` / `keep-absent`，
+而不是让它悄悄变成一个 `not a function`。
+
+它同时打出一份**「挡着源的是哪种平台能力」**的清单 —— 这一轮量到的 **17 个名字**：
+
+| 名字                                                                                                                           | 处数 / 源     |
+| ------------------------------------------------------------------------------------------------------------------------------ | ------------- |
+| `startBrowser` / `startBrowserAwait`                                                                                           | 24/17、16/11  |
+| `webView`                                                                                                                      | 16/14         |
+| `getVerificationCode`                                                                                                          | 8/5           |
+| `head` / `androidId` / `showBrowser`                                                                                           | 5/2、3/3、3/1 |
+| `createAsymmetricCrypto` / `tripleDESEncodeBase64Str`                                                                          | 2/2、2/1      |
+| `getCookie` / `reLoginView` / `replaceFont` / `queryTTF` / `queryBase64TTF` / `downloadFile` / `readTxtFile` / `base64Decoder` | 各 1/1        |
+
+将来真要接一个带 WebView 的运行时，优先级就按这份清单排。
+
+**四、验证。**
+
+- 表的不变量早就由 `test/platform.test.ts` 钉着（`absent` 的每一行**必须**生成带自己名字的桩），
+  所以这一轮加行不需要新增单测
+- 全量扫描账本 **13 → 14 条 / 42 → 44 项**（新增的那条默认跳过，与其它 13 条同一种处理）
+- 冒烟**第 15c 段**早就覆盖了「未实现能力要报出名字」那条路（机制没变，这一轮只是多登记两个名字）
+- 单测条数**不变**（765）—— 这一轮没有新的纯函数可测
+
+**这一轮仍然没做完的**
+
+- **`parseFragments` 把「整篇文档」当一段时的怪相**：`getElements('html')` 会把文档根的子节点
+  数出来（量到 70 而不是 1）。语料里这个写法 **0 处**，只为知情记着
+- 选项里的 `{{}}` 与 `body` 对象混用是个**隐式依赖**（第四十四轮记）
+- **多行地址在别处仍会被切**：`media.ts` 的音频与下载两条路自己按 `\n` 取第一条
+  （第四十七轮量过：全量书源里**没有一处** audio/file 的 `content` / `downloadUrls` 带 `,{`）
+- `java.get(键)` 读不到持久化的书变量（故意保持窄）
+- **登录状态没有实现**：`putLoginHeader` / `putLoginInfo` 都只在**本次求值**里有效，
+  书源「登录一次、之后每次请求都带」的写法仍然走不通（那需要一张按书源隔离的表 +
+  一个能跑 `loginUrl` 的入口）。第四十一 / 五十一轮只是让它别抛一个指错方向的错
+- **WebView 那一族（17 个名字）**：本平台的取舍就是没有 WebView，所以它们永远是 `absent`
+
+**五、线上核验**（`/api/probe` 报 `0.42.0`）：见下。
+
 ## 验证
 
 ```bash
 npm install
 npm run db:migrate   # 建本地 D1 表（首次、以及每次新增迁移后）
-npm test             # 单元测试（765 项，Node 里毫秒级跑完；另有十三个默认跳过的全量扫描，见下）
+npm test             # 单元测试（765 项，Node 里毫秒级跑完；另有十四个默认跳过的全量扫描，见下）
 npm run dev          # 起本地服务，浏览器打开首页即可用；另开一个终端跑下面这条
 npm run smoke        # 端到端：链路 + 书源管理 + 静态资源 + 账号/书架/进度/书签 + 改显示名/改密码 + 导出导入备份 + 书签清单 + 替换净化同步 + 笔记 + 媒体 + 字段模板 + 选择器@js: + 空选择器取值 + 列表标记（+ / 顶格 <js>）+ 沙箱助手 + setContent/digestHex/UI 动作 + 节点级助手/加解密 + 连接式取网与 result.toArray() + 书源变量落库 + 书的上下文与书的变量 + JS 尾段列表规则保留节点 + 连接符切分 + 列表规则（末尾那个词 / CSS 首段的位置后缀 / `!` 排除下标）+ 字段规则（CSS 式多段 `@`）+ 变量指令（`@put:` / `@get:` 含**跨请求**那一半）+ `init`（铺变量与**换根**两种）+ `<js>` 段 + JSONPath 尾段（`$[*]` / `$[:n]`）+ 地址尾部的请求选项（`地址,{选项}` / 排成多行的那份选项块）+ URL 选项里 `body` 写对象（`application/json`）+ 展示用字段的容错与 `warnings` + 单斜杠 XPath（`/a/p[1]/text()` 相对当前条目）+ 防盗链封面走 `/api/media` 代取 + http 封面（混合内容）也代取 + `<script>` / `<style>` 也是元素（`java.getElement("script")` 那条路） + JSOUP 简写 `class.A B`（两个类都要有） + `source.getLoginInfoMap()` 的 Map 语义 + URL 字段 JS + 发现/首页
 ```
@@ -4619,7 +4690,7 @@ B 导入 → B 的书架、阅读位置（含「停在第几页」）、书签�
 ### 用真实书源全量扫描
 
 冒烟跑的是内置站点 —— 它证明「运行时可跑」，但证明不了「线上 800 多条书源里没有漏网的」。
-有些结论只能拿整份集合去量，现在有十三个扫描（各自独立，都默认跳过）：
+有些结论只能拿整份集合去量，现在有十四个扫描（各自独立，都默认跳过）：
 
 | 扫描                            | 量什么                                                                                   |
 | ------------------------------- | ---------------------------------------------------------------------------------------- |
@@ -4636,6 +4707,7 @@ B 导入 → B 的书架、阅读位置（含「停在第几页」）、书签�
 | `bangIndex.scan.test.ts`        | 规则里的 `!` **排除下标**：每一处引擎都解析得出来吗（第三十七轮）                        |
 | `fieldCssStops.scan.test.ts`    | 字段规则里 CSS 式**多段 `@`** 的每一段中间段都判过性质吗（第三十八轮）                   |
 | `putGet.scan.test.ts`           | `@get:` / `@put:` / `init` 的量级、单键形状、括号配平与写法分类（第三十九轮）            |
+| `javaSurface.scan.test.ts`      | 脚本用到的 `java.*` 名字表里都有登记吗（没登记就是 `not a function`，第五十二轮）        |
 
 ```bash
 # 导出一份书源（wrangler --json 的原样输出即可，也接受裸数组或探索结果的 json）
@@ -4645,7 +4717,7 @@ SOURCES_DUMP=sources.json npx vitest run test/ruleSplitting.scan.test.ts test/ru
   test/xpathRule.scan.test.ts test/resultShape.scan.test.ts test/ruleTail.scan.test.ts \
   test/listMarker.scan.test.ts test/resultHtml.scan.test.ts test/jsTailList.scan.test.ts \
   test/listExtract.scan.test.ts test/listCssHeadIndex.scan.test.ts test/bangIndex.scan.test.ts \
-  test/fieldCssStops.scan.test.ts test/putGet.scan.test.ts
+  test/fieldCssStops.scan.test.ts test/putGet.scan.test.ts test/javaSurface.scan.test.ts
 ```
 
 **默认整组跳过**，所以 CI 与日常 `npm test` 不受影响，书源也不会进仓库（dump 在 `.gitignore` 里）。
