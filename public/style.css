@@ -2107,6 +2107,33 @@ body[data-reader='1'] main#view {
     }
 }
 
+/* ---------------------------------------------------------------- 关于 */
+
+.about-version {
+    font-size: 20px;
+    font-weight: 600;
+}
+
+/* 更新记录：一条一版。左边那道竖线是分组用的 —— 四十来条排下来，
+   没有它就看不出「版本号 + 日期」与下面那句话是一伙的。 */
+.releases {
+    display: grid;
+    gap: var(--sp-3);
+}
+.release {
+    border-left: 2px solid var(--line);
+    padding-left: var(--sp-3);
+}
+.release-head {
+    display: flex;
+    align-items: baseline;
+    gap: var(--sp-2);
+}
+.release-note {
+    color: var(--ink-soft);
+    font-size: 13px;
+}
+
 /* 系统设了「减少动态效果」时，翻页与骨架屏都停下 —— 那是可访问性偏好，不是审美 */
 @media (prefers-reduced-motion: reduce) {
     *,

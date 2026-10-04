@@ -18,6 +18,7 @@ import {
     go,
     importBackupFile,
     loadSession,
+    loadVersion,
     login as doLogin,
     logout,
     paramsOf,
@@ -475,6 +476,72 @@ export async function viewAccount(host) {
                 }),
             ]),
         ),
+    ])
+}
+
+// ---------------------------------------------------------------- 关于
+
+/**
+ * 关于：版本 + 更新记录
+ *
+ * 「更新记录」的正文由 `/api/version` 给（书在 `src/changelog.ts`），**不在前端再抄一份**：
+ * 版本号的唯一出处是部署时的 `ENGINE_VERSION`，前端另存一份就会与它漂移，
+ * 而「界面写着 0.53、实际跑着 0.52」这种故障不报错，只会让人对着错的版本排查。
+ *
+ * 这一页**不要求登录**（见 `app.js` 的 `render`）：它回答的是「这台部署跑的是哪一版」，
+ * 与有没有账号无关 —— 而刚打开应用、还没登录的人，恰恰最可能想先确认这一点。
+ */
+export async function viewAbout(host) {
+    setChildren(host, [
+        el('h1', { class: 'page-title', text: '关于' }),
+        skeletonBlock('正在读取版本…'),
+    ])
+
+    let info
+    try {
+        info = await loadVersion()
+    } catch (err) {
+        setChildren(host, [
+            el('h1', { class: 'page-title', text: '关于' }),
+            alertBox('error', '读不到版本信息', err.message),
+        ])
+        return
+    }
+
+    const releases = info.changelog ?? []
+
+    setChildren(host, [
+        el('h1', { class: 'page-title', text: '关于' }),
+        el('section', { class: 'card' }, [
+            el('h2', { text: '版本' }),
+            el('p', { class: 'about-version', text: `书源阅读器 v${info.version}` }),
+            el('p', {
+                class: 'muted tiny',
+                text: '这个号在部署时写进环境变量（ENGINE_VERSION），下面那份记录跟着它走。',
+            }),
+        ]),
+        el('section', { class: 'card' }, [
+            el('h2', { text: `更新记录（${releases.length} 版）` }),
+            el('div', { class: 'releases' }, releases.map(releaseRow)),
+        ]),
+        el('section', { class: 'card' }, [
+            el('h2', { text: '许可' }),
+            el('p', {
+                class: 'muted tiny',
+                text: '本程序按 AGPL-3.0-or-later 发布。页脚的「源代码」是仓库地址 —— 通过网络使用它的任何人都能拿到源码。',
+            }),
+        ]),
+    ])
+}
+
+/** 更新记录里的一条：版本号 + 日期 + 一句话 */
+function releaseRow(release) {
+    return el('div', { class: 'release' }, [
+        el('div', { class: 'release-head' }, [
+            el('strong', { text: `v${release.version}` }),
+            el('span', { class: 'muted tiny', text: release.date }),
+        ]),
+        el('p', { class: 'release-note', text: release.note }),
     ])
 }
 

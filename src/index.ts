@@ -54,6 +54,7 @@ import { bookmarkFileName, loadBookmarkRows, renderCsv, renderMarkdown } from '.
 import { parseReplaceRules, readReplaceRules, writeReplaceRules } from './data/replaceRules'
 import { buildHomeSections, readHomeCache, writeHomeCache } from './data/home'
 import { DataError, bookKey } from './data/types'
+import { CHANGELOG } from './changelog'
 import { loadBookVariables, saveBookVariable } from './data/bookVars'
 import { getOrCreateMediaSecret } from './data/settings'
 import { UnsupportedRuleError } from './engine/analyze'
@@ -373,6 +374,23 @@ app.get('/api/probe', async (c) => {
 })
 
 app.get('/api/health', (c) => c.json({ ok: true }))
+
+/**
+ * 版本号与更新记录（前端「关于」页与页脚读它）
+ *
+ * 单独一个接口，而不是塞进 `/api/probe`：那个接口为了探活会真的跑一次 cheerio、
+ * 一次 QuickJS 求值和一次 D1 查询，前端为了显示一行版本号去调它太贵了。
+ * 这个接口不算任何东西 —— 版本号是部署时写进环境变量的那个值，记录是一份常量。
+ *
+ * `version` 只从 `ENGINE_VERSION` 出，**不在前端再抄一份**：抄了就会漂，
+ * 而「界面显示 0.53、实际跑 0.52」这种故障不会报错，只会让人对着错版本排查。
+ */
+app.get('/api/version', (c) =>
+    c.json({
+        version: c.env.ENGINE_VERSION ?? 'unknown',
+        changelog: CHANGELOG,
+    }),
+)
 
 /** `/api/sources` 里一条书源的全部字段（列表页只认这些） */
 interface SourceSummaryDto {

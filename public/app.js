@@ -13,12 +13,14 @@ import {
     el,
     go,
     loadSession,
+    loadVersion,
     setUnauthorizedHandler,
     toast,
 } from './js/core.js'
 import { viewRead } from './js/reader.js'
 import {
     invalidateShelf,
+    viewAbout,
     viewAccount,
     viewBook,
     viewExplore,
@@ -46,6 +48,7 @@ const VIEWS = {
     book: viewBook,
     read: viewRead,
     account: viewAccount,
+    about: viewAbout,
 }
 
 function parseRoute() {
@@ -118,6 +121,25 @@ function renderAccount() {
 // 账号页改了显示名 → 顶栏那份也要跟着变（跨模块，用一个事件解耦）
 window.addEventListener('reader:account-changed', renderAccount)
 
+/**
+ * 页脚那行版本号
+ *
+ * **刻意不 `await`**：它只影响页脚一个按钮上的字，不该挡住任何页面。
+ * 离线时这个请求必然失败，那时页脚留着占位那两个字，点进去的「关于」页
+ * 会自己把失败原因说清楚 —— 在页脚刷一句红字反而更吵。
+ */
+function renderVersion() {
+    const node = document.querySelector('#version')
+    if (!node) return
+    loadVersion()
+        .then((info) => {
+            node.textContent = `v${info.version}`
+        })
+        .catch(() => {
+            /* 连不上就先不显示版本，页脚不是报错的地方 */
+        })
+}
+
 /** 升级提示：本机还有一份匿名书架没并进账号 */
 function claimBanner() {
     return el('div', { class: 'claim-banner' }, [
@@ -182,8 +204,21 @@ async function render() {
 
     renderTabs(path)
     renderAccount()
+    renderVersion()
 
     if (!session.user) {
+        /**
+         * 「关于」在没登录时也要能打开
+         *
+         * 它回答的是「这台部署跑的是哪一版、最近改了什么」，与有没有账号无关 ——
+         * 而刚打开应用、还没登录的人，恰恰最可能想先确认这一点。
+         */
+        if (path === 'about') {
+            renderTabs('')
+            host.replaceChildren()
+            await viewAbout(host)
+            return
+        }
         renderTabs('')
         host.replaceChildren()
         await viewLogin(host, path === 'login' ? '' : '先登录，再开始阅读。')
@@ -212,6 +247,9 @@ async function render() {
         host.prepend(claimBanner())
     }
 }
+
+// 页脚那个版本号点开是「关于」（版本 + 更新记录）
+document.querySelector('#version')?.addEventListener('click', () => go('#/about'))
 
 window.addEventListener('hashchange', render)
 window.addEventListener('DOMContentLoaded', () => {

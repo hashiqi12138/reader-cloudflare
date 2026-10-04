@@ -407,6 +407,25 @@ export const patchJson = (path, body) =>
         body: JSON.stringify(body),
     })
 
+// ---------------------------------------------------------------- 版本
+
+/**
+ * 版本号与更新记录（`/api/version`）
+ *
+ * 结果缓存住：版本号在一次页面生命周期里不会变，而页脚与「关于」页都要它 ——
+ * 不缓存就是同一份东西问两遍。
+ *
+ * **失败不缓存**（与 `sourcesCache` 同一条道理）：离线时这个请求必然失败，
+ * 把失败记下来会让回到线上之后也一直读不到。
+ */
+let versionInfo = null
+
+export async function loadVersion() {
+    if (versionInfo) return versionInfo
+    versionInfo = await api('/api/version')
+    return versionInfo
+}
+
 // ---------------------------------------------------------------- 登录态
 
 /**
