@@ -25,6 +25,11 @@ export interface ReleaseNote {
 
 export const CHANGELOG: ReleaseNote[] = [
     {
+        version: '0.54.1',
+        date: '2026-10-05',
+        note: '手机上的页脚回来了：版本号与「关于」入口不再在窄屏里消失',
+    },
+    {
         version: '0.54.0',
         date: '2026-10-05',
         note: '版本信息与更新记录：/api/version + 页脚版本号 + 关于页',
