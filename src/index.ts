@@ -75,7 +75,7 @@ import {
     type FieldWarning,
 } from './legado/ops'
 import { fetchChapterContent } from './legado/media'
-import { normalizeLoginScript } from './legado/loginScript'
+import { loginAddressOf, normalizeLoginScript } from './legado/loginScript'
 import { mediaRequestHeaders, sandboxHttp } from './legado/source'
 import { baseGlobals, sourceLimits } from './engine/globals'
 import { splitUrlAndOptions } from './legado/urlOptions'
@@ -484,8 +484,13 @@ app.delete('/api/sources', async (c) => {
  *   `{ id, fields? }` —— fields 是用户填的表单。书源里两种读法都有
  *   （`result.get("账号")` 与 `result["账号"]`，🏷晋江文学 还先判 `typeof result`），
  *   所以沙箱那侧把它包成「同时支持两者」的对象。
- *   **多数 loginUrl 其实不需要表单**（它们是「切换线路 / 保存设置」那类菜单），
+ *   一部分脚本型 loginUrl 不需要表单（「切换线路 / 保存设置」那类菜单），
  *   那种源直接 POST 一个 `{ id }` 就行。
+ *
+ * 量了一条：116 条写了 loginUrl 的源里，**65 条根本不是脚本，是一条登录页地址**
+ * （`https://m.uaa.com/` / `/login.php` / `{ "url": "null" }`）—— App 里那是在
+ * WebView 里打开让人手登的。本平台没有 WebView，所以这一档直接回一句明白话，
+ * 而不是让沙箱去报 `SyntaxError`（那会把原因指到「书源写错了」上去）。
  */
 app.post('/api/sources/login', async (c) => {
     const body = (await c.req.json().catch(() => ({}))) as { id?: unknown; fields?: unknown }
@@ -496,8 +501,21 @@ app.post('/api/sources/login', async (c) => {
     if (typeof source.loginUrl !== 'string' || source.loginUrl.trim() === '') {
         return c.json({ error: '这个书源没有写登录脚本（loginUrl）' }, 400)
     }
-    // `loginUrl` 在语料里有两种形态：裸脚本，以及被作者加了 `@js:` / `<js>` 标记的
-    // （那两个标记是**规则字段**的语法）—— 见 legado/loginScript.ts 的说明
+    // `loginUrl` 在语料里有三种形态：裸脚本、被作者加了 `@js:` / `<js>` 标记的脚本
+    // （那两个标记是**规则字段**的语法），以及**一条登录页地址** ——
+    // 最后那种（116 条里 65 条）在 App 里是用 WebView 打开让人手登的，见下
+    const loginAddress = loginAddressOf(source.loginUrl)
+    if (loginAddress !== undefined) {
+        return c.json(
+            {
+                error:
+                    '这个书源的 loginUrl 是一条**登录页地址**（App 里用 WebView 打开让人手动登录）：' +
+                    `${loginAddress}。本平台没有 WebView，跑不了它 —— 换成「脚本型 loginUrl」的书源，` +
+                    '或者在站点侧用别的方式拿到登录头再 `putLoginHeader`。',
+            },
+            400,
+        )
+    }
     const loginScript = normalizeLoginScript(source.loginUrl)
     if (loginScript === '') {
         return c.json({ error: '这个书源的登录脚本是空的（只有标记）' }, 400)

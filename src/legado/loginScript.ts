@@ -34,3 +34,40 @@ export function normalizeLoginScript(raw: string | undefined | null): string {
 
     return text.trim()
 }
+
+/**
+ * 有的 `loginUrl` 根本不是脚本，而是**一条登录页地址**
+ *
+ * 语料里 116 条 `loginUrl` 有 **65 条**是这种：`https://m.uaa.com/`、`/login.php`、
+ * `http://m.zhuishushenqi.com/login?source=/setting`；另有几条是「地址 + 选项」的
+ * JSON 写法（`{ "url": "null" }` / `{ "url": "" }`）。App 遇到它们就是**用 WebView
+ * 打开那个页面**让人手动登录，不存在「跑一段脚本」这回事。
+ *
+ * 本平台没有 WebView（见 README 的「WebView 那一族」），所以这种源跑不了 ——
+ * 但**硬当 JS 求值只会报一句 `SyntaxError`**，把「我们打不开登录页」说成
+ * 「书源的脚本写错了」，方向是错的。这里把它认出来，好让调用方给一句明白话。
+ *
+ * 返回地址（可能是空串，如 `{ "url": "" }`）；不是地址形态则返回 `undefined`。
+ */
+export function loginAddressOf(raw: string | undefined | null): string | undefined {
+    const text = String(raw ?? '').trim()
+    if (text === '') return undefined
+
+    // 裸地址：`http(s)://…` 或站内相对路径 `/…`（`###挂梯` 那种尾巴也跟着，不影响判断）
+    if (/^https?:\/\//i.test(text)) return text
+    if (/^\/\S*$/.test(text)) return text
+
+    // 「地址 + 选项」的 JSON 写法，例如 `{ "url": "null" }`
+    if (text.startsWith('{')) {
+        try {
+            const parsed = JSON.parse(text) as unknown
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                const url = (parsed as { url?: unknown }).url
+                if (typeof url === 'string') return url
+            }
+        } catch {
+            /* 不是合法 JSON —— 按脚本处理（有些脚本就以 `{` 开头的块语句起手） */
+        }
+    }
+    return undefined
+}

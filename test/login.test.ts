@@ -1,13 +1,15 @@
 /**
- * 登录态：脚本形态归一（`normalizeLoginScript`）与三层请求头
+ * 登录态：`loginUrl` 的三种形态与三层请求头
  *
  * 第五十七轮把三件事接起来：**能跑 `loginUrl`**、**落库**、**请求带上**。
- * 这里钉住其中不用起沙箱、不起网络的两段：
+ * 这里钉住其中不用起沙箱、不起网络的两段（形态 + 头序）：
  *
  *   ① `loginUrl` 里那段脚本的**形态** —— 语料里既有裸脚本，也有按「规则字段」
  *      加了 `@js:` / `<js>…</js>` 标记的；标记不剥掉，沙箱会拿它当 JS 解析，
  *      报出来的是 `SyntaxError: unexpected token '@'`（把人往「书源写错了」方向带）。
- *   ② 请求头的**三层叠加顺序** —— 登录头 → 默认头 → 书源自己的 `header`，
+ *   ② **一条登录页地址**（116 条 loginUrl 里 65 条）—— 那是 App 用 WebView 打开的
+ *      页面，硬当 JS 跑只会报 SyntaxError；要认出来、给一句明白话。
+ *   ③ 请求头的**三层叠加顺序** —— 登录头 → 默认头 → 书源自己的 `header`，
  *      后面的盖前面的。写反了会让一次登录的快照把书源写过的 UA / Cookie 闷掉。
  *
  * 沙箱内那半（`putLoginHeader` 写穿、`getLoginInfo` 读回来）不走单测 ——
@@ -18,7 +20,7 @@
 import { describe, expect, it } from 'vitest'
 
 import type { BookSource } from '../src/engine/types'
-import { normalizeLoginScript } from '../src/legado/loginScript'
+import { loginAddressOf, normalizeLoginScript } from '../src/legado/loginScript'
 import { requestHeadersFor } from '../src/legado/sourceHeaders'
 
 /** 只放受测的那几列：`loginHeader` / `header` */
@@ -59,6 +61,41 @@ describe('normalizeLoginScript：`loginUrl` 里那段脚本的形态', () => {
 
     it('两侧的空白一并剪掉', () => {
         expect(normalizeLoginScript('  \n  login()  \n  ')).toBe('login()')
+    })
+})
+
+describe('loginAddressOf：`loginUrl` 是「一条登录页地址」的那种', () => {
+    it('裸地址认得出来（语料里 116 条 loginUrl 有 65 条是这种）', () => {
+        expect(loginAddressOf('https://m.uaa.com/')).toBe('https://m.uaa.com/')
+        expect(loginAddressOf('/login.php')).toBe('/login.php')
+        expect(loginAddressOf('http://m.zhuishushenqi.com/login?source=/setting')).toContain(
+            'zhuishushenqi',
+        )
+        // `###挂梯` 那种尾巴不影响判断（🎬🔞VirtalTaboo直播）
+        expect(loginAddressOf('https://zh.virtualtaboo.live###可能要挂梯')).toContain(
+            'virtualtaboo',
+        )
+    })
+
+    it('「地址 + 选项」的 JSON 写法取出 url（`{ "url": "null" }`，空串也认）', () => {
+        expect(loginAddressOf('{ "url": "null" }')).toBe('null')
+        expect(loginAddressOf('{ "url": "" }')).toBe('')
+    })
+
+    it('脚本一律返回 undefined（不能把脚本误判成地址）', () => {
+        expect(loginAddressOf('function login(){ source.putLoginInfo("{}") }')).toBeUndefined()
+        expect(loginAddressOf('@js:\nfunction login(){}')).toBeUndefined()
+        expect(loginAddressOf('var QQ_GROUP = "1097919737"; function login(){}')).toBeUndefined()
+        // 以 `{` 开头但不是合法 JSON：按脚本处理
+        expect(loginAddressOf('{ if (a) { login() } }')).toBeUndefined()
+        // 块注释起手（`// 站点配置…`）有空白，不算相对路径
+        expect(loginAddressOf('// 说明\nfunction login(){}')).toBeUndefined()
+    })
+
+    it('空 / 只有空白 → undefined（与「没写登录脚本」是两回事）', () => {
+        expect(loginAddressOf(undefined)).toBeUndefined()
+        expect(loginAddressOf('')).toBeUndefined()
+        expect(loginAddressOf('   ')).toBeUndefined()
     })
 })
 

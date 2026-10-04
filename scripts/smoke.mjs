@@ -6145,7 +6145,8 @@ console.log('\n=== 44. 登录态：跑一次 loginUrl，之后每趟请求都带
      */
     const id = `user:${BASE}/login-57`
     const coldId = `user:${BASE}/login-57-cold`
-    for (const one of [id, coldId])
+    const urlId = `user:${BASE}/login-57-url`
+    for (const one of [id, coldId, urlId])
         await call('DELETE', `/api/sources?id=${encodeURIComponent(one)}`)
 
     const loginScript =
@@ -6185,6 +6186,15 @@ console.log('\n=== 44. 登录态：跑一次 loginUrl，之后每趟请求都带
                 bookSourceName: '登录（对照·没登录）',
                 bookSourceUrl: `${BASE}/login-57-cold`,
                 loginUrl: loginScript,
+                ...baseRules,
+            },
+            {
+                // 第三种形态：loginUrl 根本**不是脚本**，是一条登录页地址
+                // （语料里 116 条 loginUrl 有 65 条是这种）—— 要回一句明白话，
+                // 而不是让沙箱去报 SyntaxError
+                bookSourceName: '登录（地址型）',
+                bookSourceUrl: `${BASE}/login-57-url`,
+                loginUrl: 'https://example.com/login',
                 ...baseRules,
             },
         ]),
@@ -6253,13 +6263,22 @@ console.log('\n=== 44. 登录态：跑一次 loginUrl，之后每趟请求都带
         String(out.json?.error ?? out.json?.content ?? '（居然还进得去）'),
     )
 
-    for (const one of [id, coldId])
+    // ⑥ loginUrl 是一条**登录页地址**（不是脚本）时：回一句明白话，别报 SyntaxError
+    const addr = await login(urlId, {})
+    check(
+        String(addr.json?.error ?? '').includes('登录页地址') &&
+            !String(addr.json?.error ?? '').includes('SyntaxError'),
+        '⑥ 地址型 loginUrl：说清「这是 WebView 打开的登录页地址」，不是拿它当 JS 报错',
+        JSON.stringify(addr.json ?? addr.raw),
+    )
+
+    for (const one of [id, coldId, urlId])
         await call('DELETE', `/api/sources?id=${encodeURIComponent(one)}`)
     check(
         !((await getJson('/api/sources')).json?.sources ?? []).some((s) =>
             String(s.id).includes('login-57'),
         ),
-        '登录的两个测试源已清理',
+        '登录的三个测试源已清理',
     )
 }
 
