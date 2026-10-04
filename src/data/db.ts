@@ -22,6 +22,13 @@ const MAX_PAYLOAD_BYTES = 256 * 1024
 const MAX_NAME_LENGTH = 200
 const MAX_URL_LENGTH = 512
 
+/**
+ * `/api/sources` 的缓存版本号（存在通用键值表 `settings` 里）
+ *
+ * 任何会改变该接口输出的写入都要 +1 —— 见 `sourcesRevStatement` 与那四处调用点。
+ */
+const SOURCES_REV_KEY = 'sources_rev'
+
 interface SourceRow {
     id: string
     name: string
@@ -117,6 +124,108 @@ export async function listUserSources(db: D1Database): Promise<RegisteredSource[
         .prepare(`SELECT ${SELECT_COLUMNS} FROM sources ORDER BY sort_order, name`)
         .all<SourceRow>()
     return (results ?? []).map((row) => rowToSource(row, db))
+}
+
+/**
+ * 列表页要的书源摘要
+ *
+ * 与 `listUserSources` 的差别是**不取 `payload`、也不 `JSON.parse`**：
+ * `hasSearch / hasExplore / hasLogin` 三个判据本来要从每条的规则里读
+ * （816 条就是 816 次 parse，`/api/sources` 那 27ms 的 CPU 主要花在这里），
+ * 现在交给 SQLite 的 `json_extract` 在 **D1 侧**算完再回来 —— D1 的查询 CPU
+ * 不计入 Worker 那 10ms 预算，Worker 侧只剩「把行读出来并序列化」。
+ *
+ * `json_valid` 那几处不是多余的：`json_extract` 遇到坏 JSON 会**抛错**，
+ * 一条坏数据就能让整个列表 500，而它本来只是「这一条的标记算不出来」。
+ */
+export interface SourceSummary {
+    id: string
+    name: string
+    group: string
+    type: number
+    enabled: boolean
+    hasSearch: boolean
+    hasExplore: boolean
+    hasLogin: boolean
+    loggedIn: boolean
+}
+
+interface SourceSummaryRow {
+    id: string
+    name: string
+    group_name: string
+    enabled: number
+    type: number
+    has_search: number
+    has_explore: number
+    has_login: number
+    logged_in: number
+}
+
+export async function listSourceSummaries(db: D1Database): Promise<SourceSummary[]> {
+    const { results } = await db
+        .prepare(
+            `SELECT
+                 id,
+                 name,
+                 group_name,
+                 enabled,
+                 COALESCE(json_extract(payload, '$.bookSourceType'), 0) AS type,
+                 CASE WHEN json_valid(payload)
+                           AND COALESCE(json_extract(payload, '$.searchUrl'), '') <> ''
+                           AND COALESCE(json_extract(payload, '$.ruleSearch.bookList'), '') <> ''
+                      THEN 1 ELSE 0 END AS has_search,
+                 CASE WHEN json_valid(payload)
+                           AND COALESCE(json_extract(payload, '$.exploreUrl'), '') <> ''
+                           AND COALESCE(json_extract(payload, '$.ruleExplore.bookList'), '') <> ''
+                      THEN 1 ELSE 0 END AS has_explore,
+                 CASE WHEN json_valid(payload)
+                           AND COALESCE(TRIM(json_extract(payload, '$.loginUrl')), '') <> ''
+                      THEN 1 ELSE 0 END AS has_login,
+                 CASE WHEN COALESCE(login_header, '') <> '' OR COALESCE(login_info, '') <> ''
+                      THEN 1 ELSE 0 END AS logged_in
+             FROM sources
+             ORDER BY sort_order, name`,
+        )
+        .all<SourceSummaryRow>()
+    return (results ?? []).map((row) => ({
+        id: row.id,
+        name: row.name,
+        group: row.group_name ?? '',
+        type: row.type ?? 0,
+        enabled: row.enabled === 1,
+        hasSearch: row.has_search === 1,
+        hasExplore: row.has_explore === 1,
+        hasLogin: row.has_login === 1,
+        loggedIn: row.logged_in === 1,
+    }))
+}
+
+/**
+ * 让 `/api/sources` 的 ETag 换一代
+ *
+ * 返回一条**待提交的语句**而不是立刻执行：它要跟着数据改动进同一个 `batch`。
+ * 分开写会留下「数据已改、版本号未变」的窗口，那期间浏览器拿到的 304 是过期的。
+ * 自增放在 SQL 里做（而不是读出来 +1 再写回），并发写才不会互相覆盖。
+ */
+function sourcesRevStatement(db: D1Database): D1PreparedStatement {
+    return db
+        .prepare(
+            `INSERT INTO settings (key, value, updated_at) VALUES (?, '1', ?)
+             ON CONFLICT(key) DO UPDATE SET
+                 value = CAST(CAST(settings.value AS INTEGER) + 1 AS TEXT),
+                 updated_at = excluded.updated_at`,
+        )
+        .bind(SOURCES_REV_KEY, Date.now())
+}
+
+/** 当前版本号；从没写过时是 `'0'`（与第一次 bump 之后的 `'1'` 区分得开） */
+export async function readSourcesRev(db: D1Database): Promise<string> {
+    const row = await db
+        .prepare('SELECT value FROM settings WHERE key = ?')
+        .bind(SOURCES_REV_KEY)
+        .first<{ value: string }>()
+    return row?.value ?? '0'
 }
 
 /** 单个用户书源；不存在返回 undefined（与「读取出错」区分开） */
@@ -266,10 +375,14 @@ export async function saveSourceLogin(
     id: string,
     value: { header: string; info: string },
 ): Promise<void> {
-    await db
-        .prepare('UPDATE sources SET login_header = ?, login_info = ?, updated_at = ? WHERE id = ?')
-        .bind(value.header, value.info, Date.now(), id)
-        .run()
+    await db.batch([
+        db
+            .prepare(
+                'UPDATE sources SET login_header = ?, login_info = ?, updated_at = ? WHERE id = ?',
+            )
+            .bind(value.header, value.info, Date.now(), id),
+        sourcesRevStatement(db),
+    ])
 }
 
 export interface RejectedSource {
@@ -467,7 +580,8 @@ export async function importSources(db: D1Database, text: string): Promise<Impor
         )
     })
 
-    if (statements.length > 0) await db.batch(statements)
+    // 版本号跟数据改动同一次 batch 提交：分开写会留下「数据已改、ETag 还没变」的窗口
+    if (statements.length > 0) await db.batch([...statements, sourcesRevStatement(db)])
 
     return { imported, updated, rejected }
 }
@@ -479,19 +593,24 @@ export async function setSourceEnabled(
     enabled: boolean,
 ): Promise<void> {
     assertUserSource(id)
-    const result = await db
-        .prepare('UPDATE sources SET enabled = ?, updated_at = ? WHERE id = ?')
-        .bind(enabled ? 1 : 0, Date.now(), id)
-        .run()
-    if (result.meta.changes === 0) {
+    const [result] = await db.batch([
+        db
+            .prepare('UPDATE sources SET enabled = ?, updated_at = ? WHERE id = ?')
+            .bind(enabled ? 1 : 0, Date.now(), id),
+        sourcesRevStatement(db),
+    ])
+    if ((result?.meta.changes ?? 0) === 0) {
         throw new DataError(`找不到书源：${id}`, 404, 'source_not_found')
     }
 }
 
 export async function deleteUserSource(db: D1Database, id: string): Promise<void> {
     assertUserSource(id)
-    const result = await db.prepare('DELETE FROM sources WHERE id = ?').bind(id).run()
-    if (result.meta.changes === 0) {
+    const [result] = await db.batch([
+        db.prepare('DELETE FROM sources WHERE id = ?').bind(id),
+        sourcesRevStatement(db),
+    ])
+    if ((result?.meta.changes ?? 0) === 0) {
         throw new DataError(`找不到书源：${id}`, 404, 'source_not_found')
     }
 }

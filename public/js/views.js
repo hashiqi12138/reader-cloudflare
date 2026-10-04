@@ -34,6 +34,7 @@ import {
 } from './core.js'
 import { mergeBooks, sourceBookKey } from './merge.js'
 import { SEARCH_MIN_PAGE, SEARCH_PAGE_SIZE, isCpuLimitError, nextPageSize } from './searchPlan.js'
+import { createSourcesCache } from './sourcesCache.js'
 
 /**
  * 阅读界面的地址
@@ -63,6 +64,19 @@ export async function loadShelf(force = false) {
 export function invalidateShelf() {
     shelfEntries = null
 }
+
+// ---------------------------------------------------------------- 书源缓存
+
+/*
+ * 用法与 `loadShelf` / `invalidateShelf` 一致，但底层多一层 `sourcesCache`：
+ * 书源列表是**全部署共用**的（`sources` 表没有 owner 列），会话之外也会变 ——
+ * 另一个标签页改了它，或者阅读时书源自己跑了 `putLoginHeader`。
+ * 所以它要的是一个兜底时限，而不是「一直用到下次在本页改动为止」。
+ */
+const sourcesCache = createSourcesCache(() => api('/api/sources'))
+
+export const loadSources = () => sourcesCache.load()
+export const invalidateSources = () => sourcesCache.invalidate()
 
 export const inShelf = (entries, sourceId, target) =>
     entries.some((e) => e.sourceId === sourceId && e.bookUrl === target)
@@ -959,7 +973,7 @@ export async function viewExplore(host) {
 
     let sources
     try {
-        const data = await api('/api/sources')
+        const data = await loadSources()
         sources = (data.sources ?? []).filter((s) => s.hasExplore && s.enabled)
     } catch (err) {
         host.replaceChildren(
@@ -1488,7 +1502,7 @@ export async function viewSources(host) {
 
     let data
     try {
-        data = await api('/api/sources')
+        data = await loadSources()
     } catch (err) {
         host.replaceChildren(
             el('h1', { class: 'page-title', text: '书源' }),
@@ -1548,6 +1562,7 @@ export async function viewSources(host) {
                             const enabled = event.target.checked
                             try {
                                 await postJson('/api/sources', { id: source.id, enabled })
+                                invalidateSources()
                                 toast(enabled ? `已启用：${source.name}` : `已停用：${source.name}`)
                             } catch (err) {
                                 event.target.checked = !enabled
@@ -1569,6 +1584,7 @@ export async function viewSources(host) {
                                   await api(`/api/sources?id=${encodeURIComponent(source.id)}`, {
                                       method: 'DELETE',
                                   })
+                                  invalidateSources()
                                   toast(`已删除：${source.name}`)
                                   await viewSources(host)
                               } catch (err) {
@@ -1694,7 +1710,12 @@ async function renderLoginPanel(host, source, stateBadge) {
         button.disabled = true
         status.replaceChildren(el('p', { class: 'muted', text: `正在执行「${label}」…` }))
         try {
-            show(await postJson(path, body))
+            const result = await postJson(path, body)
+            show(result)
+            // 登录态存在书源那一行上（`login_header` / `login_info`），而 `/api/sources`
+            // 的 `loggedIn` 就是读那两列 —— 变了必须让缓存作废，
+            // 否则离开再回到书源页，徽标还是「未登录」
+            if (result?.loggedIn !== undefined) invalidateSources()
         } catch (err) {
             // 这里是「地址型 loginUrl」那句明白话能露出来的地方
             status.replaceChildren(alertBox('error', `「${label}」没成`, err.message))
@@ -1794,6 +1815,7 @@ function renderImport(host) {
                         : '',
                 ),
             )
+            invalidateSources()
             await viewSources(host)
         } catch (err) {
             status.replaceChildren(alertBox('error', '导入失败', err.message))

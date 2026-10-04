@@ -13,16 +13,18 @@ import {
     countUserSources,
     deleteUserSource,
     importSources,
+    listSourceSummaries,
+    readSourcesRev,
     recordSourceHealth,
     setSourceEnabled,
     type SourceOutcome,
 } from './data/db'
 import {
+    builtinSources,
     findSource,
     listEnabledSourcePage,
     listEnabledSources,
     listEnabledSourcesByIds,
-    listSources,
     persistSourceVariable,
 } from './data/sources'
 import type { RegistryOptions, RegisteredSource } from './data/sources'
@@ -80,6 +82,7 @@ import { EMPTY_LOGIN_FORM, normalizeLoginForm, parseLoginUiJson } from './legado
 import { mediaRequestHeaders, sandboxHttp } from './legado/source'
 import { baseGlobals, sourceLimits } from './engine/globals'
 import { splitUrlAndOptions } from './legado/urlOptions'
+import { matchesEtag } from './lib/etag'
 import { UpstreamError } from './lib/http'
 import { USER_HEADER } from './lib/identity'
 import { MediaTokenError, signMediaToken, verifyMediaToken } from './lib/signing'
@@ -371,29 +374,69 @@ app.get('/api/probe', async (c) => {
 
 app.get('/api/health', (c) => c.json({ ok: true }))
 
-/** 当前可用的书源 */
+/** `/api/sources` 里一条书源的全部字段（列表页只认这些） */
+interface SourceSummaryDto {
+    id: string
+    name: string
+    group: string
+    type: number
+    builtin: boolean
+    enabled: boolean
+    hasSearch: boolean
+    hasExplore: boolean
+    hasLogin: boolean
+    loggedIn: boolean
+}
+
+/**
+ * 内置书源（测试站点那十几条）不落库，摘要只能现算
+ *
+ * 判据必须与 `listSourceSummaries` 里的 SQL **逐条对齐**：两边算的不是同一件事时，
+ * 只有「本地开着测试站点、线上没开」才会显出差异，而那种差异极难查。
+ */
+function summaryOfBuiltin(s: RegisteredSource): SourceSummaryDto {
+    return {
+        id: s.id,
+        name: s.bookSourceName,
+        group: s.bookSourceGroup ?? '',
+        type: s.bookSourceType ?? 0,
+        builtin: true,
+        enabled: s.enabled !== false,
+        hasSearch: Boolean(s.searchUrl && s.ruleSearch?.bookList),
+        // 「发现」页要按这个字段筛出能探索的书源，否则前端得逐个试一遍
+        hasExplore: Boolean(s.exploreUrl && s.ruleExplore?.bookList),
+        // 书源页据此显示「登录」入口。注意地址型 loginUrl（76/116 条，
+        // App 里用 WebView 打开的那种）也算有 —— 点进去会看到那句明白话
+        hasLogin: Boolean(s.loginUrl && s.loginUrl.trim() !== ''),
+        // 「现在是不是已登录」—— 两列只要有一列非空就算（与 /api/sources/login
+        // 里那个 `loggedIn` 同一个判据，只是这里直接看库里那份）
+        loggedIn: (s.loginHeader ?? '') !== '' || (s.loginInfo ?? '') !== '',
+    }
+}
+
+/**
+ * 当前可用的书源
+ *
+ * 重复加载走 `ETag` / 304。这个接口的输出**只取决于书源表**（不是每个用户一份），
+ * 所以一个部署级版本号就够当校验器，命中时连那 816 行都不读。
+ * 没命中时才走 `listSourceSummaries` —— 它把标记的计算下推给 D1，
+ * Worker 侧不再为了几个布尔值 parse 816 份书源。
+ */
 app.get('/api/sources', async (c) => {
     const origin = new URL(c.req.url).origin
-    const sources = await listSources(c.env.DB, origin, registryOf(c.env))
-    return c.json({
-        sources: sources.map((s) => ({
-            id: s.id,
-            name: s.bookSourceName,
-            group: s.bookSourceGroup ?? '',
-            type: s.bookSourceType ?? 0,
-            builtin: s.builtin,
-            enabled: s.enabled !== false,
-            hasSearch: Boolean(s.searchUrl && s.ruleSearch?.bookList),
-            // 「发现」页要按这个字段筛出能探索的书源，否则前端得逐个试一遍
-            hasExplore: Boolean(s.exploreUrl && s.ruleExplore?.bookList),
-            // 书源页据此显示「登录」入口。注意地址型 loginUrl（76/116 条，
-            // App 里用 WebView 打开的那种）也算有 —— 点进去会看到那句明白话
-            hasLogin: Boolean(s.loginUrl && s.loginUrl.trim() !== ''),
-            // 「现在是不是已登录」—— 两列只要有一列非空就算（与 /api/sources/login
-            // 里那个 `loggedIn` 同一个判据，只是这里直接看库里那份）
-            loggedIn: (s.loginHeader ?? '') !== '' || (s.loginInfo ?? '') !== '',
-        })),
-    })
+    const options = registryOf(c.env)
+
+    const rev = await readSourcesRev(c.env.DB)
+    const etag = `"src-${rev}-${options.includeFixture ? 'f' : 'n'}"`
+    const headers = { ETag: etag, 'Cache-Control': 'no-cache' }
+    if (matchesEtag(c.req.header('if-none-match'), etag)) {
+        return new Response(null, { status: 304, headers })
+    }
+
+    const builtin = options.includeFixture ? builtinSources(origin).map(summaryOfBuiltin) : []
+    const user = (await listSourceSummaries(c.env.DB)).map((s) => ({ ...s, builtin: false }))
+
+    return c.json({ sources: [...builtin, ...user] }, 200, headers)
 })
 
 /**
