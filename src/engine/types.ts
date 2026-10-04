@@ -75,7 +75,15 @@ export interface ChapterContext {
     /** 章节在目录里的序号 */
     index?: number
     url?: string
-    [key: string]: string | number | undefined
+    /**
+     * 这一章要不要付费（`chapter.isVip()`）
+     *
+     * 值来自**目录规则里的 `ruleToc.isVip`**（第五十六轮起真的会填），
+     * 由客户端在打开正文时带上来。所以它只在「从目录点进去」那条路里有值，
+     * 直接拿一个地址调 `/api/content` 时没有 —— 那时 `isVip()` 仍然是 `false`。
+     */
+    isVip?: boolean
+    [key: string]: string | number | boolean | undefined
 }
 
 /** 求值上下文，对应 Legado 在 js 里暴露的那些全局变量 */
@@ -374,6 +382,19 @@ export interface BookSource {
         chapterName?: string
         chapterUrl?: string
         nextTocUrl?: string
+        /**
+         * 这一条要不要付费 / 是不是卷标题 / 更新时间（第五十六轮开始取）
+         *
+         * 三条都是**逐条求值**的规则，与 `chapterName` 同一层。以前整片丢掉，
+         * 症状是「目录里看不出哪一章要钱、也看不到卷」（见「第五十六轮」）。
+         * `preUpdateJs` 是同层的第四条，但它是 App 侧「更新目录前跑一段脚本」，
+         * 本引擎不实现（登记在账本里）。
+         */
+        isVip?: string
+        isPay?: string
+        isVolume?: string
+        updateTime?: string
+        preUpdateJs?: string
     }
 
     ruleContent?: {
@@ -463,6 +484,36 @@ export interface SearchBook {
 export interface Chapter {
     name: string
     url: string
+    /**
+     * 这一章要付费（`ruleToc.isVip`）—— 线上 45 个源写了这条规则
+     *
+     * 判据是「规则求值出非空、且不是 `false` / `0`」：语料里两种写法都有 ——
+     * 一种给的是**标记文本**（🌍🔞UAA 的 `@css:.ndc-acc@text##注册会员`、
+     * ⚡📂企鹅阅读 的锁图标 HTML），另一种是脚本算出来的 `true`/`false`
+     * （🏷晋江文学 的 `<js> vip = … </js>`、🔞书耽 的 `@js:!{{$.auth_access}}`）。
+     * 只按「非空」判的话，脚本明明回了 `false` 也会被当成要付费。
+     */
+    isVip?: boolean
+    /**
+     * 这一章**已经买过**（`ruleToc.isPay`）—— 7 个源在用
+     *
+     * 与 `isVip` 一起看才是「要不要拦住」：vip 且已购的章照样能读。
+     */
+    isPay?: boolean
+    /**
+     * 这一条是**卷标题**（`ruleToc.isVolume`），不是真章节
+     *
+     * 25 个源在用。它通常没有正文地址（`chapterUrl` 取到的是卷名那一段文本），
+     * 所以前端要把它渲染成**分组标题**而不是可点的一章。
+     */
+    isVolume?: boolean
+    /**
+     * 这一章的更新时间（`ruleToc.updateTime`，74 个源）—— 只用于展示
+     *
+     * 原样留着规则算出来的那一段文本（🏷晋江文学 会给成
+     * `12字•2024-05-01•简介` 这种拼起来的一串），引擎不去解析它。
+     */
+    updateTime?: string
 }
 
 /**

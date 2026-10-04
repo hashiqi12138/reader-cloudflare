@@ -15,6 +15,7 @@ import {
 } from '../engine/analyze'
 import type { BookSource, Chapter, RuleContext, SearchBook } from '../engine/types'
 import { SEARCH_TIMEOUT_MS, UpstreamError, fetchText } from '../lib/http'
+import { tocFlag, tocText } from './chapterFields'
 import { buildPlan, sandboxHttp } from './source'
 import { crossRequestInfoKeys } from '../engine/infoVars'
 
@@ -475,6 +476,21 @@ export async function fetchBookInfo(
  */
 const MAX_TOC_PAGES = 20
 
+/**
+ * 逐条标注（`isVip` / `isPay` / `isVolume` / `updateTime`）最多为多少条求值
+ *
+ * 量出来的代价：**一次沙箱求值约 4～8ms**（冒烟第 43 段：300 条 × 三条 `@js:` 逐条字段
+ * ≈ 900 次求值，实测 7.1 秒）。一本书动辄上千章，这几条字段又**逐条**求值 ——
+ * 只要它们写成了 `@js:` / `{{}}`（语料里 17 / 34 / 4 / 2 个源是这样），
+ * 一本两千章的书就是上万次求值，整次目录请求必然超时。
+ *
+ * 而它们都只是**标注**：没有它们目录照样能读，有它们更好。所以给一个上限，
+ * 超过就停下、并在 `warning` 里说清楚（**不静默** —— 「少了一截」必须让用户看见）。
+ * 300 覆盖得住绝大多数书的目录长度；真要读超长的书，该先解决的是
+ * 「每次求值都要重新解析一遍预置脚本」这件事，而不是在这里赌平台会放过我们。
+ */
+const MAX_MARKED_CHAPTERS = 300
+
 /** 目录结果 */
 export interface TocResult {
     chapters: Chapter[]
@@ -500,7 +516,10 @@ export async function fetchChapters(
     // 按地址去重：多页之间、以及站点的「最新章节」区块与完整目录之间都可能重复
     const seenChapterUrls = new Set<string>()
     const visitedTocUrls = new Set<string>()
-    let warning: string | undefined
+    const notes: string[] = []
+    /** 已经为多少条求过逐条标注了（跨页累计，上限见 MAX_MARKED_CHAPTERS） */
+    let markedCount = 0
+    let marksTruncated = false
 
     let currentUrl = tocUrl
     // 目录这一组里写的跨请求键（比如 `🏛名著阅读` 的 `img`，正文那次请求要读）：
@@ -522,7 +541,9 @@ export async function fetchChapters(
             // 真实站点上这很常见 —— 最后一页被删、或书源的翻页地址算错，
             // 一次 404 就把前面几百章全丢掉，比「章节不全」更糟：
             // 用户看到的是一个错误页，而其实书是能读的。
-            warning = `翻页到第 ${page + 1} 页时中断：${err instanceof Error ? err.message : String(err)}`
+            notes.push(
+                `翻页到第 ${page + 1} 页时中断：${err instanceof Error ? err.message : String(err)}`,
+            )
             break
         }
 
@@ -537,12 +558,55 @@ export async function fetchChapters(
         const items = await analyzeSelections(sel, rule.chapterList, tocCtx)
         for (const item of items) {
             const name = await analyzeString(item, rule.chapterName ?? 'text', tocCtx)
+            if (!name) continue
+
+            /**
+             * 与 `chapterName` 同层的四条逐条字段（第五十六轮开始取）
+             *
+             * 它们以前整片丢掉 —— 目录里于是看不出哪一章要钱、也看不到卷与更新时间。
+             * 判据（`tocFlag`）在 `chapterFields.ts` 里写清楚了：语料里既有
+             * 「取到标记文本就算」的写法，也有「脚本回 true / false」的写法，
+             * 只按非空判会把脚本回的 `false` 当成要付费。
+             *
+             * 超过 `MAX_MARKED_CHAPTERS` 之后不再求值（代价见那个常量的说明），
+             * 并在 warning 里说出来。
+             */
+            const marked = markedCount < MAX_MARKED_CHAPTERS
+            const hasMarks = Boolean(rule.isVip || rule.isPay || rule.isVolume || rule.updateTime)
+            const isVolume =
+                rule.isVolume && marked
+                    ? tocFlag(await analyzeString(item, rule.isVolume, tocCtx))
+                    : false
+
             const urlRaw = await analyzeAddress(item, rule.chapterUrl ?? 'tag.a@href', tocCtx)
-            if (!name || !urlRaw) continue
-            const url = resolveAddress(urlRaw, plan.url)
-            if (seenChapterUrls.has(url)) continue
-            seenChapterUrls.add(url)
-            chapters.push({ name, url })
+            const url = urlRaw ? resolveAddress(urlRaw, plan.url) : ''
+            /**
+             * 卷标题通常**没有正文地址**（`chapterUrl` 在那一行取到的是卷名那段文本），
+             * 但它要留在列表里当分组标题 —— 所以判据从「没地址就丢」改成
+             * 「既没地址又不是卷，才丢」。
+             */
+            if (url === '' && !isVolume) continue
+            // 去重只在有地址时做：卷标题多半都是空地址，按空串去重会把它们合并成一条
+            if (url !== '') {
+                if (seenChapterUrls.has(url)) continue
+                seenChapterUrls.add(url)
+            }
+
+            const chapter: Chapter = { name, url }
+            if (isVolume) chapter.isVolume = true
+            if (marked) {
+                if (rule.isVip)
+                    chapter.isVip = tocFlag(await analyzeString(item, rule.isVip, tocCtx))
+                if (rule.isPay)
+                    chapter.isPay = tocFlag(await analyzeString(item, rule.isPay, tocCtx))
+                if (rule.updateTime) {
+                    chapter.updateTime = tocText(await analyzeString(item, rule.updateTime, tocCtx))
+                }
+                markedCount += 1
+            } else if (hasMarks) {
+                marksTruncated = true
+            }
+            chapters.push(chapter)
         }
 
         // 没有 nextTocUrl 规则就是单页目录，到此为止
@@ -556,7 +620,14 @@ export async function fetchChapters(
         currentUrl = nextUrl
     }
 
-    return warning ? { chapters, warning } : { chapters }
+    if (marksTruncated) {
+        notes.push(
+            `目录超过 ${MAX_MARKED_CHAPTERS} 条，后面那些章节的 isVip / isPay / isVolume / updateTime 没有取` +
+                '（每条都要一次脚本求值，代价太大——不影响阅读，只是目录里没有那些标注）',
+        )
+    }
+
+    return notes.length > 0 ? { chapters, warning: notes.join('；') } : { chapters }
 }
 
 /**

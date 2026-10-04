@@ -221,13 +221,21 @@ function requestBookContext(
     return { bookUrl, book }
 }
 
-/** 从请求里取出「这一章」（章节名 / 序号 / 地址）；没传返回 undefined */
+/**
+ * 从请求里取出「这一章」（章节名 / 序号 / 地址 / 要不要付费）；没传返回 undefined
+ *
+ * `isVip` 是第五十六轮加上来的：目录规则里的 `ruleToc.isVip` 求出来的值现在会
+ * 一路带到前端，前端打开正文时再带回来 —— 于是 `chapter.isVip()` 第一次拿到**真值**。
+ * 以前它恒为 false（🏷起点(部分可看) 的正文规则按它选分支，付费章一直走错），
+ * 而目录里那个值根本没人取（见「第五十三 / 五十六轮」）。
+ */
 function requestChapterContext(c: Context<{ Bindings: Env }>): ChapterContext | undefined {
     const raw = jsonParam(c.req.query('chapter'))
     const chapter: ChapterContext = {}
     if (typeof raw.title === 'string') chapter.title = raw.title
     if (typeof raw.name === 'string') chapter.name = raw.name
     if (typeof raw.url === 'string') chapter.url = raw.url
+    if (typeof raw.isVip === 'boolean') chapter.isVip = raw.isVip
     const index = Number(raw.index)
     if (Number.isFinite(index)) chapter.index = index
     return Object.keys(chapter).length > 0 ? chapter : undefined
