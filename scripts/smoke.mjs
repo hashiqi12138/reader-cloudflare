@@ -4128,6 +4128,87 @@ ${tail}`
     check(!left.some((s) => s.id === id || s.id === idB), 'JS 尾段列表规则测试源已清理')
 }
 
+console.log('\n=== 25. 列表规则的末尾那个词：标签 vs 取值 ===')
+{
+    /**
+     * 引擎的 jsoup 文法把末尾的裸词读成**取值名（属性）**（`coverUrl: 'img.2@data-src'`
+     * 那种写法要求的），而列表规则里 `class.chapters@li@a`、`.book-list@li` 的末尾那个词
+     * 是**标签** —— 书源要的是「每个 li 里的 a」。照取值读会少选最后一层（拿到的还是
+     * 上一层），条目少一层之后 `href` / `text` 一律落空：目录 0 条 / 搜索 0 条、不报错。
+     *
+     * 这里三种形状各配一条源，都打内置的目录页（`/fixture/toc/1`，3 章）：
+     *   ① JSOUP 形状   `class.chapter-list@li@a`
+     *   ② CSS 形状     `.chapter-list@li a`   ← 以前整串交给 CSS，直接「CSS 选择器无效」
+     *   ③ CSS + 两个 @ `.chapter-list@li@a` ← 以前整串交给 CSS，「CSS 选择器无效」
+     * 断言的是**章数与每章地址** —— 少选一层的话地址一条都取不到（条目会是空的 href）。
+     */
+    const idBase = `${BASE}/js-tail-list`
+
+    const cases = [
+        {
+            key: idBase,
+            name: '列表规则末尾是标签·JSOUP（临时）',
+            chapterList: 'class.chapter-list@li@a',
+            chapterName: 'text',
+            chapterUrl: 'href',
+        },
+        {
+            key: `${idBase}/b`,
+            name: '列表规则末尾是标签·CSS（临时）',
+            chapterList: '.chapter-list@li a',
+            chapterName: 'text',
+            chapterUrl: 'href',
+        },
+        {
+            key: `${idBase}/c`,
+            name: '列表规则末尾是标签·CSS 两段（临时）',
+            chapterList: '.chapter-list@li@a',
+            chapterName: 'text',
+            chapterUrl: 'href',
+        },
+    ]
+
+    for (const c of cases) {
+        const id = `user:${c.key}`
+        await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+        await call(
+            'POST',
+            '/api/sources',
+            JSON.stringify([
+                {
+                    bookSourceName: c.name,
+                    bookSourceUrl: c.key,
+                    ruleToc: {
+                        chapterList: c.chapterList,
+                        chapterName: c.chapterName,
+                        chapterUrl: c.chapterUrl,
+                    },
+                },
+            ]),
+        )
+        const toc = await getJson(
+            `/api/toc?sourceId=${encodeURIComponent(id)}&url=${encodeURIComponent(`${BASE}/fixture/toc/1`)}`,
+        )
+        const chapters = toc.json?.chapters ?? []
+        check(
+            chapters.length === 3 &&
+                chapters.every((x) => /\/fixture\/chapter\/1\/\d+$/.test(x.url)) &&
+                chapters[0]?.name === '第一章 起风了' &&
+                chapters[2]?.name === '第三章 天晴了',
+            `${JSON.stringify(c.chapterList)} → 3 章、每章取到自己的地址`,
+            toc.json?.error ??
+                JSON.stringify(chapters.map((x) => [x.name, x.url.replace(BASE, '')]).slice(0, 2)),
+        )
+        await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+    }
+
+    const left = (await getJson('/api/sources')).json?.sources ?? []
+    check(
+        !left.some((s) => String(s.id).startsWith('user:' + idBase)),
+        '列表规则末尾是标签的测试源已清理',
+    )
+}
+
 console.log('\n=== 结果 ===')
 if (failures.length === 0) {
     console.log(

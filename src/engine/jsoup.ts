@@ -152,6 +152,138 @@ function parseSegment(seg: string): JsoupStep | null {
     return { by, name: rest, index }
 }
 
+/**
+ * HTML 的标签名
+ *
+ * 用途只有一个：判断**列表规则**末尾那个裸词是「标签」还是「取值」
+ * （见 `analyze.ts` 的 `selectNodesByKind`）——`class.chapters@li@a` 的 `a`、
+ * `.book-list@li` 的 `li` 是标签，而字段规则里 `@title`（线上 95 处）/
+ * `@data-src` 确实是属性名，不能一概而论。
+ *
+ * 不全靠推断是有意的：`data` / `title` / `option` / `span` 这些**既是标签又可能是属性名**，
+ * 所以只认这张表里明确写下的名字 —— 表外的一律维持「取值」语义。
+ * （代价是 `mio-tile` 这类自定义元素覆盖不到，线上 1 处，已记进 README 的待办。）
+ */
+const HTML_TAG_NAMES = new Set([
+    'a',
+    'abbr',
+    'address',
+    'area',
+    'article',
+    'aside',
+    'audio',
+    'b',
+    'base',
+    'bdi',
+    'bdo',
+    'blockquote',
+    'body',
+    'br',
+    'button',
+    'canvas',
+    'caption',
+    'cite',
+    'code',
+    'col',
+    'colgroup',
+    'data',
+    'dd',
+    'del',
+    'details',
+    'dfn',
+    'dialog',
+    'div',
+    'dl',
+    'dt',
+    'em',
+    'embed',
+    'fieldset',
+    'figcaption',
+    'figure',
+    'footer',
+    'form',
+    'h1',
+    'h2',
+    'h3',
+    'h4',
+    'h5',
+    'h6',
+    'head',
+    'header',
+    'hgroup',
+    'hr',
+    'html',
+    'i',
+    'iframe',
+    'img',
+    'input',
+    'ins',
+    'kbd',
+    'label',
+    'legend',
+    'li',
+    'link',
+    'main',
+    'map',
+    'mark',
+    'menu',
+    'meta',
+    'meter',
+    'nav',
+    'noscript',
+    'object',
+    'ol',
+    'optgroup',
+    'option',
+    'output',
+    'p',
+    'param',
+    'picture',
+    'pre',
+    'progress',
+    'q',
+    'rp',
+    'rt',
+    'ruby',
+    's',
+    'samp',
+    'script',
+    'section',
+    'select',
+    'slot',
+    'small',
+    'source',
+    'span',
+    'strong',
+    'style',
+    'sub',
+    'summary',
+    'sup',
+    'svg',
+    'table',
+    'tbody',
+    'td',
+    'template',
+    'textarea',
+    'tfoot',
+    'th',
+    'thead',
+    'time',
+    'title',
+    'tr',
+    'track',
+    'u',
+    'ul',
+    'var',
+    'video',
+    'wbr',
+])
+
+/** 这个裸词是不是 HTML 标签名（大小写不敏感） */
+export function isHtmlTagName(name: string): boolean {
+    return HTML_TAG_NAMES.has(name.trim().toLowerCase())
+}
+
 /** 把一条 JSOUP 默认规则解析成计划 */
 export function parseJsoupRule(rule: string): JsoupPlan {
     let body = rule.trim()

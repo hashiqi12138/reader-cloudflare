@@ -19,7 +19,7 @@ vi.mock('../src/engine/js', () => ({
     sandboxResultToStrings: (value: unknown) => [String(value ?? '')],
 }))
 
-const { analyzeSelections, rootSelection } = await import('../src/engine/analyze')
+const { analyzeSelections, analyzeStrings, rootSelection } = await import('../src/engine/analyze')
 
 const HTML = `<html><body>
 <ol class="book-ol book-ol-normal"><li class="book-li"><a href="/a"><h4 class="book-title">甲</h4></a></li>
@@ -74,5 +74,74 @@ describe('AllInOne 与连接符的顺序', () => {
         // 所以「返回 2 条」本身就证明顺序是对的。
         const items = await analyzeSelections(sel(), ':book-title">(甲||乙)<', ctx)
         expect(items).toHaveLength(2)
+    })
+})
+
+/**
+ * 列表规则的**末尾那个词**：已知取值名才算取值，其余当步骤
+ *
+ * 引擎的 jsoup 文法把末尾的裸词一概读成取值名（属性）——
+ * `coverUrl: 'img.2@data-src'` 那种写法要求的。但列表规则里
+ * `class.chapters@li@a` / `.book-list@li` / `.box@ul@li` 的末尾那个词是**标签**，
+ * 照取值读会少选最后一层（拿到的还是上一层），条目少一层之后 `href` / `text`
+ * 一律落空 —— 目录 0 条 / 搜索 0 条，全程不报错。
+ *
+ * 全量 dump 里列表规则的取值位共 479 处，已知取值名只有 2 处（`html`），
+ * 其余 477 处全是标签；而字段规则里 `@title`（95 处）这类**确实是属性名**，
+ * 所以这条路一个字没动（见「字段规则不受影响」那两条）。
+ */
+describe('列表规则的末尾那个词：标签 vs 取值', () => {
+    const HTML2 = `<html><body>
+<div class="box"><ul><li class="row"><a href="/1" title="第一章">甲</a></li>
+<li class="row"><a href="/2" title="第二章">乙</a></li></ul></div>
+<p class="one" data-id="7">丙</p>
+</body></html>`
+    const sel2 = () => rootSelection(HTML2)
+
+    it('JSOUP 形状 `class.box@li@a`：条目标是 `a`（不是被吞掉那一层的 `li`）', async () => {
+        const items = await analyzeSelections(sel2(), 'class.box@li@a', ctx)
+        expect(items).toHaveLength(2)
+        expect(await analyzeStrings(items[0]!, 'href', ctx)).toEqual(['/1'])
+        expect(await analyzeStrings(items[1]!, 'href', ctx)).toEqual(['/2'])
+    })
+
+    it('CSS 形状 `.box@li`：同上（以前圈到的是 `.box` 本身）', async () => {
+        const items = await analyzeSelections(sel2(), '.box@li', ctx)
+        expect(items).toHaveLength(2)
+        expect(await analyzeStrings(items[0]!, 'text', ctx)).toEqual(['甲'])
+    })
+
+    it('CSS 形状 + 显式步骤 `.box@tag.li`：以前整串交给 CSS，直接报错', async () => {
+        const items = await analyzeSelections(sel2(), '.box@tag.li', ctx)
+        expect(items).toHaveLength(2)
+        // 条目是 `li`，地址在它里面的 `a` 上
+        expect(await analyzeStrings(items[1]!, 'a@href', ctx)).toEqual(['/2'])
+    })
+
+    it('CSS 形状 + 两个 `@`（`.box@ul@li`）：以前同样报错', async () => {
+        const items = await analyzeSelections(sel2(), '.box@ul@li', ctx)
+        expect(items).toHaveLength(2)
+    })
+
+    it('末段是**真属性名**时不动它：`.one@data-id` 仍旧圈到 `.one` 自己', async () => {
+        const items = await analyzeSelections(sel2(), '.one@data-id', ctx)
+        expect(items).toHaveLength(1)
+        expect(await analyzeStrings(items[0]!, 'data-id', ctx)).toEqual(['7'])
+    })
+
+    it('前导 `-`（倒置）在这条路上也认：条目顺序反过来', async () => {
+        const items = await analyzeSelections(sel2(), '-.box@li', ctx)
+        expect(items).toHaveLength(2)
+        expect(await analyzeStrings(items[0]!, 'text', ctx)).toEqual(['乙'])
+    })
+
+    it('字段规则不受影响：`a@title` 仍旧按**属性**读（`@title` 线上 95 处）', async () => {
+        expect(await analyzeStrings(sel2(), 'a@title', ctx)).toEqual(['第一章', '第二章'])
+    })
+
+    it('字段规则不受影响：`a@li@a` 这种末尾裸词仍旧是取值（不是步骤）', async () => {
+        // 字段规则这条路一个字没改：末尾的 `a` 还是「名为 a 的属性」，取出来是空串
+        // （空值在下游被剔掉，所以是 `[]`）。若被当成步骤，这里会是 `['甲','乙']`。
+        expect(await analyzeStrings(sel2(), '.box@li@a', ctx)).toEqual([])
     })
 })

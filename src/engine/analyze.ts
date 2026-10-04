@@ -14,8 +14,8 @@
  */
 
 import { applyAllInOne, applyRegexOps, splitRegexChain } from './regex'
-import { UnsupportedRuleError, type RuleContext, type RuleResult } from './types'
-import { parseJsoupRule } from './jsoup'
+import { UnsupportedRuleError, EXTRACT_KINDS, type RuleContext, type RuleResult } from './types'
+import { parseJsoupRule, isHtmlTagName, type JsoupPlan, type JsoupStep } from './jsoup'
 import { baseGlobals, sourceLimits } from './globals'
 import { extractValues, parseHtml, reparseFragment, selectNodes } from './select'
 import { jsonPathToStrings } from './jsonpath'
@@ -881,11 +881,61 @@ function sourceResultGlobals(code: string, source: unknown): Record<string, unkn
 }
 
 /**
+ * 列表规则的取值位上**只有这几个**才算「取值」
+ *
+ * 就是 `EXTRACT_KINDS`（text / textNodes / ownText / html / outerHtml / all / href / src）。
+ * 判据的由来见 `selectNodesByKind` 的说明。
+ */
+const LIST_EXTRACT_KINDS: ReadonlySet<string> = new Set<string>(EXTRACT_KINDS)
+
+/**
+ * 列表规则的末尾那个词是不是**标签**（该当步骤，而不是取值）
+ *
+ * 两个条件：① 不是已知取值名（`@text` / `@html` 永远是取值）；
+ * ② 是 HTML 的标签名（`isHtmlTagName`，表在 `jsoup.ts`）—— 只认那张表里明确写下的标签，
+ * 表外的一律维持「取值」语义（`@data-id` / `@title` 这类属性名一个都不动）。
+ */
+function isTailTag(extract: string): boolean {
+    return !LIST_EXTRACT_KINDS.has(extract) && isHtmlTagName(extract)
+}
+
+/**
+ * 把「末尾被吞成取值的那一层」补回步骤
+ *
+ * `parseJsoupRule` 把末尾的裸词读成**取值名**（属性），而列表规则里那多半是**标签**：
+ * `parseJsoupRule('class.chapters@li@a')` 给出 `steps=[class chapters, li]`、
+ * `extract='a'`，而书源要的是「每个 li 里的 a」。判据与由来见 `selectNodesByKind`。
+ */
+function withTailStep(plan: JsoupPlan): JsoupStep[] {
+    return isTailTag(plan.extract)
+        ? [...plan.steps, { by: 'tag', name: plan.extract, index: null }]
+        : plan.steps
+}
+
+/**
  * 按规则的「种类」在节点集上选出**节点**
  *
  * 与字段规则那条路（`evalSelector`）的区别：这里给的是节点本身，不是按取值方式抠出来的
  * 字符串。列表规则要的是「条目」，后面还要拿字段规则在这些节点里继续筛。
  * 返回 null 表示这一类（JSON / JS / AllInOne）给不出节点。
+ *
+ * **列表规则的末尾那个词：是 HTML 标签名就当步骤，否则照旧。**
+ *
+ * 引擎的 jsoup 文法把末尾的裸词一律读成**取值名（属性名）** —— 这是
+ * `coverUrl: 'img.2@data-src'` 那种写法要求的。但列表规则里 `class.chapters@li@a`、
+ * `class.l@li`、`.sp-chapter-grid@a` 的末尾那个词**不是属性名，是标签名**：
+ * 书源要的是「每个 li 里的 a」。照取值读会**少选最后一层**（拿到的还是上一层），
+ * 条目少一层之后 `href` / `text` 一律落空 —— 症状是目录 0 条 / 搜索 0 条、
+ * 全程不报错，与上一轮那族「条目丢了 DOM」是同一类病。
+ *
+ * 全量 dump 里列表规则的取值位共 **479 处**，其中已知取值名 **2 处**（`html`）、
+ * **HTML 标签名 466 处**（`li` 195 / `a` 159 / `dl` 30 / `dd` 16 / `p` 14 / `tr` 13 /
+ * `option` 4 / `span` / `data` / `title` …），剩下 11 处是 JSON 键名（`items`）与
+ * 自定义元素（`mio-tile`）这类**不该动**的。
+ *
+ * 所以判据写成「**已知取值名之外的 HTML 标签名**」：既修掉那 466 处，
+ * 又保证表外的一个字都不动 —— 字段规则那条路更是完全没碰（那里 `@title` 95 处、
+ * `@content`、`@data-src` 确实是属性名）。
  */
 function selectNodesByKind(
     sel: Selection,
@@ -893,7 +943,46 @@ function selectNodesByKind(
     kind: 'css' | 'jsoup' | 'json' | 'xpath' | 'allinone',
 ): { nodes: any[]; reversed: boolean } | null {
     if (kind === 'css') {
-        return { nodes: selectByCss(sel, splitCssExtract(body).css), reversed: false }
+        /**
+         * CSS 式首段 + `@` 步骤：`.box@ul@li`、`.book-img-text@tag.li`、`.sp-chapter-grid@a`
+         *
+         * 整串交给 CSS 会**直接报错**：`splitCssExtract` 只切最后一个 `@`，剩下的
+         * `.box@ul` 不是合法 CSS。线上这个形状在列表规则上有 **283 处**：
+         * ① 末段是裸词 138（`.book-list@li`）、② 末段带点/方括号 68（`.x@tag.li`）、
+         * ③ 两个以上 `@` 77（`.box@ul@li`）。而书源的本意很清楚：**先按 CSS 找一层，
+         * 再按 JSOUP 的步骤往下走** —— 与 `@css:div.item@tag.a` 是同一种写法。
+         *
+         * 前导 `-`（倒置）按 `parseJsoupRule` 的同一套语义处理。
+         */
+        let rest = body
+        let reversed = false
+        if (rest.startsWith('-') && !/^-\d/.test(rest)) {
+            reversed = true
+            rest = rest.slice(1)
+        }
+        const { css, extract } = splitCssExtract(rest)
+        // 末尾那个词是取值（`.one@data-id`）→ 一个字都不动
+        if (!isTailTag(extract) && !css.includes('@')) {
+            return { nodes: selectByCss(sel, css), reversed }
+        }
+        /**
+         * 首段按 CSS 找一层，`@` 后面**能当步骤的当步骤、剩下的当 CSS 片段**：
+         *   `.box@ul@li`        → 头 `.box`、步骤 [ul, li]
+         *   `.book-img-text@tag.li` → 头 `.book-img-text`、步骤 [tag li]
+         *   `#chapterlist@li a` → 头 `#chapterlist li a`（这一步本身就是 CSS 写法）
+         * 书源就是这两种混着写的，`parseJsoupRule` 只认前一种，所以按段分派。
+         */
+        const parts = rest.split('@').map((p) => p.trim())
+        const headParts: string[] = [parts[0] ?? '']
+        const steps: JsoupStep[] = []
+        for (const part of parts.slice(1)) {
+            if (part === '') continue
+            const segSteps = withTailStep(parseJsoupRule(part))
+            if (segSteps.length > 0) steps.push(...segSteps)
+            else headParts.push(part)
+        }
+        const head = headParts.filter((p) => p !== '').join(' ')
+        return { nodes: selectNodes(sel.$, selectByCss(sel, head), steps), reversed }
     }
     if (kind === 'xpath') {
         // 列表规则同样要把 `//` 当相对路径用：目录规则要的是「本页里的章节项」，
@@ -915,7 +1004,8 @@ function selectNodesByKind(
     }
     if (kind === 'jsoup') {
         const plan = parseJsoupRule(body)
-        return { nodes: selectNodes(sel.$, sel.nodes, plan.steps), reversed: plan.reverse }
+        // 末尾被吞成取值的那一层补回步骤（`class.chapters@li@a` 的 `a` 就是它）
+        return { nodes: selectNodes(sel.$, sel.nodes, withTailStep(plan)), reversed: plan.reverse }
     }
     return null
 }
