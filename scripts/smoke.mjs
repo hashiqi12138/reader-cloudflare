@@ -742,6 +742,7 @@ console.log('\n=== 6. 前端静态资源 ===')
         '/js/views.js',
         '/js/reader.js',
         '/js/merge.js',
+        '/js/pagination.js',
         '/js/replace.js',
         '/js/replaceSync.js',
         '/js/search.js',
