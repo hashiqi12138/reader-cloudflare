@@ -6288,6 +6288,180 @@ console.log('\n=== 44. 登录态：跑一次 loginUrl，之后每趟请求都带
     )
 }
 
+console.log('\n=== 45. 登录界面（loginUi）与界面上的按钮 ===')
+
+/**
+ * 量（816 条源）：写了 loginUi 的 **35 条**，其中只有 **18 条是严格 JSON**，
+ * 另外 17 条得求值（8 条前缀 `@js:`、8 条是键没加引号的 JS 字面量、1 条包在 `<js>` 里）。
+ * 控件 type 实际出现六种：button 159 / text 40 / password 20 / toggle 8 / select 7 / input 1。
+ *
+ * 这一轮把「界面」这条路接通：读 loginUi → 渲染表单 → 提交登录；界面上的按钮**单独**调
+ * 那一个函数（语料 163 个按钮动作是源自己的函数，只有 2 个正好写着 `login()`——
+ * 也就是说「获取验证码」「切换线路」这些都挂在按钮上，不点它那半边就用不了）。
+ *
+ * 靶子是三条临时源：严格 JSON 的 / `@js:` 拼出来的 / 没写 loginUi 的。
+ */
+{
+    const id = `user:${BASE}/login-58`
+    const jsId = `user:${BASE}/login-58-js`
+    const noneId = `user:${BASE}/login-58-none`
+    for (const one of [id, jsId, noneId])
+        await call('DELETE', `/api/sources?id=${encodeURIComponent(one)}`)
+
+    // 脚本型 loginUrl：`login()` 换 token；另有按钮函数 `ping()`（读 `result`）
+    const loginScript =
+        `@js:\nfunction login(){\n` +
+        `var acc=String(source.getLoginInfoMap().get('账号'));\n` +
+        `var pw=String(source.getLoginInfoMap().get('密码'));\n` +
+        `var data=JSON.parse(String(java.post('${BASE}/fixture/login','username='+acc+'&password='+pw,{})));\n` +
+        `if(!data.token){ java.toast('账号或密码不对'); return; }\n` +
+        `source.putLoginHeader(JSON.stringify({'X-RC-Token':data.token}));\n` +
+        `java.toast('登录成功：'+acc);\n` +
+        `}\n` +
+        `function ping(){ java.toast('按钮拿到：'+result.get('账号')+'/'+result.get('线路')); }`
+
+    const baseRules = {
+        searchUrl: '/fixture/search?q={{key}}',
+        ruleSearch: {
+            bookList: '@css:div.result-item',
+            name: '@css:h3.title@text',
+            bookUrl: '@css:h3.title a@href',
+        },
+    }
+
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: '登录界面（JSON）',
+                bookSourceUrl: `${BASE}/login-58`,
+                loginUrl: loginScript,
+                loginUi: JSON.stringify([
+                    { name: '账号', type: 'text' },
+                    { name: '密码', type: 'password' },
+                    { name: '线路', type: 'select', chars: ['一线路', '二线路'], default: '二线路' },
+                    { name: '登录', type: 'button', action: 'login()' },
+                    { name: '打个招呼', type: 'button', action: 'ping()' },
+                    { name: '帮助', type: 'button', action: 'https://example.com/help' },
+                ]),
+                ...baseRules,
+            },
+            {
+                // `@js:` 拼出来的界面（8 条）—— 值挂在 result 上，得走沙箱那条路
+                bookSourceName: '登录界面（@js: 拼的）',
+                bookSourceUrl: `${BASE}/login-58-js`,
+                loginUrl: loginScript,
+                loginUi:
+                    `@js: var all=[];` +
+                    `all.push({name:'账号',type:'text'});` +
+                    `all.push({name:'密码',type:'password'});` +
+                    `all.push({name:'登录',type:'button',action:'login()'});` +
+                    `result=JSON.stringify(all)`,
+                ...baseRules,
+            },
+            {
+                // 没写 loginUi：界面为空，但脚本照样跑得起来
+                bookSourceName: '登录界面（没写）',
+                bookSourceUrl: `${BASE}/login-58-none`,
+                loginUrl: 'function login(){ java.toast("没有界面也能登录") }',
+                ...baseRules,
+            },
+        ]),
+    )
+
+    const uiOf = (sourceId) =>
+        getJson(`/api/sources/login-ui?id=${encodeURIComponent(sourceId)}`)
+
+    // ① 严格 JSON 那条快路：输入框 / 密码框 / 下拉（含候选与默认）/ 三个按钮
+    const ui = await uiOf(id)
+    const fields = ui.json?.fields ?? []
+    const buttons = ui.json?.buttons ?? []
+    const line = fields.find((one) => one.name === '线路')
+    check(
+        ui.json?.hasUi === true &&
+            fields.map((one) => `${one.name}:${one.type}`).join(',') ===
+                '账号:text,密码:password,线路:select' &&
+            line?.chars?.join('/') === '一线路/二线路' &&
+            line?.default === '二线路' &&
+            buttons.length === 3 &&
+            buttons.find((one) => one.name === '帮助')?.url === 'https://example.com/help',
+        '① 严格 JSON 的界面：输入框 / 密码框 / 下拉（候选与默认都对）/ 三个按钮（http 那个给了 url）',
+        JSON.stringify(ui.json ?? ui.text),
+    )
+
+    // ② `@js:` 拼出来的那条路：值挂在 result 上也能解出来
+    const uiJs = await uiOf(jsId)
+    check(
+        (uiJs.json?.fields ?? []).length === 2 && (uiJs.json?.buttons ?? []).length === 1,
+        '② `@js:` 拼出来的界面：值挂在 result 上也能解出来（8 条源走这条）',
+        JSON.stringify(uiJs.json ?? uiJs.text),
+    )
+
+    // ③ 没写 loginUi：界面为空，但明说 hasUi=false（前端据此提示「直接点登录」）
+    const uiNone = await uiOf(noneId)
+    check(
+        uiNone.json?.hasUi === false && (uiNone.json?.fields ?? []).length === 0,
+        '③ 没写登录界面的源：hasUi=false、控件为空（不是报错）',
+        JSON.stringify(uiNone.json ?? uiNone.text),
+    )
+
+    // ④ 按钮函数调得到，且表单字段从 `result.get(...)` 读得到（App 里按钮就是这么拿值的）
+    const ping = await call(
+        'POST',
+        '/api/sources/login-action',
+        JSON.stringify({ id, action: 'ping()', fields: { 账号: 'u1', 线路: '二线路' } }),
+    )
+    check(
+        ping.json?.ok === true && ping.json?.message === '按钮拿到：u1/二线路',
+        '④ 按钮函数调到了，表单字段从 `result.get(...)` 读得到',
+        JSON.stringify(ping.json ?? ping.text),
+    )
+
+    // ⑤ 界面上的「登录」按钮（action 正好是 login()）也真能登上
+    const viaButton = await call(
+        'POST',
+        '/api/sources/login-action',
+        JSON.stringify({ id, action: 'login()', fields: { 账号: 'u1', 密码: 'p1' } }),
+    )
+    check(
+        viaButton.json?.loggedIn === true &&
+            String(viaButton.json?.message ?? '').includes('登录成功：u1'),
+        '⑤ 界面上的「登录」按钮真能登上（按钮动作与 login() 是同一条路）',
+        JSON.stringify(viaButton.json ?? viaButton.text),
+    )
+
+    // ⑥ 白名单：不在这个书源 loginUi 里的动作一律拒绝
+    const beyond = await call(
+        'POST',
+        '/api/sources/login-action',
+        JSON.stringify({ id, action: 'java.ajax("https://example.com/")' }),
+    )
+    check(
+        beyond.status === 400 && String(beyond.json?.error ?? '').includes('不在书源的登录界面里'),
+        '⑥ 动作不在 loginUi 里 → 400（不是「客户端说跑什么就跑什么」）',
+        JSON.stringify(beyond.json ?? beyond.text),
+    )
+
+    // ⑦ 列表接口把「有没有登录入口 / 现在登没登」告诉前端
+    const list = (await getJson('/api/sources')).json?.sources ?? []
+    const one = list.find((s) => s.id === id)
+    check(
+        one?.hasLogin === true && one?.loggedIn === true,
+        '⑦ `/api/sources` 带上 hasLogin / loggedIn（书源页据此显示入口与「已登录」）',
+        JSON.stringify(one ?? {}),
+    )
+
+    for (const name of [id, jsId, noneId])
+        await call('DELETE', `/api/sources?id=${encodeURIComponent(name)}`)
+    check(
+        !((await getJson('/api/sources')).json?.sources ?? []).some((s) =>
+            String(s.id).includes('login-58'),
+        ),
+        '登录界面的三个测试源已清理',
+    )
+}
+
 console.log('\n=== 结果 ===')
 if (failures.length === 0) {
     console.log(
