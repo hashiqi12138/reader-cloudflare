@@ -35,7 +35,7 @@
 | 沙箱里的 `source` / `cookie` / `cache` / `infoMap` 全局                                             | 已实现（见「沙箱里的全局对象」；`source.getKey()` 线上用了 413 次）                                                                                                                                                                                                                                                                             |
 | 书源自带的 `jsLib` 全局函数库                                                                       | 已实现（35 条源在用；作为沙箱前置脚本执行，失败不中断但会说明原因）                                                                                                                                                                                                                                                                             |
 | 沙箱里的 `book` / `chapter` 上下文与**书的变量**（`book.getVariable` / `putVariable`）              | 已实现（`book.name` 54 处 / 39 源、`chapter.title` 32 处 / 30 源；变量落 `book_variables`，见「第三十五轮」）                                                                                                                                                                                                                                   |
-| `org.jsoup.Jsoup` + Element/Elements API                                                            | 已实现（宿主桥 + cheerio 句柄；写操作是空操作，未实现的方法报出方法名）                                                                                                                                                                                                                                                                         |
+| `org.jsoup.Jsoup` + Element/Elements API                                                            | 已实现（宿主桥 + cheerio 句柄；写操作是空操作，未实现的方法报出方法名；`<script>` / `<style>` 也是元素 —— 见「第四十九轮」）                                                                                                                                                                                                                    |
 | `Packages.java.*`（Java 反射）                                                                      | 部分实现（`String.getBytes` / `MessageDigest` 仅 MD5 / `Base64` / `System`；其余报出类名）                                                                                                                                                                                                                                                      |
 | JS 写在 URL 字段里（`searchUrl` 的 `@js:` / `<js>`）                                                | 已实现（见「URL 字段里的 JS」；线上 `searchUrl` 带 JS 的有 85 条）                                                                                                                                                                                                                                                                              |
 | URL 里的 `<,...>` 可选段（「第一页不要页码」）                                                      | 已实现（`/latest/<,index_{{page}}.html>`；见「第九轮」）                                                                                                                                                                                                                                                                                        |
@@ -4124,14 +4124,103 @@ attachment 不显示）。同一个文件源既有封面又有下载文件，光
 （本来就该没有）。**文件源的封面**那条路（令牌里的 `cover` 标记）这一轮抽样里没碰上，
 由 `signing.test.ts` 的单测与冒烟第 36 段钉住。
 
+### 第四十九轮：`<script>` / `<style>` 不是 `tag` —— 一个把整类节点丢掉的判断
+
+第四十六轮顺手记下过一句「🎨51漫画 目录的 `java.getElement("script")` 给 null」。
+这一轮把它查穿了，根因是一句**看起来很无害**的类型判断。
+
+**一、现象（线上原文）。** `/api/toc` 回：
+
+```
+规则脚本执行出错：TypeError: cannot read property 'Symbol.iterator' of null（脚本第 2 行）
+```
+
+第 2 行是 `const scripts = Array.from(java.getElement("script")).filter(…)` ——
+`Array.from(null)`。所以 `getElement("script")` 给了 `null`。
+
+**二、定位（这一段值得记，因为它一路像 A、其实是 B）。**
+
+1. **先排除站点**：本地拿同一个页面跑同一条选择器，能选到 **15 个** `<script>`。
+   页面没问题。
+2. **再问线上引擎**：写一个临时源（把引擎能力当「书名」打出来），
+   `java.getElements('script').size()` 得到 **0**，而同一页 `div` 是 **583**、
+   `html` 是 55、字符串层面 `src.match(/<script/gi).length` 是 **15**。
+   —— 字符串里有脚本，**解析之后没了**。
+3. **收窄到桥**：把宿主选出的 outerHTML 交给 jsoup 桥的 `parseFragments`
+   （`java.getElements` 走的正是它），**本地复现**：
+
+    | 规则     | 宿主选出 | 桥里 `parseFragments` 回来 |
+    | -------- | -------- | -------------------------- |
+    | `script` | 15 段    | **0 个**                   |
+    | `div`    | 583 段   | 583 个                     |
+
+4. **看穿**：domhandler 给节点的 `type` 是
+
+    ```
+    script/script | style/style | tag/div
+    ```
+
+    —— **`<script>` 与 `<style>` 的 `type` 不是 `'tag'`**，而桥里那句
+    `isElement = (node.type === 'tag')` 把这两类**整类过滤掉了**。
+
+**三、为什么一直没被发现。** XPath 那一侧早就分开处理了（`xpath.ts` 的 `rawTypeOf`
+里写着 `case 'tag': case 'script': case 'style'`），所以 `//script` 一直是对的；
+`find`（css-select）那条路也一直是对的。**只有经过这个 `isElement` 的两条路坏了**：
+桥的 `parseFragments`（也就是 `java.getElements` / `getElement`），
+以及内部的 `children` / `child` / `siblingElements`。于是症状像是
+「只有 `java.getElement` 坏了」，而其实是一整类节点在两条路上消失。
+
+**四、影响面（量的结果）。**
+
+| 形状                                                  | 数量  | 受影响                              |
+| ----------------------------------------------------- | ----- | ----------------------------------- |
+| `java.getElement("script")` / `getElements("script")` | 1 处  | **是**（🎨51漫画 的 `ruleToc`）     |
+| 规则里用 `children` / `child` 这一步                  | 6 处  | 脚本/样式当**直接子节点**时会被跳过 |
+| `script@html` / `select("p,script,div")` 这类         | 15 处 | 否 —— 走 `find`，一直是对的         |
+
+**五、改法。** 把 `isElement` 收成**一份**（放 `select.ts` 并导出，`jsoupBridge.ts`
+改为 import），判据与 `xpath.ts` 的 `ELEMENT_NODE` 对齐；顺带修 `tagName`
+（脚本的 `tagName` 之前会返回 `#root`）。
+
+**六、修完的结果。** 🎨51漫画 的目录**不再抛错**，走它自己的兜底分支
+（`book.name` + `.btn-read@href`）拿到那一章 —— 这与 Legado 的行为一致：
+`Array.from(一个 Element)` 在两边都得到**空数组**（我们返回的是句柄对象，没有
+`length` 也没有迭代器），所以那条 `filter` 分支**本来就是死的**，源真正依赖的是兜底。
+这不是我们把它改坏了，而是**以前连兜底都走不到**。
+
+**七、验证。**
+
+- 单测 758 → **762**：`test/jsoupBridge.test.ts` 加 4 条 —— `parseFragments` 不再丢脚本、
+  `select("script")` 的对照（一直是对的）、`children`/`child` 带上脚本与样式、
+  脚本的 `tagName` 与 `html`
+- 冒烟**第 37 段** + 新 fixture `/fixture/script-toc`（目录写在 `<script>` 的 JSON 里，
+  另给一个 `.btn-read` 兜底入口）：断言 ① 那条规则不再抛 `Symbol.iterator` 错
+  ② 走兜底拿到那一章 ③ `java.getElements("script").size()` 数得出脚本、`getElement` 不是 `null`
+
+**这一轮仍然没做完的**
+
+- **`parseFragments` 遇到「整篇文档」当一段时的怪相**：`getElements('html')` 会把
+  文档根的子节点数出来（量到 70 而不是 1）—— 书源基本不会这么写，先记着
+- **`data:…;base64,…{"type":"…"}` 那一族**：Legado 自己的「内部地址类型」，
+  我们既不当地址请求、也不认那个 type（全量书源里 4 处，都在 `@js:` 里）
+- 选项里的 `{{}}` 与 `body` 对象混用是个**隐式依赖**（第四十四轮记）
+- **多行地址在别处仍会被切**：`media.ts` 的音频与下载两条路自己按 `\n` 取第一条
+  （第四十七轮量过：全量书源里**没有一处** audio/file 的 `content` / `downloadUrls` 带 `,{`）
+- **单 `#` 当正则分隔**：粗扫出的 496 处里绝大多数是 CSS 的 id 选择器，
+  要查得先写一个更准的判据
+- 自定义元素 `mio-tile`、`-@css:`、一个 class 段里带空格的 JSOUP 写法
+- `@put:` / `@get:` 搜索那一组的 4 处；`java.get(键)` 读不到持久化的书变量（故意保持窄）
+
+**八、线上核验**（`/api/probe` 报 `0.39.0`）：见下。
+
 ## 验证
 
 ```bash
 npm install
 npm run db:migrate   # 建本地 D1 表（首次、以及每次新增迁移后）
-npm test             # 单元测试（758 项，Node 里毫秒级跑完；另有十三个默认跳过的全量扫描，见下）
+npm test             # 单元测试（762 项，Node 里毫秒级跑完；另有十三个默认跳过的全量扫描，见下）
 npm run dev          # 起本地服务，浏览器打开首页即可用；另开一个终端跑下面这条
-npm run smoke        # 端到端：链路 + 书源管理 + 静态资源 + 账号/书架/进度/书签 + 改显示名/改密码 + 导出导入备份 + 书签清单 + 替换净化同步 + 笔记 + 媒体 + 字段模板 + 选择器@js: + 空选择器取值 + 列表标记（+ / 顶格 <js>）+ 沙箱助手 + setContent/digestHex/UI 动作 + 节点级助手/加解密 + 连接式取网与 result.toArray() + 书源变量落库 + 书的上下文与书的变量 + JS 尾段列表规则保留节点 + 连接符切分 + 列表规则（末尾那个词 / CSS 首段的位置后缀 / `!` 排除下标）+ 字段规则（CSS 式多段 `@`）+ 变量指令（`@put:` / `@get:` 含**跨请求**那一半）+ `init`（铺变量与**换根**两种）+ `<js>` 段 + JSONPath 尾段（`$[*]` / `$[:n]`）+ 地址尾部的请求选项（`地址,{选项}` / 排成多行的那份选项块）+ URL 选项里 `body` 写对象（`application/json`）+ 展示用字段的容错与 `warnings` + 单斜杠 XPath（`/a/p[1]/text()` 相对当前条目）+ 防盗链封面走 `/api/media` 代取 + http 封面（混合内容）也代取 + URL 字段 JS + 发现/首页
+npm run smoke        # 端到端：链路 + 书源管理 + 静态资源 + 账号/书架/进度/书签 + 改显示名/改密码 + 导出导入备份 + 书签清单 + 替换净化同步 + 笔记 + 媒体 + 字段模板 + 选择器@js: + 空选择器取值 + 列表标记（+ / 顶格 <js>）+ 沙箱助手 + setContent/digestHex/UI 动作 + 节点级助手/加解密 + 连接式取网与 result.toArray() + 书源变量落库 + 书的上下文与书的变量 + JS 尾段列表规则保留节点 + 连接符切分 + 列表规则（末尾那个词 / CSS 首段的位置后缀 / `!` 排除下标）+ 字段规则（CSS 式多段 `@`）+ 变量指令（`@put:` / `@get:` 含**跨请求**那一半）+ `init`（铺变量与**换根**两种）+ `<js>` 段 + JSONPath 尾段（`$[*]` / `$[:n]`）+ 地址尾部的请求选项（`地址,{选项}` / 排成多行的那份选项块）+ URL 选项里 `body` 写对象（`application/json`）+ 展示用字段的容错与 `warnings` + 单斜杠 XPath（`/a/p[1]/text()` 相对当前条目）+ 防盗链封面走 `/api/media` 代取 + http 封面（混合内容）也代取 + `<script>` / `<style>` 也是元素（`java.getElement("script")` 那条路） + URL 字段 JS + 发现/首页
 ```
 
 另外还有一条**不进 CI 的**体检命令（它要打真实站点，默认打线上那台）：
@@ -4144,7 +4233,7 @@ SCAN_KEYWORD=剑来 SCAN_STEP=7 SCAN_LIMIT=100 npm run health   # 关键字、�
 单元测试只覆盖**纯函数**（规则解析、规则文本切分、规则前缀的匹配、规则尾巴的先后与取值、
 XPath 适配层与规则文本、**单斜杠 XPath 的相对语义**、`选择器@js:` 里 `result` 的绑法判定、**`result` 该给节点 HTML 还是文本**、
 位置选择、正则链、JSONPath、**地址与请求选项的拆解**、**防盗链封面的成对合并**、
-**封面要不要代取的判据（带选项 / http）**、
+**封面要不要代取的判据（带选项 / http）**、**`<script>` / `<style>` 也算元素**、
 导入校验、旧身份 token 校验、口令哈希、exploreUrl 分类解析、图片地址提取、媒体签名、
 模板分类、时间格式化、MD5 摘要与 HMAC（与 `node:crypto` 对拍）、AES 与 DES、对称加密的形态、base64 的 UTF-8 语义、
 书签输入校验、**笔记输入校验**、章内搜索的切分与摘录、**搜索结果的按书合并**、
