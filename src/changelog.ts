@@ -25,6 +25,11 @@ export interface ReleaseNote {
 
 export const CHANGELOG: ReleaseNote[] = [
     {
+        version: '0.57.0',
+        date: '2026-10-05',
+        note: '搜索可以指定书源（只搜挑好的那几个）；并更正上一轮「指定源也没用」的结论',
+    },
+    {
         version: '0.56.0',
         date: '2026-10-05',
         note: '媒体代取加了一层边缘缓存；搜索 503 的结论：免费计划的 10 ms 上限跑不动，需要换宿主',
