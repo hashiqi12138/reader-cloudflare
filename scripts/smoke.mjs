@@ -3683,8 +3683,10 @@ console.log('\n=== 21. 连接式取网（java.connect）与 result.toArray() ===
                 bookSourceName: '连接式取网与 toArray 测试源',
                 bookSourceUrl: BASE,
                 // ⚡📂三五中文 那一批的形状：先 connect 拿到站点地址，再拼出真正的搜索地址。
-                // 这一段能跑通，就说明「只取地址、不发请求」这条同步桥接上了
-                searchUrl: `{{java.connect(source.getKey()).raw().request().url()}}fixture/search?q={{key}}&p={{page}}`,
+                // 这一段能跑通，就说明「只取地址、不发请求」这条同步桥接上了。
+                // 顺带用 `, {` 那个写法（逗号后带空白，407 处 / 31 个源这么写）——
+                // 认不出来的话整段选项会被当成 URL 的一部分，请求到一个不存在的页面
+                searchUrl: `{{java.connect(source.getKey()).raw().request().url()}}fixture/search?q={{key}}&p={{page}}, { "method": "GET" }`,
                 ruleSearch: {
                     bookList: '@css:div.result-item',
                     name: '@css:h3.title@text',

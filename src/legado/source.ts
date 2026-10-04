@@ -16,46 +16,11 @@ import type { BookSource, FetchPlan, RuleContext, SandboxHttp } from '../engine/
 import { parseLooseJson } from '../lib/json'
 import { defaultHeaders, fetchDetailed, fetchText, UpstreamError } from '../lib/http'
 import { applyOptionalSegments, findUrlJs } from './urlJs'
+import { splitUrlAndOptions, type UrlOptions } from './urlOptions'
 
-/** 书源 URL 尾部可带的请求选项 */
-export interface UrlOptions {
-    method: string
-    charset: string
-    headers: Record<string, string>
-    body?: string
-    /** 需要 WebView 渲染的站点本引擎不支持，必须显式拒绝 */
-    webView: boolean
-}
-
-/**
- * 拆出 URL 与请求选项
- *
- * 用第一个 `,{` 作为分界：真正的 URL 里出现 `,{` 是极罕见的，
- * 而选项段一定以 `{` 开头。解析失败时**抛错而不是降级**——
- * 把选项当 URL 用会得到一个看起来正常、实际请求错地方的 URL，那种错最难查。
- *
- * 有一个必须排除的例外：可选段 `<,{{page}}>` 里天然含有 `,{`。
- * 不排除的话它会被当成选项段的开头，URL 被切成 `<` + `{{page}}>`，
- * 报出来的是「请求选项不是合法 JSON」—— 一个指向错误方向的错误信息。
- * 所以只认**前面不是 `<`** 的那个 `,{`。
- */
-export function splitUrlAndOptions(raw: string): { url: string; options: Partial<UrlOptions> } {
-    const trimmed = raw.trim()
-    const match = /(?<!<),\{/.exec(trimmed)
-    if (!match) return { url: trimmed, options: {} }
-
-    const index = match.index
-    const url = trimmed.slice(0, index).trim()
-    const jsonText = trimmed.slice(index + 1).trim()
-    try {
-        const parsed = parseLooseJson<Partial<UrlOptions>>(jsonText)
-        return { url, options: parsed }
-    } catch {
-        throw new UpstreamError(
-            `书源 URL 的请求选项不是合法 JSON，无法确定该请求哪里：${jsonText.slice(0, 80)}`,
-        )
-    }
-}
+// 「地址 + 请求选项」的拆解与类型搬去了 `./urlOptions`：那是**纯函数**，
+// 单独成模块才能被单测逐条钉住（这里会连带引入带 WASM 的沙箱，Node 里跑不起来）
+export { splitUrlAndOptions, type UrlOptions }
 
 /** 解析 `{{}}` 模板：里面是 JS 表达式，用沙箱求值 */
 export async function resolveTemplate(template: string, ctx: RuleContext): Promise<string> {
