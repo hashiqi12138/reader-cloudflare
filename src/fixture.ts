@@ -94,7 +94,7 @@ function hasCookie(request: Request, pair: string): boolean {
     return (request.headers.get('cookie') ?? '').split(';').some((part) => part.trim() === pair)
 }
 
-export function fixtureSearchPage(keyword: string, pageNo: number): string {
+export function fixtureSearchPage(keyword: string, pageNo: number, extra = 0): string {
     const hits = BOOKS.filter(
         (b) => keyword === '' || b.name.includes(keyword) || b.author.includes(keyword),
     )
@@ -110,12 +110,32 @@ export function fixtureSearchPage(keyword: string, pageNo: number): string {
         )
         .join('\n')
 
+    /**
+     * `?n=` 追加的填充条目（第六十一轮）
+     *
+     * 给「搜索里逐条字段走沙箱」当靶子：一页里书越多，`@js:` 逐条字段的求值次数越多，
+     * 而搜索这一趟的预算只有 6 秒（见 `SEARCH_TIMEOUT_MS`）。名字/作者/简介都带序号，
+     * 字段规则逐条判得出对不对（不是只看条数）。
+     */
+    const filler: string[] = []
+    for (let i = 1; i <= extra; i += 1) {
+        filler.push(`<div class="result-item">
+        <h3 class="title"><a href="/fixture/book/fill${i}">填充书·${i}</a></h3>
+        <span class="author">填充作者·${i}</span>
+        <span class="kind">玄幻</span>
+        <p class="intro">填充简介·${i}</p>
+    </div>`)
+    }
+
+    const all =
+        items === '' ? filler.join('\n') : items + (filler.length ? '\n' + filler.join('\n') : '')
+
     return page(
         `搜索：${keyword}`,
         `<h1>搜索结果</h1>
-<div class="search-meta" data-keyword="${escapeHtml(keyword)}" data-page="${pageNo}">共 ${hits.length} 条</div>
+<div class="search-meta" data-keyword="${escapeHtml(keyword)}" data-page="${pageNo}">共 ${hits.length + extra} 条</div>
 <div class="result-list">
-${items}
+${all}
 </div>`,
     )
 }
@@ -696,6 +716,8 @@ export async function handleFixture(request: Request, url: URL): Promise<Respons
             fixtureSearchPage(
                 url.searchParams.get('q') ?? '',
                 Number(url.searchParams.get('p') ?? '1'),
+                // `?n=` 追加填充条目（第六十一轮）：把「一页几百本书」这种规模量出来
+                Math.max(0, Math.min(600, Number(url.searchParams.get('n') ?? '0') || 0)),
             ),
         )
     }

@@ -3368,7 +3368,19 @@ console.log('\n=== 19. 发现（书源探索）与首页推荐 ===')
     )
 
     // ---- 首页 ----
-    const home = await user.call('GET', '/api/home')
+    /**
+     * 首页推荐位取的是**真实书源**（本地库里就是那份 816 条的语料），
+     * 所以「站点这会儿通不通」会直接决定这一条断言的红绿：实测同一台机器上
+     * 四次里有一次四个源全超时（`⚡📂33文学` 是唯一经常能通的那个）。
+     * 那是环境噪声，不是引擎的问题 —— 但一条会随风飘的断言没法当回归用，
+     * 所以空手时**再取一次**（`?refresh=1` 绕开 30 分钟缓存）：真是坏了就两次都空。
+     */
+    const fetchHome = async () => {
+        const first = await user.call('GET', '/api/home')
+        if ((first.json?.sections ?? []).length > 0) return first
+        return user.call('GET', '/api/home?refresh=1')
+    }
+    const home = await fetchHome()
     const sections = home.json?.sections ?? []
     check(
         home.status === 200 && sections.length >= 1,
@@ -6590,6 +6602,171 @@ console.log('\n=== 46. 沙箱里的取网必须跟着这次求值的预算走 ==
             String(s.id).includes('slow-46'),
         ),
         '慢取网的三个测试源已清理',
+    )
+}
+
+console.log('\n=== 47. 搜索里的逐条字段也走批量求值（第六十一轮） ===')
+
+/**
+ * 第五十九轮做出批量求值（预置一个请求只解析一次）时只接了**目录**那条路。
+ * 这一轮接到搜索 / 发现上 —— 实测 200 本书 × 3 条 `@js:` 字段（600 次求值）
+ * 从约 **7.0 秒**降到约 **2.4 秒**，而那个 7.0 秒是**超过搜索自己那份 6 秒预算**的：
+ * 那份预算只管取网与**单次**求值，管不到「一页几百次」的总量。
+ *
+ * 接的时候撞上一个真问题：一页三个源共用**一个** session，而静态预置与 jsLib
+ * 只在一批的**第一次求值**里跑 —— 批不分 jsLib 的话，`GetUL()` / `host()` 这类名字
+ * 会漏到另一个源里，**而且不报错**（把 `key` 固定成 `''` 复现过：Q 源整页拿到了
+ * P 源的 `tag()`）。所以批改成「一份 jsLib 一批」，这一段钉三件事。
+ */
+{
+    const pId = `user:${BASE}/batch-47-p`
+    const qId = `user:${BASE}/batch-47-q`
+    const jsId = `user:${BASE}/batch-47-js`
+    const cssId = `user:${BASE}/batch-47-css`
+    for (const one of [pId, qId, jsId, cssId])
+        await call('DELETE', `/api/sources?id=${encodeURIComponent(one)}`)
+
+    /** 一个「每本书的字段都带自己那份 jsLib 前缀」的源 */
+    const tagged = (label, url) => ({
+        bookSourceName: `批-${label}（临时）`,
+        bookSourceUrl: url,
+        jsLib: `function tag(){ return ${JSON.stringify(label)}; }\n`,
+        searchUrl: '/fixture/search?q={{key}}&n=3',
+        ruleSearch: {
+            bookList: '@css:div.result-item',
+            name: '@css:h3.title@text',
+            bookUrl: '@css:h3.title a@href',
+            author: '@js:tag()+"/"+java.getString("span.author@text")',
+            intro: '@js:tag()+"#"+java.getString("p.intro@text")',
+        },
+    })
+
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            tagged('P', `${BASE}/batch-47-p`),
+            tagged('Q', `${BASE}/batch-47-q`),
+            {
+                // 205 本书（2 本真的 + 200 本填充）—— 三个字段全走沙箱，一共 600 次求值，
+                // 顺带压过 `BATCH_ROTATE_EVALS`（400）那一次轮换
+                bookSourceName: '批-规模·走沙箱（临时）',
+                bookSourceUrl: `${BASE}/batch-47-js`,
+                searchUrl: '/fixture/search?q={{key}}&n=200',
+                ruleSearch: {
+                    bookList: '@css:div.result-item',
+                    name: '@css:h3.title@text',
+                    bookUrl: '@css:h3.title a@href',
+                    author: '@js:java.getString("span.author@text")',
+                    kind: '@js:java.getString("span.kind@text")',
+                    intro: '@js:java.getString("p.intro@text")',
+                },
+            },
+            {
+                // 对照：同样 205 本、同样三个字段，但走纯选择器（不进沙箱）——
+                // 两条路的差就是「逐条求值」的代价，用它当基准让断言不依赖机器快慢
+                bookSourceName: '批-规模·纯选择器（临时）',
+                bookSourceUrl: `${BASE}/batch-47-css`,
+                searchUrl: '/fixture/search?q={{key}}&n=200',
+                ruleSearch: {
+                    bookList: '@css:div.result-item',
+                    name: '@css:h3.title@text',
+                    bookUrl: '@css:h3.title a@href',
+                    author: '@css:span.author@text',
+                    kind: '@css:span.kind@text',
+                    intro: '@css:p.intro@text',
+                },
+            },
+        ]),
+    )
+
+    /**
+     * ① 两个 jsLib 不同的源放在**同一次请求**里 —— 它们共享一个 session，
+     *    正是串味会发生的地方（批不分 jsLib 时 Q 会整页拿到 P 的 `tag()`）
+     */
+    const both = await call(
+        'POST',
+        '/api/search',
+        JSON.stringify({ keyword: '测试', sourceIds: [pId, qId] }),
+    )
+    const booksOf = (label) =>
+        (both.json?.sources ?? []).find((s) => String(s.sourceName).includes(label))?.books ?? []
+    const pBooks = booksOf('P')
+    const qBooks = booksOf('Q')
+    check(
+        pBooks.length === 5 &&
+            qBooks.length === 5 &&
+            pBooks.every(
+                (b) => String(b.author).startsWith('P/') && String(b.intro).startsWith('P#'),
+            ) &&
+            qBooks.every(
+                (b) => String(b.author).startsWith('Q/') && String(b.intro).startsWith('Q#'),
+            ),
+        '① 同页两个 jsLib 不同的源各用各的 jsLib（批按 jsLib 分开，没串味）',
+        `P=${pBooks[0]?.author} / Q=${qBooks[0]?.author}`,
+    )
+    check(
+        new Set(pBooks.map((b) => b.author)).size === 5,
+        '① 逐条字段确实是**逐条**求出来的（5 本书 5 个不同的值，不是同一个值复读）',
+        JSON.stringify(pBooks.map((b) => b.author)),
+    )
+
+    // ②③ 规模：205 本 × 3 条 `@js:` 字段 ≈ 600 次求值，与「纯选择器」那条路对拍
+    const runOne = async (id) => {
+        const started = Date.now()
+        const res = await call(
+            'POST',
+            '/api/search',
+            JSON.stringify({ keyword: '测试', sourceIds: [id] }),
+        )
+        return { elapsed: Date.now() - started, hit: res.json?.sources?.[0] ?? {} }
+    }
+    const jsRun = await runOne(jsId)
+    const cssRun = await runOne(cssId)
+    const bigBooks = jsRun.hit.books ?? []
+    check(
+        bigBooks.length === 202 && (cssRun.hit.books ?? []).length === 202,
+        '② 一页 202 本书都取回来了（两条路各一遍）',
+        `js=${bigBooks.length} css=${(cssRun.hit.books ?? []).length} ${String(jsRun.hit.error ?? '')}`,
+    )
+    const last = bigBooks[bigBooks.length - 1]
+    check(
+        last?.name === '填充书·200' &&
+            last?.author === '填充作者·200' &&
+            last?.intro === '填充简介·200',
+        '② 最后一本三个字段都是**它自己**的值（这一趟超过 400 次求值，顺带压过轮换）',
+        JSON.stringify({
+            name: last?.name,
+            author: last?.author,
+            intro: last?.intro,
+            kind: last?.kind,
+        }),
+    )
+    /**
+     * ③ 逐条求值的代价：与同一份数据上的「纯选择器」那条路比**差值**
+     *
+     * 用差值而不是绝对值：绝对值随 CI 机器快慢浮动，而两条路是一起量的，
+     * 差值稳定得多。这一轮之前那个差值约 **6.9 秒**（每次求值约 11.6ms）；
+     * 走批量求值之后约 2.4 秒。5 秒这条线两边都放得下，也拦得住退回去。
+     */
+    const overhead = jsRun.elapsed - cssRun.elapsed
+    check(
+        overhead < 5000 && jsRun.hit.ok === true,
+        '③ 600 次逐条求值的增量在 5 秒之内（这一轮之前约 6.9 秒，整次搜索比预算还长）',
+        `增量 ${overhead}ms（走沙箱 ${jsRun.elapsed}ms vs 纯选择器 ${cssRun.elapsed}ms）`,
+    )
+    console.log(
+        `  —— 202 本书 × 3 条 @js:（约 600 次沙箱求值）${jsRun.elapsed}ms；` +
+            `同一份数据走纯选择器 ${cssRun.elapsed}ms；增量 ${overhead}ms`,
+    )
+
+    for (const one of [pId, qId, jsId, cssId])
+        await call('DELETE', `/api/sources?id=${encodeURIComponent(one)}`)
+    check(
+        !((await getJson('/api/sources')).json?.sources ?? []).some((s) =>
+            String(s.id).includes('batch-47'),
+        ),
+        '批量求值的三个测试源已清理',
     )
 }
 
