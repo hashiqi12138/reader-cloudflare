@@ -4705,6 +4705,9 @@ this.classNames = className.trim().split("\\s+");   // 然后要求**每一个**
   `removeCookie` 清掉 / `getKey` 取值都对
 - 靶子是测试站点新加的两个端点：`/fixture/cookie-set`（下发 `rc54=1` + 一页书目）、
   `/fixture/cookie-need`（**只在带着它时**才回 200）
+- CI：**中间有两跑是红的** —— 新加的那条账本 `test/cookieJar.scan.test.ts` 我漏了跑
+  prettier，`format:check` 直接把它挡下来了（这正是那条检查存在的意义）。补一次
+  `style:` 提交之后 #49 绿
 
 **五、线上核验**（`/api/probe` 报 `0.44.0`）。用 httpbin 的两个端点做真站点对照
 （都是 200，不依赖重定向）：`/response-headers?Set-Cookie=rc54%3D1` 下发，`/cookies` 回显收到了什么。
