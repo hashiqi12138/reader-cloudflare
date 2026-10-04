@@ -5723,6 +5723,146 @@ console.log('\n=== 40. 对象全局补上的那几个方法（第五十二轮那
     )
 }
 
+console.log('\n=== 41. cookie 罐：收 / 发 / 跨请求落库（`enabledCookieJar`） ===')
+{
+    /**
+     * 站点最常见的那个形态：**搜索那一趟拿到会话 cookie，点进详情那一趟必须带上**。
+     * 在我们这里那是两次互不相干的 HTTP 请求，所以这三件事要一起对：
+     *   收 —— 响应里的 `Set-Cookie` 进罐
+     *   发 —— 下一个请求带 `Cookie` 头
+     *   存 —— 罐子按书源落库（少了它，cookie 只活一趟）
+     *
+     * 靶子是测试站点的两个端点：`/fixture/cookie-set` 下发 `rc54=1` 并给出一页书目，
+     * `/fixture/cookie-need` **只在带着它时**才回 200（否则 403）。
+     *
+     * 三段一起验，缺一段结论就不成立：
+     *   A `enabledCookieJar: true`  → 详情取得到
+     *   B 同一个链路、把开关关掉    → 详情 403（证明起作用的确实是罐子，而不是站点恰好在放行）
+     *   C 沙箱里 `cookie.*` 的读写语义（合并 / 整串换掉 / 清掉 / getKey）
+     */
+    const onId = `user:${BASE}/cookie-on`
+    const offId = `user:${BASE}/cookie-off`
+    const boxId = `user:${BASE}/cookie-sandbox`
+    for (const id of [onId, offId, boxId]) {
+        await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+    }
+
+    const searchRules = {
+        bookList: '@css:div.result-item',
+        name: '@css:h3.title@text',
+        // 详情地址指向「需要 cookie」那个端点：能不能打开，就是罐子有没有生效
+        bookUrl: '@js:"/fixture/cookie-need"',
+    }
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: 'cookie 罐（开）',
+                bookSourceUrl: `${BASE}/cookie-on`,
+                enabledCookieJar: true,
+                searchUrl: '/fixture/cookie-set',
+                ruleSearch: searchRules,
+                ruleBookInfo: { name: '@css:h1.book-name@text' },
+            },
+            {
+                bookSourceName: 'cookie 罐（关）',
+                bookSourceUrl: `${BASE}/cookie-off`,
+                enabledCookieJar: false,
+                searchUrl: '/fixture/cookie-set',
+                ruleSearch: searchRules,
+                ruleBookInfo: { name: '@css:h1.book-name@text' },
+            },
+            {
+                bookSourceName: 'cookie 罐（沙箱语义）',
+                bookSourceUrl: `${BASE}/cookie-sandbox`,
+                enabledCookieJar: true,
+                searchUrl: '/fixture/cookie-set',
+                ruleSearch: {
+                    ...searchRules,
+                    // 五个动作按顺序做完，把每一步的结果拼出来：
+                    //   before  搜索那一趟收到的 cookie（证明「收」已经进了罐、并被注入沙箱）
+                    //   merged  setCookie 之后同名键还在、新键进来了
+                    //   rep     replaceCookie 之后只剩新的那一对
+                    //   rm      removeCookie 之后整条没了
+                    name:
+                        `@js:(function(){` +
+                        `var before=cookie.getCookie(baseUrl);` +
+                        `cookie.setCookie(baseUrl,'rc_x=9');` +
+                        `var merged=cookie.getKey(baseUrl,'rc54')+'/'+cookie.getKey(baseUrl,'rc_x');` +
+                        `cookie.replaceCookie(baseUrl,'rc_y=1');` +
+                        `var rep=cookie.getCookie(baseUrl);` +
+                        `cookie.removeCookie(baseUrl);` +
+                        `return 'before='+before+'|merged='+merged+'|rep='+rep` +
+                        `+'|rm='+JSON.stringify(cookie.getCookie(baseUrl));})()`,
+                },
+            },
+        ]),
+    )
+
+    async function searchOne(id) {
+        const res = await fetch(`${BASE}/api/search`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ keyword: '测试', sourceIds: [id] }),
+        })
+        return (await res.json()).sources?.[0]
+    }
+
+    // ---- A：开着开关，搜索那一趟拿到 cookie，详情那一趟带得上 ----
+    const onSearch = await searchOne(onId)
+    check(onSearch?.ok === true, 'A 开启 cookie 罐的源能搜到书', String(onSearch?.error ?? ''))
+    const bookUrl = onSearch?.books?.[0]?.bookUrl
+    check(
+        String(bookUrl ?? '').endsWith('/fixture/cookie-need'),
+        'A 书目指向「需要 cookie」的详情端点',
+        String(bookUrl ?? ''),
+    )
+    const onBook = await getJson(
+        `/api/book?sourceId=${encodeURIComponent(onId)}&url=${encodeURIComponent(String(bookUrl ?? ''))}`,
+    )
+    check(
+        onBook.json?.name === '测试小说·甲',
+        'A 详情页打开了（搜索那一趟拿到的会话 cookie 带到了这一趟）',
+        String(onBook.json?.name ?? onBook.json?.error ?? ''),
+    )
+
+    // ---- B：同一个链路，把开关关掉 —— 站点照样拦，证明起作用的是罐子 ----
+    const offSearch = await searchOne(offId)
+    const offUrl = offSearch?.books?.[0]?.bookUrl
+    const offBook = await getJson(
+        `/api/book?sourceId=${encodeURIComponent(offId)}&url=${encodeURIComponent(String(offUrl ?? ''))}`,
+    )
+    check(
+        onSearch?.books?.[0]?.name === offSearch?.books?.[0]?.name,
+        'B 关掉开关的源搜索照常（差别只在带不带 cookie）',
+        `${onSearch?.books?.[0]?.name} / ${offSearch?.books?.[0]?.name}`,
+    )
+    check(
+        String(offBook.json?.error ?? '').includes('403'),
+        'B 关掉开关之后详情被拦下（403）—— 证明 A 靠的是罐子',
+        String(offBook.json?.error ?? offBook.json?.name ?? '（居然打开了）'),
+    )
+
+    // ---- C：沙箱里 cookie.* 的读写语义 ----
+    const box = await searchOne(boxId)
+    check(
+        box?.books?.[0]?.name === 'before=rc54=1|merged=1/9|rep=rc_y=1|rm=""',
+        'C 沙箱里 setCookie 合并 / replaceCookie 整串换 / removeCookie 清掉，都对',
+        String(box?.books?.[0]?.name ?? box?.error ?? ''),
+    )
+
+    for (const id of [onId, offId, boxId]) {
+        await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+    }
+    check(
+        !((await getJson('/api/sources')).json?.sources ?? []).some((s) =>
+            String(s.id).includes('cookie-'),
+        ),
+        'cookie 罐的三个测试源已清理',
+    )
+}
+
 console.log('\n=== 结果 ===')
 if (failures.length === 0) {
     console.log(

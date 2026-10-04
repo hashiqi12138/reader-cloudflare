@@ -183,6 +183,22 @@ describe('baseGlobals', () => {
         expect('__sourceVars' in globals).toBe(true)
         expect(globals.__infoMap).toEqual({})
     })
+
+    /**
+     * cookie 罐以「主机名 → cookie 串」注入
+     *
+     * 没建罐子（书源没开 `enabledCookieJar`）时是**空表**而不是缺这个键 ——
+     * 缺键会让预置脚本里那一句 `JSON.parse(String(globalThis.__cookieJar || '{}'))`
+     * 变成 `"undefined"`，而 `JSON.parse("undefined")` 是抛错的（虽然被 catch 住，
+     * 但那是「碰巧没事」，不是设计）。
+     */
+    it('cookie 罐以 JSON 注入；没建罐子时是空表而不是缺键', () => {
+        expect(JSON.parse(String(baseGlobals(ctx()).__cookieJar))).toEqual({})
+        const withJar = baseGlobals(
+            ctx({ source: { ...source, cookieJar: { hosts: { 'a.com': 'x=1' } } } }),
+        )
+        expect(JSON.parse(String(withJar.__cookieJar))).toEqual({ 'a.com': 'x=1' })
+    })
 })
 
 describe('sourceLimits 的两条落库路径', () => {
@@ -198,5 +214,23 @@ describe('sourceLimits 的两条落库路径', () => {
         const limits = sourceLimits(ctx())
         expect('persistSourceVariable' in limits).toBe(false)
         expect('persistBookVariable' in limits).toBe(false)
+    })
+
+    /**
+     * cookie 罐走书源对象（不是上下文）：注册表把罐子和它的落库路径一起挂在书源上，
+     * 这里只是把它转交给沙箱 —— 没建罐子（书源没开 enabledCookieJar）时两个键都不传。
+     */
+    it('cookie 罐与它的落库路径跟着**书源**走（没建罐子时都不传）', () => {
+        const jar = { hosts: { 'a.com': 'x=1' } }
+        const persist = () => {}
+        const limits = sourceLimits(
+            ctx({ source: { ...source, cookieJar: jar, persistCookies: persist } }),
+        )
+        expect(limits.cookieJar).toBe(jar)
+        expect(limits.persistCookies).toBe(persist)
+
+        const none = sourceLimits(ctx())
+        expect('cookieJar' in none).toBe(false)
+        expect('persistCookies' in none).toBe(false)
     })
 })

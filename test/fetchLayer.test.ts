@@ -19,11 +19,13 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { createServer, type IncomingMessage, type Server } from 'node:http'
 
 import { SEARCH_TIMEOUT_MS, fetchDetailed, fetchText } from '../src/lib/http'
+import { emptyJar } from '../src/lib/cookies'
 import type { FetchPlan } from '../src/engine/types'
 
 interface Seen {
     method: string
     contentType: string | undefined
+    cookie: string | undefined
     body: string
 }
 
@@ -42,6 +44,7 @@ beforeAll(async () => {
             seen.push({
                 method: req.method ?? '',
                 contentType: req.headers['content-type'],
+                cookie: req.headers.cookie,
                 body,
             })
             // `/stall` 故意不响应：用来量超时
@@ -52,6 +55,27 @@ beforeAll(async () => {
                 res.setHeader('Set-Cookie', 'rc_connect=fake; Path=/')
                 res.statusCode = 403
                 res.end('connect-error-403')
+                return
+            }
+            // `/set-cookie` 下发两个 cookie（其中一条带删除属性）
+            if (req.url === '/set-cookie') {
+                res.setHeader('Set-Cookie', ['rc_a=1; Path=/; HttpOnly', 'rc_b=2; Path=/'])
+                res.setHeader('Content-Type', 'text/plain; charset=utf-8')
+                res.end('已下发')
+                return
+            }
+            // `/drop-cookie` 删掉 rc_a（`Max-Age=0` 是站点删 cookie 的标准写法）
+            if (req.url === '/drop-cookie') {
+                res.setHeader('Set-Cookie', 'rc_a=; Path=/; Max-Age=0')
+                res.setHeader('Content-Type', 'text/plain; charset=utf-8')
+                res.end('已删除')
+                return
+            }
+            // `/same-cookie` 反复下发同一个值：用来验证「没变就不写库」
+            if (req.url === '/same-cookie') {
+                res.setHeader('Set-Cookie', 'rc_same=1; Path=/')
+                res.setHeader('Content-Type', 'text/plain; charset=utf-8')
+                res.end('已下发')
                 return
             }
             res.setHeader('Content-Type', 'text/html; charset=utf-8')
@@ -154,5 +178,78 @@ describe('fetchDetailed 与 fetchText 的分工', () => {
         const detailed = await fetchDetailed(plan({}))
         expect(detailed.status).toBe(200)
         expect(detailed.body).toBe(await fetchText(plan({})))
+    })
+})
+
+/**
+ * cookie 罐：**收**（响应的 Set-Cookie）与**发**（下一个请求的 Cookie 头）
+ *
+ * 这两件事都发生在取网层，所以只能在这一层验，而且必须验在真实的 HTTP 线上 ——
+ * 「函数返回了某个对象」证明不了网线上到底发了什么。
+ *
+ * 书源的场景决定了它必须跨请求（搜索 / 详情 / 目录 / 正文是四次互不相干的请求），
+ * 所以这里同时验「收完就写库」这一条：漏了它，会话 cookie 只活一趟，
+ * 表现是「搜得到书、点进去 403」。
+ */
+describe('cookie 罐的收发', () => {
+    it('响应里的 Set-Cookie 进罐，且立刻写回库（跨请求那一趟要用）', async () => {
+        const jar = emptyJar()
+        let persisted = 0
+
+        await fetchText(
+            plan({
+                url: `${base}/set-cookie`,
+                cookieJar: jar,
+                persistCookies: () => void persisted++,
+            }),
+        )
+
+        // 属性（Path / HttpOnly）必须被丢掉 —— 留着它们会在拼 Cookie 头时把属性当键发出去
+        expect(jar.hosts['127.0.0.1']).toBe('rc_a=1; rc_b=2')
+        expect(persisted).toBe(1)
+    })
+
+    it('下一个请求自动带上罐里的 Cookie（书源自己没写的时候）', async () => {
+        const jar = emptyJar()
+        jar.hosts['127.0.0.1'] = 'rc_a=1'
+        await fetchText(plan({ cookieJar: jar }))
+        expect(seen.at(-1)!.cookie).toBe('rc_a=1')
+    })
+
+    it('书源自己声明了 Cookie 就不覆盖 —— 有些站点要的是专用 cookie', async () => {
+        const jar = emptyJar()
+        jar.hosts['127.0.0.1'] = 'rc_a=1'
+        await fetchText(plan({ cookieJar: jar, headers: { Cookie: 'mine=1' } }))
+        expect(seen.at(-1)!.cookie).toBe('mine=1')
+    })
+
+    it('`Max-Age=0` 是站点在删 cookie（退出登录就靠它），罐子里要真的没了', async () => {
+        const jar = emptyJar()
+        jar.hosts['127.0.0.1'] = 'rc_a=1; rc_b=2'
+        await fetchDetailed(plan({ url: `${base}/drop-cookie`, cookieJar: jar }))
+        expect(jar.hosts['127.0.0.1']).toBe('rc_b=2')
+        // 删掉之后下一个请求就不该再带它
+        await fetchText(plan({ cookieJar: jar }))
+        expect(seen.at(-1)!.cookie).toBe('rc_b=2')
+    })
+
+    it('罐子没变就不写库（同一个值反复下发不该变成每次请求一次 UPDATE）', async () => {
+        const jar = emptyJar()
+        jar.hosts['127.0.0.1'] = 'rc_same=1'
+        let persisted = 0
+        await fetchDetailed(
+            plan({
+                url: `${base}/same-cookie`,
+                cookieJar: jar,
+                persistCookies: () => void persisted++,
+            }),
+        )
+        expect(jar.hosts['127.0.0.1']).toBe('rc_same=1')
+        expect(persisted).toBe(0)
+    })
+
+    it('没有罐子时行为与以前一模一样（书源关掉 CookieJar 的 359 条就是这条路）', async () => {
+        await fetchText(plan({ url: `${base}/set-cookie` }))
+        expect(seen.at(-1)!.cookie).toBeUndefined()
     })
 })

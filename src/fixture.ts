@@ -706,6 +706,33 @@ export async function handleFixture(request: Request, url: URL): Promise<Respons
     if (pathname === '/fixture/two-class') return html(fixtureTwoClassPage())
 
     /**
+     * cookie 罐的两个靶子（第五十四轮）
+     *
+     * `/fixture/cookie-set` 下发一个会话 cookie 并给出**一页书目**（条目照常指向书籍详情页）；
+     * `/fixture/cookie-need` 只在请求**带着**这个 cookie 时才回 200，否则 403。
+     *
+     * 这是站点最常见的那个形态：搜索那一趟拿到会话 cookie，点进详情那一趟必须带上。
+     * 在我们这里那是**两次互不相干的 HTTP 请求**，所以这一对靶子同时钉住三件事 ——
+     * 收（响应的 Set-Cookie 进罐）、发（下一个请求带 Cookie 头）、**跨请求落库**。
+     * 少了第三件，症状是「搜得到书、点进去 403」，而且不报任何错。
+     */
+    if (pathname === '/fixture/cookie-set') {
+        return new Response(fixtureSearchPage('测试', 1), {
+            headers: {
+                'Content-Type': 'text/html; charset=utf-8',
+                'Set-Cookie': 'rc54=1; Path=/',
+            },
+        })
+    }
+    if (pathname === '/fixture/cookie-need') {
+        const cookie = request.headers.get('cookie') ?? ''
+        if (!cookie.split(';').some((part) => part.trim() === 'rc54=1')) {
+            return new Response('需要会话 cookie（rc54）', { status: 403 })
+        }
+        return html(fixtureBookPage('1'))
+    }
+
+    /**
      * **防盗链封面**本身：没有 `Referer` 就 403
      *
      * 照线上那几家的规矩写，**不宽容**：少了 `Referer` 就是 403。
