@@ -20,7 +20,13 @@ import { runInSandbox } from '../engine/js'
 import type { BookSource, RuleContext, SearchBook } from '../engine/types'
 import { UpstreamError, fetchText } from '../lib/http'
 import { parseExploreCategories, type ExploreCategory } from './exploreParse'
-import { analyzeAddress, booksFromItems, resolveAddress, type BookListRule } from './ops'
+import {
+    analyzeAddress,
+    booksFromItems,
+    resolveAddress,
+    type BookListRule,
+    type FieldWarning,
+} from './ops'
 import { buildPlan, sandboxHttp } from './source'
 import { findUrlJs } from './urlJs'
 
@@ -67,6 +73,8 @@ export interface ExploreResult {
     nextUrl: string | null
     /** 分类地址里带 `{{page}}` 时，说明分页由模板自己表达 */
     templated: boolean
+    /** 展示用字段被容错掉的原因（与搜索那条路同一机制，见 ops.ts 的 tolerantField） */
+    warnings: FieldWarning[]
 }
 
 /** 取一个分类下的书目 */
@@ -77,6 +85,7 @@ export async function exploreBooks(
     ctx: RuleContext,
 ): Promise<ExploreResult> {
     const rule = source.ruleExplore
+    const warnings: FieldWarning[] = []
     if (!rule?.bookList) {
         throw new UpstreamError('这个书源没有配置发现页的书目规则（ruleExplore.bookList）')
     }
@@ -103,7 +112,7 @@ export async function exploreBooks(
 
     const sel = rootSelection(html)
     const items = await analyzeSelections(sel, rule.bookList, listCtx)
-    const books = await booksFromItems(source, items, rule as BookListRule, listCtx, base)
+    const books = await booksFromItems(source, items, rule as BookListRule, listCtx, base, warnings)
 
     let nextUrl: string | null = null
     if (rule.nextPageUrl) {
@@ -120,5 +129,6 @@ export async function exploreBooks(
         books,
         nextUrl,
         templated: categoryUrl.includes('{{page}}'),
+        warnings,
     }
 }

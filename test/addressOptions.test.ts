@@ -30,10 +30,12 @@ vi.mock('../src/engine/js', () => ({
     sandboxResultToStrings: (value: unknown) => [String(value ?? '')],
 }))
 
-const { analyzeAddress, resolveAddress, resolveCoverAddress, resolveUrl } =
+const { analyzeAddress, booksFromItems, resolveAddress, resolveCoverAddress, resolveUrl } =
     await import('../src/legado/ops')
-const { rootSelection } = await import('../src/engine/analyze')
+const { analyzeSelections, rootSelection } = await import('../src/engine/analyze')
 const { splitUrlAndOptions } = await import('../src/legado/urlOptions')
+type BookSource = import('../src/engine/types').BookSource
+type FieldWarning = import('../src/legado/ops').FieldWarning
 
 const BASE = 'https://guiwb.nnmh.info/comic/1.html'
 const COVER_OPTIONS = ',{"headers":{"Referer":"https://guiwb.nnmh.info/"}}'
@@ -157,6 +159,58 @@ describe('多行的规则值：取「第一条地址」，但**选项块整体�
         const raw = await analyzeAddress(item(), rule, { baseUrl: 'https://a.com' })
         expect(raw).toBe('https://a.com/x,{"method":"POST","body":"a={b}"}')
         expect(splitUrlAndOptions(raw).options.body).toBe('a={b}')
+    })
+})
+
+describe('展示用字段的容错：坏规则不该让整条搜索失败', () => {
+    /**
+     * 第四十五轮抽样体检的量：🎨拷贝漫画 的 `coverUrl` 写着一个多了一个 `)` 的 XPath，
+     * 求值抛错 → 整条搜索 `ok=false`，一本书都搜不到（书名、地址、目录都是好的）。
+     */
+    const PAGE = `<html><body><div class="item">
+        <a href="/book/1">书</a><p class="intro">简介</p>
+    </div></body></html>`
+    const source = { bookSourceName: 'x', bookSourceUrl: 'https://a.com' } as BookSource
+    const itemsOf = () =>
+        analyzeSelections(rootSelection(PAGE), 'div.item', { baseUrl: 'https://a.com' })
+
+    it('坏掉的 `coverUrl` 只让该字段为空，书照常返回，好的字段不受连累', async () => {
+        const warnings: FieldWarning[] = []
+        const books = await booksFromItems(
+            source,
+            await itemsOf(),
+            {
+                name: 'a@text',
+                bookUrl: 'a@href',
+                intro: 'p.intro@text',
+                coverUrl: '//p[@class="x"])/@src',
+            },
+            { baseUrl: 'https://a.com' },
+            'https://a.com',
+            warnings,
+        )
+        expect(books).toHaveLength(1)
+        expect(books[0]!.name).toBe('书')
+        expect(books[0]!.coverUrl).toBeUndefined()
+        expect(books[0]!.intro).toBe('简介')
+        expect(books[0]!.bookUrl).toBe('https://a.com/book/1')
+        // 留空但**不静默**：原因带在 warnings 里
+        expect(warnings).toHaveLength(1)
+        expect(warnings[0]!.field).toBe('coverUrl')
+        expect(warnings[0]!.message).toMatch(/XPath/)
+    })
+
+    it('链路字段（`bookUrl`）坏掉时必须**抛错** —— 吞掉它就成了「搜不到书、不报错」', async () => {
+        await expect(
+            booksFromItems(
+                source,
+                await itemsOf(),
+                { name: 'a@text', bookUrl: '//p[@class="x"])/@href' },
+                { baseUrl: 'https://a.com' },
+                'https://a.com',
+                [],
+            ),
+        ).rejects.toThrow()
     })
 })
 

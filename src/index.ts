@@ -67,7 +67,7 @@ import { javaSurfaceSummary } from './engine/platform'
 import { parseHtml } from './engine/select'
 import { handleFixture } from './fixture'
 import { exploreBooks, listExploreCategories } from './legado/explore'
-import { fetchBookInfo, fetchChapters, searchBooks } from './legado/ops'
+import { fetchBookInfo, fetchChapters, searchBooks, type FieldWarning } from './legado/ops'
 import { fetchChapterContent } from './legado/media'
 import { mediaRequestHeaders } from './legado/source'
 import { splitUrlAndOptions } from './legado/urlOptions'
@@ -1206,10 +1206,17 @@ app.post('/api/search', async (c) => {
         wanted.map(async (source) => {
             const started = Date.now()
             try {
-                const books = await searchBooks(source, keyword, {
-                    ...evalContext(c.env.DB, source, session),
-                    key: keyword,
-                })
+                // 展示用字段的容错原因（封面 / 简介 / 作者……）——见 ops.ts 的 tolerantField
+                const warnings: FieldWarning[] = []
+                const books = await searchBooks(
+                    source,
+                    keyword,
+                    {
+                        ...evalContext(c.env.DB, source, session),
+                        key: keyword,
+                    },
+                    warnings,
+                )
                 return {
                     sourceId: source.id,
                     sourceName: source.bookSourceName,
@@ -1217,6 +1224,7 @@ app.post('/api/search', async (c) => {
                     count: books.length,
                     elapsedMs: Date.now() - started,
                     books,
+                    ...(warnings.length > 0 ? { warnings } : {}),
                 }
             } catch (err) {
                 return {
@@ -1267,6 +1275,8 @@ app.get('/api/book', async (c) => {
     if (!target) return c.json({ error: '缺少 url 参数' }, 400)
 
     try {
+        // `warnings` 收集展示用字段被容错掉的错误（见 ops.ts 的 tolerantField）：
+        // 字段留空，但原因要带出去 —— 否则就成了「静默吞掉一个坏规则」
         const info = await fetchBookInfo(source, target, await bookEvalContext(c, source, target))
         return c.json({ sourceId: source.id, ...info })
     } catch (err) {

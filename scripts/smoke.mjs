@@ -2739,10 +2739,14 @@ console.log('\n=== 15. 沙箱助手（java.getString / timeFormat / md5 / hex / 
     const nestedPer = nested.json?.sources?.[0]
     check(
         // 报错文案在「第十轮」改过：拦住它的理由从「asyncify 不支持嵌套挂起」
-        // 变成了「会话的串行链只有一个，嵌套会自己等自己」。断言只钉语义（拦住 + 说清原因）
-        nestedPer?.ok === false && String(nestedPer?.error ?? '').includes('不能再套 JS'),
-        'java.getString 里再套 JS 会明确报错，而不是悄悄挂起',
-        JSON.stringify(nestedPer?.error ?? nestedPer?.books?.[0]?.wordCount),
+        // 变成了「会话的串行链只有一个，嵌套会自己等自己」。断言只钉语义（拦住 + 说清原因）。
+        //
+        // 第四十五轮起，**展示用字段**的错误改成进 `warnings`（字段留空、源不再整条失败），
+        // 所以这里断的是 warnings 里那句原因 —— 诊断价值没丢，只是不再连累整条搜索。
+        nestedPer?.ok === true &&
+            String(nestedPer?.warnings?.[0]?.message ?? '').includes('不能再套 JS'),
+        'java.getString 里再套 JS 会明确报错（进 warnings），而不是悄悄挂起',
+        JSON.stringify(nestedPer?.warnings ?? nestedPer?.error ?? nestedPer?.books?.[0]?.wordCount),
     )
     await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
 
@@ -3597,10 +3601,16 @@ console.log('\n=== 20. 节点级助手与对称加解密（java.getElements / cr
     /**
      * 错误路径：一条一条单独验
      *
-     * 「某个字段的规则抛错」在这个引擎里的表现是**整个源**失败（`ok:false` + `error`），
-     * 而不是那一格留空 —— 所以每条必然抛错的规则都得单独开一个源，
-     * 否则它会把同一个源里其它字段的断言一起带走（这不是缺陷，是刻意的：
-     * 书源报错与「搜不到书」必须能分开看）。
+     * 「某个字段的规则抛错」在这个引擎里怎么表现，**第四十五轮起按字段分两类**：
+     *
+     *   - **链路字段**（`bookUrl` / `tocUrl` / `chapterUrl` …）→ 整个源失败
+     *     （`ok:false` + `error`）。这些是必经之处，坏了两者必须能分开看。
+     *   - **展示用字段**（`author` / `coverUrl` / `intro` …）→ 那一格留空、源照常可用，
+     *     原因进 `warnings`（见 ops.ts 的 tolerantField）。理由是抽样体检里那条：
+     *     🎨拷贝漫画 的 coverUrl 多了一个 `)`，害得整条源一本书都搜不到。
+     *
+     * 这里只钉**语义**：原因必须说清楚（无论落在 `error` 还是 `warnings`）。
+     * 下面这几条用的都是 `author`（展示用），所以两种情况都接受。
      */
     const expectSourceError = async (name, rules, expected, label) => {
         await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
@@ -3625,11 +3635,11 @@ console.log('\n=== 20. 节点级助手与对称加解密（java.getElements / cr
         )
         const res = await call('POST', '/api/search', { keyword: '测试', sourceIds: [id] })
         const per = res.json?.sources?.[0]
-        check(
-            per?.ok === false && String(per?.error ?? '').includes(expected),
-            label,
-            JSON.stringify(per?.error),
-        )
+        const surfaced = [
+            String(per?.error ?? ''),
+            ...(per?.warnings ?? []).map((w) => String(w.message ?? '')),
+        ].join(' | ')
+        check(surfaced.includes(expected), label, JSON.stringify(per?.error ?? per?.warnings))
         await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
     }
 
@@ -5041,6 +5051,107 @@ console.log('\n=== 32. URL 选项里的 `body` 写成 JSON 对象 ===')
             String(s.id).includes('json-body'),
         ),
         'JSON body 的测试源已清理',
+    )
+}
+
+console.log('\n=== 33. 展示用字段的规则坏掉，不该让整条源搜不到书 ===')
+{
+    /**
+     * 第四十五轮抽样体检里最扎眼的一条：`🎨拷贝漫画` 的 `coverUrl` 写着一个**多了一个 `)`**
+     * 的 XPath，求值抛错 —— 而这一抛让**整条搜索** `ok=false`，用户一本书都搜不到，
+     * 尽管书名、作者、书籍地址、目录、正文全都好好的。
+     *
+     * 用同一形状的规则验四件事：
+     *   ① 坏掉的展示用字段（`coverUrl`）不再让搜索失败
+     *   ② 好的展示用字段（`intro`）照常取到 —— 不是「整段跳过」
+     *   ③ 书本身仍然可用（书籍地址照常）
+     *   ④ 反向对照：**链路字段**（`bookUrl`）坏掉时**必须**报错 ——
+     *      把链路字段也吞掉，就退化成「搜不到书、全程不报错」
+     */
+    const id = `user:${BASE}/tolerant-field`
+    const cid = `user:${BASE}/strict-field`
+    for (const x of [id, cid]) await call('DELETE', `/api/sources?id=${encodeURIComponent(x)}`)
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: '展示用字段坏掉（临时）',
+                bookSourceUrl: `${BASE}/tolerant-field`,
+                searchUrl: '/fixture/search?q={{key}}',
+                ruleSearch: {
+                    bookList: 'div.result-item',
+                    name: 'h3.title@text',
+                    bookUrl: 'a@href',
+                    intro: 'p.intro@text',
+                    // 多了一个 `)` 的 XPath —— 与线上 🎨拷贝漫画 的 coverUrl 一字不差
+                    coverUrl: '//p[@class="mh-cover tip"])/@style',
+                },
+            },
+            {
+                bookSourceName: '链路字段坏掉（临时）',
+                bookSourceUrl: `${BASE}/strict-field`,
+                searchUrl: '/fixture/search?q={{key}}',
+                ruleSearch: {
+                    bookList: 'div.result-item',
+                    name: 'h3.title@text',
+                    bookUrl: '//p[@class="mh-cover tip"])/@style',
+                },
+            },
+        ]),
+    )
+
+    const searchOne = async (sourceId) => {
+        const res = await fetch(`${BASE}/api/search`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ keyword: '测试', sourceIds: [sourceId] }),
+        })
+        return (await res.json()).sources?.[0]
+    }
+
+    const tolerant = await searchOne(id)
+    const book = tolerant?.books?.[0]
+    check(
+        tolerant?.ok === true && (tolerant?.count ?? 0) > 0,
+        '坏掉的 `coverUrl` 不再让整条搜索失败',
+        tolerant?.error ?? `count=${tolerant?.count}`,
+    )
+    check(
+        tolerant?.warnings?.[0]?.field === 'coverUrl' &&
+            /XPath/.test(String(tolerant?.warnings?.[0]?.message ?? '')),
+        '被容错的原因带在 `warnings` 里（不是静默吞掉）',
+        JSON.stringify(tolerant?.warnings),
+    )
+    check(
+        book?.coverUrl === undefined && Boolean(book?.name),
+        '坏字段留空，书名照常取到',
+        JSON.stringify(book?.name),
+    )
+    check(
+        Boolean(book?.intro),
+        '好的展示用字段没被连累（intro 取到了）',
+        JSON.stringify(book?.intro),
+    )
+    check(
+        /\/fixture\/book\//.test(String(book?.bookUrl ?? '')),
+        '书籍地址照常可用',
+        String(book?.bookUrl ?? ''),
+    )
+
+    const strict = await searchOne(cid)
+    check(
+        strict?.ok === false && /选择器|XPath/.test(String(strict?.error ?? '')),
+        '链路字段（bookUrl）坏掉仍然**响亮地报错**',
+        String(strict?.error ?? '').slice(0, 100),
+    )
+
+    for (const x of [id, cid]) await call('DELETE', `/api/sources?id=${encodeURIComponent(x)}`)
+    check(
+        !((await getJson('/api/sources')).json?.sources ?? []).some(
+            (s) => String(s.id).includes('tolerant-field') || String(s.id).includes('strict-field'),
+        ),
+        '字段容错的测试源已清理',
     )
 }
 

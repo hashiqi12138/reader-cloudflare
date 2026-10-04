@@ -185,6 +185,48 @@ function firstAddressOf(value: string): string | null {
     return line ?? null
 }
 
+/**
+ * 一条被「容错」掉的字段错误
+ *
+ * 展示用字段坏了不该连累链路，但也**绝不能悄悄咽掉** —— 那正是这个项目最反对的
+ * 「静默」。所以吞下来的错误要原样带出去（`/api/search` 每个源一个 `warnings`、
+ * `/api/book` 一个 `warnings`），界面可以据此提示「这个源的封面规则坏了」。
+ */
+export interface FieldWarning {
+    field: string
+    message: string
+}
+
+/**
+ * 求值一个**展示用**字段：规则坏了只让这个字段为空，不连累整条链路
+ *
+ * 依据是第四十五轮抽样体检里的一条：`🎨拷贝漫画` 的 `coverUrl` 写着一个多了一个 `)`
+ * 的 XPath（`(.//p[@class="mh-cover tip"])/@style`），求值抛错 —— 而这一抛会让**整条搜索**
+ * 失败（`ok=false`）。用户连一本书都搜不到，尽管书名、作者、书籍地址、目录、正文全都好好的。
+ *
+ * 取舍与 `evalTemplate` 那条既有先例同源：**一个展示用的标签取不到，不该导致整本书打不开**
+ * （见 README「字段规则里的 `{{...}}` 模板」）。这是第四十五轮对「字段出错就整个源失败」
+ * 那条老规矩的**收窄**，不是取消：
+ *
+ *   - `bookUrl` / `tocUrl` / `chapterUrl` / `nextTocUrl` / `nextContentUrl` 是链路的必经之处，
+ *     坏了必须响亮地报出来（吞掉就退化成「搜不到书、全程不报错」）
+ *   - 展示用字段只是留空，但原因要进 `warnings` —— 诊断价值一点没丢
+ */
+async function tolerantField(
+    field: string,
+    evaluate: () => Promise<string>,
+    warnings: FieldWarning[],
+): Promise<string> {
+    try {
+        return await evaluate()
+    } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        // 同一个字段在 N 本书上会抛同样的错，只留第一条
+        if (!warnings.some((w) => w.field === field)) warnings.push({ field, message })
+        return ''
+    }
+}
+
 /** 正文清洗：规整空白、去掉空行，但不动段落本身 */
 export function normalizeContent(text: string): string {
     return text
@@ -195,11 +237,17 @@ export function normalizeContent(text: string): string {
         .join('\n')
 }
 
-/** 搜索：返回该书源上命中的书籍列表 */
+/**
+ * 搜索：返回该书源上命中的书籍列表
+ *
+ * `warnings` 是**收集器**：展示用字段的规则坏掉时，这里既让那一格留空、又把原因带出去
+ * （见 `tolerantField`）。调用方自己给一个数组，函数往里塞。
+ */
 export async function searchBooks(
     source: BookSource,
     keyword: string,
     ctx: RuleContext,
+    warnings: FieldWarning[] = [],
 ): Promise<SearchBook[]> {
     const rule = source.ruleSearch
     if (!source.searchUrl) throw new UpstreamError('书源未配置搜索地址（searchUrl）')
@@ -227,7 +275,7 @@ export async function searchBooks(
     }
     const sel = rootSelection(html)
     const items = await analyzeSelections(sel, rule.bookList, searchCtx)
-    return booksFromItems(source, items, rule, searchCtx, base)
+    return booksFromItems(source, items, rule, searchCtx, base, warnings)
 }
 
 /** 搜索与「发现」用的是同一套字段规则，只是分组名不同 */
@@ -255,6 +303,7 @@ export async function booksFromItems(
     rule: BookListRule,
     ctx: RuleContext,
     base: string,
+    warnings: FieldWarning[] = [],
 ): Promise<SearchBook[]> {
     const books: SearchBook[] = []
     for (const item of items) {
@@ -262,16 +311,26 @@ export async function booksFromItems(
         if (!name) continue
 
         const bookUrlRaw = await analyzeAddress(item, rule.bookUrl ?? 'tag.a@href', ctx)
+        const optional = (field: string, rule_: string) =>
+            tolerantField(field, () => analyzeString(item, rule_, ctx), warnings)
         books.push({
             name,
-            author: await analyzeString(item, rule.author ?? '', ctx),
-            kind: (await analyzeString(item, rule.kind ?? '', ctx)) || undefined,
-            lastChapter: (await analyzeString(item, rule.lastChapter ?? '', ctx)) || undefined,
-            intro: (await analyzeString(item, rule.intro ?? '', ctx)) || undefined,
+            // 展示用字段一律走 tolerantField：一个坏规则不该让整条搜索失败（见该函数说明）
+            author: await optional('author', rule.author ?? ''),
+            kind: (await optional('kind', rule.kind ?? '')) || undefined,
+            lastChapter: (await optional('lastChapter', rule.lastChapter ?? '')) || undefined,
+            intro: (await optional('intro', rule.intro ?? '')) || undefined,
             coverUrl:
-                resolveCoverAddress(await analyzeAddress(item, rule.coverUrl ?? '', ctx), base) ||
-                undefined,
-            wordCount: (await analyzeString(item, rule.wordCount ?? '', ctx)) || undefined,
+                (await tolerantField(
+                    'coverUrl',
+                    async () =>
+                        resolveCoverAddress(
+                            await analyzeAddress(item, rule.coverUrl ?? '', ctx),
+                            base,
+                        ),
+                    warnings,
+                )) || undefined,
+            wordCount: (await optional('wordCount', rule.wordCount ?? '')) || undefined,
             bookUrl: resolveAddress(bookUrlRaw, base),
             sourceName: source.bookSourceName,
             sourceUrl: source.bookSourceUrl,
@@ -285,11 +344,19 @@ export async function fetchBookInfo(
     source: BookSource,
     bookUrl: string,
     ctx: RuleContext,
-): Promise<{ tocUrl: string; name: string; author: string; intro: string; coverUrl: string }> {
+    warnings: FieldWarning[] = [],
+): Promise<{
+    tocUrl: string
+    name: string
+    author: string
+    intro: string
+    coverUrl: string
+    warnings: FieldWarning[]
+}> {
     const rule = source.ruleBookInfo
     if (!rule) {
         // 没有详情页规则时，直接把书籍地址当作目录地址 —— 很多站是这样的
-        return { tocUrl: bookUrl, name: '', author: '', intro: '', coverUrl: '' }
+        return { tocUrl: bookUrl, name: '', author: '', intro: '', coverUrl: '', warnings }
     }
 
     ctx.source ??= source
@@ -329,13 +396,32 @@ export async function fetchBookInfo(
 
     return {
         tocUrl: tocUrlRaw ? resolveAddress(tocUrlRaw, plan.url) : plan.url,
-        name: await analyzeString(infoSel, rule.name ?? '', infoCtx),
-        author: await analyzeString(infoSel, rule.author ?? '', infoCtx),
-        intro: await analyzeString(infoSel, rule.intro ?? '', infoCtx),
-        coverUrl: resolveCoverAddress(
-            await analyzeAddress(infoSel, rule.coverUrl ?? '', infoCtx),
-            plan.url,
+        // 与搜索那条路同一条纪律：展示用字段坏了只让字段空着，`tocUrl` 坏了才报错
+        name: await tolerantField(
+            'name',
+            () => analyzeString(infoSel, rule.name ?? '', infoCtx),
+            warnings,
         ),
+        author: await tolerantField(
+            'author',
+            () => analyzeString(infoSel, rule.author ?? '', infoCtx),
+            warnings,
+        ),
+        intro: await tolerantField(
+            'intro',
+            () => analyzeString(infoSel, rule.intro ?? '', infoCtx),
+            warnings,
+        ),
+        coverUrl: await tolerantField(
+            'coverUrl',
+            async () =>
+                resolveCoverAddress(
+                    await analyzeAddress(infoSel, rule.coverUrl ?? '', infoCtx),
+                    plan.url,
+                ),
+            warnings,
+        ),
+        warnings,
     }
 }
 
