@@ -19,6 +19,7 @@ import type { SearchBook } from '../engine/types'
 import { createSandboxSession } from '../engine/js'
 import { listExploreCategories, exploreBooks } from '../legado/explore'
 import type { BookSource } from '../engine/types'
+import type { PlatformDb } from '../platform/types'
 import { DataError } from './types'
 
 export interface HomeSection {
@@ -53,7 +54,7 @@ const HOME_SCOPE = 'home'
 /** 优先挑这类栏目的名字，它们最像「推荐」 */
 const PREFERRED_CATEGORY = /推荐|热门|排行|最新|完结|精选|榜单|必看|top/i
 
-export async function readHomeCache(db: D1Database): Promise<HomePayload | null> {
+export async function readHomeCache(db: PlatformDb): Promise<HomePayload | null> {
     const row = await db
         .prepare('SELECT payload, built_at FROM home_cache WHERE scope = ?')
         .bind(HOME_SCOPE)
@@ -70,7 +71,7 @@ export async function readHomeCache(db: D1Database): Promise<HomePayload | null>
     }
 }
 
-export async function writeHomeCache(db: D1Database, payload: HomePayload): Promise<void> {
+export async function writeHomeCache(db: PlatformDb, payload: HomePayload): Promise<void> {
     await db
         .prepare(
             `INSERT INTO home_cache (scope, payload, built_at) VALUES (?, ?, ?)

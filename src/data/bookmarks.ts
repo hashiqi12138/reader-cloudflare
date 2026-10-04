@@ -12,6 +12,7 @@
  * 在服务端用浮点位置去比对既不可靠，也会让「同一页留两处备注」这种用法没法表达。
  */
 
+import type { PlatformDb } from '../platform/types'
 import { DataError, bookKey } from './types'
 
 /** 章节名上限。目录名一般是几十个字，超过这个量级的多半是源把整段正文塞进来了 */
@@ -146,7 +147,7 @@ export function normalizeBookmarkInput(input: BookmarkInput): NormalizedBookmark
 
 /** 一本书的全部书签，按章节顺序、再按页顺序 */
 export async function listBookmarks(
-    db: D1Database,
+    db: PlatformDb,
     owner: string,
     key: string,
 ): Promise<Bookmark[]> {
@@ -162,7 +163,7 @@ export async function listBookmarks(
 }
 
 export async function getBookmark(
-    db: D1Database,
+    db: PlatformDb,
     owner: string,
     id: string,
 ): Promise<Bookmark | undefined> {
@@ -174,7 +175,7 @@ export async function getBookmark(
 }
 
 export async function addBookmark(
-    db: D1Database,
+    db: PlatformDb,
     owner: string,
     input: BookmarkInput,
 ): Promise<Bookmark> {
@@ -216,7 +217,7 @@ export async function addBookmark(
 
 /** 只改备注。位置是加书签那一刻的事实，改位置等于换一处书签 */
 export async function updateBookmarkNote(
-    db: D1Database,
+    db: PlatformDb,
     owner: string,
     id: string,
     note: unknown,
@@ -235,7 +236,7 @@ export async function updateBookmarkNote(
 }
 
 /** 删除。按 owner 过滤，因此别人的书签在这里一律是「找不到」 */
-export async function removeBookmark(db: D1Database, owner: string, id: string): Promise<Bookmark> {
+export async function removeBookmark(db: PlatformDb, owner: string, id: string): Promise<Bookmark> {
     const existing = await getBookmark(db, owner, id)
     if (!existing) throw new DataError(`找不到书签：${id}`, 404, 'bookmark_not_found')
 

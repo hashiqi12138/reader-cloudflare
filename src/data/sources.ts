@@ -17,6 +17,7 @@ import {
     listUserSourcePage,
     saveSourceVariable,
 } from './db'
+import type { PlatformDb } from '../platform/types'
 import { BUILTIN_ID_PREFIX, type RegisteredSource } from './types'
 
 export type { RegisteredSource }
@@ -34,7 +35,7 @@ export type { RegisteredSource }
  * 内置测试源只做第 1 步：它们是代码的一部分（跟着版本走），库里没有对应行。
  */
 export async function persistSourceVariable(
-    db: D1Database,
+    db: PlatformDb,
     source: RegisteredSource,
     value: string,
 ): Promise<void> {
@@ -679,7 +680,7 @@ export function builtinSources(origin: string): RegisteredSource[] {
 
 /** 全部书源：内置（可选）在前，用户导入的在后 */
 export async function listSources(
-    db: D1Database,
+    db: PlatformDb,
     origin: string,
     options: RegistryOptions,
 ): Promise<RegisteredSource[]> {
@@ -689,7 +690,7 @@ export async function listSources(
 
 /** 搜索时真正参与的书源：只要启用的 */
 export async function listEnabledSources(
-    db: D1Database,
+    db: PlatformDb,
     origin: string,
     options: RegistryOptions,
 ): Promise<RegisteredSource[]> {
@@ -705,7 +706,7 @@ export async function listEnabledSources(
  * 返回的 total 是**内置 + 用户**的总数，界面靠它算「还有多少个源没搜」。
  */
 export async function listEnabledSourcePage(
-    db: D1Database,
+    db: PlatformDb,
     origin: string,
     options: RegistryOptions,
     page: { offset: number; limit: number },
@@ -729,7 +730,7 @@ export async function listEnabledSourcePage(
 
 /** 按 id 批量取「启用的」书源（只读点到的这几条） */
 export async function listEnabledSourcesByIds(
-    db: D1Database,
+    db: PlatformDb,
     origin: string,
     ids: string[],
     options: RegistryOptions,
@@ -749,7 +750,7 @@ export async function listEnabledSourcesByIds(
 
 /** 按 id 取一条书源 */
 export async function findSource(
-    db: D1Database,
+    db: PlatformDb,
     origin: string,
     id: string,
     options: RegistryOptions,

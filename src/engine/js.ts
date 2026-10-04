@@ -53,11 +53,10 @@ import { runSymmetric, type SymmetricRequest } from '../lib/symmetric'
 import { JsoupBridge } from './jsoupBridge'
 import { unsupportedPrelude } from './platform'
 
-// 相对路径 import WASM：wrangler 会把它编译成 WebAssembly.Module 直接交给运行时。
-// 这是 Workers 上唯一可用的加载方式 —— 运行时既禁止 WebAssembly.compile，
-// 也不允许按包路径去 fetch .wasm 文件。
-// 该文件由 scripts/copy-quickjs-wasm.mjs 从 node_modules 复制而来（见 package.json 的 pre 钩子）。
-import quickjsWasmModule from './RELEASE_ASYNC.wasm'
+// WASM 模块从哪来是**构建期**的平台差异，那句 `import '*.wasm'` 挪去了
+// `platform/wasm.ts` —— 只要它留在这里，任何非 Workers 的构建都会在**模块加载**
+// 阶段就失败（原因见那个文件）。引擎这侧只管拿手上的 `WebAssembly.Module` 用。
+import { quickJsWasmModule } from '../platform/wasm'
 
 /** 脚本自身的执行时限（毫秒）。只约束 VM 里跑的代码，不含宿主等待 */
 const DEFAULT_TIMEOUT_MS = 1200
@@ -74,7 +73,7 @@ const DEFAULT_MAX_HTTP_CALLS = 10
  * 「按 URL 取 WASM 再编译」流程。
  */
 const cloudflareVariant = newVariant(RELEASE_ASYNC, {
-    wasmModule: quickjsWasmModule,
+    wasmModule: quickJsWasmModule,
 })
 
 /**

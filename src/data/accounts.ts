@@ -12,6 +12,7 @@
  *    所以它必须有有效期、也必须只能通过 HttpOnly cookie 传（见 index.ts 的下发处）。
  */
 
+import type { PlatformDb } from '../platform/types'
 import { DataError } from './types'
 import { hashPassword, randomToken, verifyPassword, type PasswordRecord } from '../lib/password'
 
@@ -117,7 +118,7 @@ function rowToUser(row: UserRow): AccountUser {
 
 /** 注册。用户名重复时给出明确的 409，而不是含糊的失败 */
 export async function createAccount(
-    db: D1Database,
+    db: PlatformDb,
     usernameRaw: unknown,
     passwordRaw: unknown,
 ): Promise<AccountUser> {
@@ -147,7 +148,7 @@ export async function createAccount(
     }
 }
 
-async function failuresInWindow(db: D1Database, username: string): Promise<number> {
+async function failuresInWindow(db: PlatformDb, username: string): Promise<number> {
     const row = await db
         .prepare('SELECT count, first_at FROM login_failures WHERE username = ?')
         .bind(username)
@@ -157,7 +158,7 @@ async function failuresInWindow(db: D1Database, username: string): Promise<numbe
     return row.count
 }
 
-async function noteFailure(db: D1Database, username: string): Promise<void> {
+async function noteFailure(db: PlatformDb, username: string): Promise<void> {
     const now = Date.now()
     const current = await failuresInWindow(db, username)
     if (current === 0) {
@@ -176,7 +177,7 @@ async function noteFailure(db: D1Database, username: string): Promise<void> {
         .run()
 }
 
-async function clearFailures(db: D1Database, username: string): Promise<void> {
+async function clearFailures(db: PlatformDb, username: string): Promise<void> {
     await db.prepare('DELETE FROM login_failures WHERE username = ?').bind(username).run()
 }
 
@@ -192,7 +193,7 @@ function badCredentials(): DataError {
  * 而且不像按 IP 记那样会误伤同一出口 IP 下的其他人。
  */
 export async function authenticate(
-    db: D1Database,
+    db: PlatformDb,
     usernameRaw: unknown,
     passwordRaw: unknown,
 ): Promise<AccountUser> {
@@ -256,7 +257,7 @@ export async function authenticate(
  * 用的是 id，所以改名不会丢数据），让它跟着改只会多出一种「改完之后登不上」的故障。
  */
 export async function updateDisplayName(
-    db: D1Database,
+    db: PlatformDb,
     userId: number,
     raw: unknown,
 ): Promise<AccountUser> {
@@ -289,7 +290,7 @@ export async function updateDisplayName(
  *    「改密码」就失去了「把别人赶出去」的意义；把当前这条也踢掉，等于把自己踢下线。
  */
 export async function changePassword(
-    db: D1Database,
+    db: PlatformDb,
     user: Pick<AccountUser, 'id'>,
     currentRaw: unknown,
     nextRaw: unknown,
@@ -347,7 +348,7 @@ export async function changePassword(
 
 /** 建会话。token 只在这一次返回，之后库里查得到、客户端只知道它自己 */
 export async function createSession(
-    db: D1Database,
+    db: PlatformDb,
     userId: number,
     userAgent = '',
 ): Promise<{ token: string; expiresAt: number }> {
@@ -368,7 +369,7 @@ export async function createSession(
 
 /** 用会话 token 取账号。过期即视为不存在，并顺手删掉那一行 */
 export async function userForToken(
-    db: D1Database,
+    db: PlatformDb,
     token: string | null | undefined,
 ): Promise<AccountUser | null> {
     const value = (token ?? '').trim()
@@ -391,7 +392,7 @@ export async function userForToken(
     return rowToUser(row)
 }
 
-export async function revokeSession(db: D1Database, token: string): Promise<void> {
+export async function revokeSession(db: PlatformDb, token: string): Promise<void> {
     if (token === '') return
     await db.prepare('DELETE FROM sessions WHERE token = ?').bind(token).run()
 }
@@ -407,7 +408,7 @@ export async function revokeSession(db: D1Database, token: string): Promise<void
  * 不该被一个匿名身份的旧记录覆盖。进度同理。
  */
 export async function claimAnonymousData(
-    db: D1Database,
+    db: PlatformDb,
     anonymousToken: string,
     user: AccountUser,
 ): Promise<{ shelf: number; progress: number }> {
@@ -441,7 +442,7 @@ export async function claimAnonymousData(
 }
 
 /** 本机身份名下有没有可并入的数据（决定要不要在界面上提示） */
-export async function anonymousDataExists(db: D1Database, token: string): Promise<boolean> {
+export async function anonymousDataExists(db: PlatformDb, token: string): Promise<boolean> {
     const value = token.trim()
     if (value === '') return false
     const row = await db
@@ -455,6 +456,6 @@ export async function anonymousDataExists(db: D1Database, token: string): Promis
 }
 
 /** 清掉过期会话。登录时顺手做一次，不需要定时任务 */
-export async function pruneSessions(db: D1Database): Promise<void> {
+export async function pruneSessions(db: PlatformDb): Promise<void> {
     await db.prepare('DELETE FROM sessions WHERE expires_at <= ?').bind(Date.now()).run()
 }

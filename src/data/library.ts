@@ -6,6 +6,7 @@
  * 跟着阅读行为频繁更新，也让「书源同步」这种将来的功能不好切。
  */
 
+import type { PlatformDb } from '../platform/types'
 import { DataError, bookKey } from './types'
 
 const MAX_NAME_LENGTH = 200
@@ -85,7 +86,7 @@ function rowToEntry(row: ShelfRow): ShelfEntry {
  * 也不提供「不给 owner」的重载：隔离靠的就是每个查询都带上它，
  * 留一个可以省略的口子，迟早会有人从那个口子穿过去。
  */
-export async function listShelf(db: D1Database, owner: string): Promise<ShelfEntry[]> {
+export async function listShelf(db: PlatformDb, owner: string): Promise<ShelfEntry[]> {
     const { results } = await db
         .prepare(
             `SELECT s.book_key, s.source_id, s.book_url, s.name, s.author, s.cover_url,
@@ -103,7 +104,7 @@ export async function listShelf(db: D1Database, owner: string): Promise<ShelfEnt
 }
 
 export async function getShelfEntry(
-    db: D1Database,
+    db: PlatformDb,
     owner: string,
     key: string,
 ): Promise<ShelfEntry | undefined> {
@@ -141,7 +142,7 @@ function requireShortString(value: unknown, field: string, max: number): string 
 
 /** 加入书架。同一本书重复加入等于更新，不会变成两条 */
 export async function addToShelf(
-    db: D1Database,
+    db: PlatformDb,
     owner: string,
     input: AddToShelfInput,
 ): Promise<{ entry: ShelfEntry; created: boolean }> {
@@ -177,7 +178,7 @@ export async function addToShelf(
 }
 
 export async function removeFromShelf(
-    db: D1Database,
+    db: PlatformDb,
     owner: string,
     key: string,
 ): Promise<ShelfEntry> {
@@ -195,7 +196,7 @@ export async function removeFromShelf(
 }
 
 export async function getProgress(
-    db: D1Database,
+    db: PlatformDb,
     owner: string,
     key: string,
 ): Promise<Progress | undefined> {
@@ -239,7 +240,7 @@ export interface SaveProgressInput {
  * 否则「搜到一本书、读了两章、再搜回来」就得从头翻。
  */
 export async function saveProgress(
-    db: D1Database,
+    db: PlatformDb,
     owner: string,
     input: SaveProgressInput,
 ): Promise<Progress> {

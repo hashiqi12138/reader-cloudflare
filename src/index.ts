@@ -69,6 +69,8 @@ import { SandboxError, createSandboxSession, runInSandbox, type SandboxSession }
 import { javaSurfaceSummary } from './engine/platform'
 import { parseHtml } from './engine/select'
 import { handleFixture } from './fixture'
+import { cloudflareEnv } from './platform/cloudflare'
+import type { AppEnv, PlatformDb } from './platform/types'
 import { exploreBooks, listExploreCategories } from './legado/explore'
 import {
     fetchBookInfo,
@@ -89,7 +91,7 @@ import { USER_HEADER } from './lib/identity'
 import { MediaTokenError, signMediaToken, verifyMediaToken } from './lib/signing'
 import type { MediaTokenPayload } from './lib/signing'
 
-const app = new Hono<{ Bindings: Env }>()
+const app = new Hono<{ Bindings: AppEnv }>()
 
 /**
  * 导入接口的请求体上限。
@@ -145,7 +147,7 @@ function fail(
 }
 
 /** 本次请求的注册表选项 */
-function registryOf(env: Env): RegistryOptions {
+function registryOf(env: AppEnv): RegistryOptions {
     return { includeFixture: env.ENABLE_FIXTURE === 'true' }
 }
 
@@ -164,7 +166,7 @@ function registryOf(env: Env): RegistryOptions {
  * `db` 与 `source` 都要传进来，是因为书源变量的落库只有这一层知道（见 data/sources.ts）。
  */
 function evalContext(
-    db: D1Database,
+    db: PlatformDb,
     source: RegisteredSource,
     sandbox?: SandboxSession,
 ): RuleContext {
@@ -202,7 +204,7 @@ function jsonParam(raw: string | undefined): Record<string, unknown> {
  * `book.origin`（书源名）反过来由引擎补：客户端不知道它也无关紧要。
  */
 function requestBookContext(
-    c: Context<{ Bindings: Env }>,
+    c: Context<{ Bindings: AppEnv }>,
     source: RegisteredSource,
     fallbackBookUrl: string,
 ): { bookUrl: string; book: BookContext } {
@@ -236,7 +238,7 @@ function requestBookContext(
  * 以前它恒为 false（🏷起点(部分可看) 的正文规则按它选分支，付费章一直走错），
  * 而目录里那个值根本没人取（见「第五十三 / 五十六轮」）。
  */
-function requestChapterContext(c: Context<{ Bindings: Env }>): ChapterContext | undefined {
+function requestChapterContext(c: Context<{ Bindings: AppEnv }>): ChapterContext | undefined {
     const raw = jsonParam(c.req.query('chapter'))
     const chapter: ChapterContext = {}
     if (typeof raw.title === 'string') chapter.title = raw.title
@@ -259,7 +261,7 @@ function requestChapterContext(c: Context<{ Bindings: Env }>): ChapterContext | 
  * 一章的地址每章都不同，拿它当键等于每章换一本书 —— 规则探测出来的抓取形状就传不到下一章。
  */
 async function bookEvalContext(
-    c: Context<{ Bindings: Env }>,
+    c: Context<{ Bindings: AppEnv }>,
     source: RegisteredSource,
     fallbackBookUrl: string,
     sandbox?: SandboxSession,
@@ -287,7 +289,7 @@ async function bookEvalContext(
 const SESSION_COOKIE = 'rc_session'
 
 /** 下发 / 清除会话 cookie 的公共选项 */
-function sessionCookieOptions(c: Context<{ Bindings: Env }>) {
+function sessionCookieOptions(c: Context<{ Bindings: AppEnv }>) {
     return {
         path: '/',
         httpOnly: true,
@@ -299,12 +301,12 @@ function sessionCookieOptions(c: Context<{ Bindings: Env }>) {
 }
 
 /** 本次请求的登录账号；没登录返回 null */
-async function currentUser(c: Context<{ Bindings: Env }>): Promise<AccountUser | null> {
+async function currentUser(c: Context<{ Bindings: AppEnv }>): Promise<AccountUser | null> {
     return userForToken(c.env.DB, getCookie(c, SESSION_COOKIE))
 }
 
 /** 本次请求的登录账号；没登录直接 401，由 fail() 统一成响应 */
-async function requireUser(c: Context<{ Bindings: Env }>): Promise<AccountUser> {
+async function requireUser(c: Context<{ Bindings: AppEnv }>): Promise<AccountUser> {
     const user = await currentUser(c)
     if (!user) throw new DataError('请先登录', 401, 'unauthenticated')
     return user
@@ -317,7 +319,7 @@ async function requireUser(c: Context<{ Bindings: Env }>): Promise<AccountUser> 
  * 书架与进度是使用者自己的数据。两者混在一起管，只会让
  * 「换个浏览器书架空了、书源却还在」这种预期外的行为变多。
  */
-async function ownerOf(c: Context<{ Bindings: Env }>): Promise<string> {
+async function ownerOf(c: Context<{ Bindings: AppEnv }>): Promise<string> {
     return ownerForUser(await requireUser(c))
 }
 
@@ -785,7 +787,7 @@ function loggedInOf(session: SandboxSession, stored: { header: string; info: str
 
 /** 跑一段登录相关的脚本（登录 / 按钮动作 / 读 loginUi 三处共用），返回脚本的值 */
 async function runLoginCode(
-    db: D1Database,
+    db: PlatformDb,
     source: RegisteredSource,
     session: SandboxSession,
     code: string,
@@ -1719,7 +1721,7 @@ const MEDIA_TOKEN_TTL_SECONDS = 24 * 60 * 60
 
 /** 把一条上游媒体地址换成本站的代取地址（原因见 lib/signing.ts） */
 async function proxiedMedia(
-    db: D1Database,
+    db: PlatformDb,
     sourceId: string,
     link: MediaLink,
 ): Promise<MediaLink & { proxyUrl: string }> {
@@ -1744,7 +1746,7 @@ async function proxiedMedia(
  * 其余照旧 `<img src={coverUrl}>`（见 `public/js/core.js` 的 `coverSrc`）。
  */
 async function withCoverProxy<T extends { coverUrl?: string }>(
-    db: D1Database,
+    db: PlatformDb,
     sourceId: string,
     book: T,
 ): Promise<T & { coverProxyUrl?: string }> {
@@ -1762,7 +1764,7 @@ async function withCoverProxy<T extends { coverUrl?: string }>(
 
 /** 一本书的封面处理一遍；`/api/home` 的推荐位是分组的，按分组各自的 sourceId 走 */
 async function withCoverProxyAll<T extends { coverUrl?: string }>(
-    db: D1Database,
+    db: PlatformDb,
     sourceId: string,
     books: T[],
 ): Promise<(T & { coverProxyUrl?: string })[]> {
@@ -2036,6 +2038,6 @@ export default {
             if (handled) return handled
         }
 
-        return app.fetch(request, env, ctx)
+        return app.fetch(request, cloudflareEnv(env), ctx)
     },
 } satisfies ExportedHandler<Env>

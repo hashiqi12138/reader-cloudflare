@@ -20,6 +20,8 @@
  *    没写过的名字不该被动过 —— 所以这里不改其它行，也不删。
  */
 
+import type { PlatformDb } from '../platform/types'
+
 /** 变量名的上限。书源写的是「序」「元」「custom」这类短名字 */
 const MAX_VAR_NAME = 200
 /** 单个值的上限。这些值是「选择器形状」「序号」这类小东西，8 KB 已经非常宽松 */
@@ -32,7 +34,7 @@ const MAX_VAR_VALUE = 8192
  * 所以取不到时返回 `{}` 而不是报错。
  */
 export async function loadBookVariables(
-    db: D1Database,
+    db: PlatformDb,
     bookKey: string,
 ): Promise<Record<string, string>> {
     const { results } = await db
@@ -59,7 +61,7 @@ export async function loadBookVariables(
  * 抛异常只会把书源真正要表达的结果盖掉。
  */
 export async function saveBookVariable(
-    db: D1Database,
+    db: PlatformDb,
     bookKey: string,
     name: string,
     value: string,

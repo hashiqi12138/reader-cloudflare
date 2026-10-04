@@ -17,6 +17,7 @@
  *    与书签「重复标记是用户的选择」同一个理由。
  */
 
+import type { PlatformDb } from '../platform/types'
 import { DataError, bookKey } from './types'
 
 /** 章节名上限。目录名一般是几十个字，超过这个量级的多半是源把整段正文塞进来了 */
@@ -152,7 +153,7 @@ export function normalizeNoteText(value: unknown): string {
 }
 
 /** 一本书的全部笔记，按章节顺序、再按页顺序（与阅读顺序一致） */
-export async function listNotes(db: D1Database, owner: string, key: string): Promise<Note[]> {
+export async function listNotes(db: PlatformDb, owner: string, key: string): Promise<Note[]> {
     const { results } = await db
         .prepare(
             `SELECT ${SELECT_COLUMNS} FROM notes
@@ -165,7 +166,7 @@ export async function listNotes(db: D1Database, owner: string, key: string): Pro
 }
 
 export async function getNote(
-    db: D1Database,
+    db: PlatformDb,
     owner: string,
     id: string,
 ): Promise<Note | undefined> {
@@ -176,7 +177,7 @@ export async function getNote(
     return row ? rowToNote(row) : undefined
 }
 
-export async function addNote(db: D1Database, owner: string, input: NoteInput): Promise<Note> {
+export async function addNote(db: PlatformDb, owner: string, input: NoteInput): Promise<Note> {
     const data = normalizeNoteInput(input)
     const id = crypto.randomUUID()
     const now = Date.now()
@@ -213,7 +214,7 @@ export async function addNote(db: D1Database, owner: string, input: NoteInput): 
 
 /** 只改正文。位置与摘录是写这条笔记那一刻的事实，改它们等于换一处笔记 */
 export async function updateNoteText(
-    db: D1Database,
+    db: PlatformDb,
     owner: string,
     id: string,
     text: unknown,
@@ -232,7 +233,7 @@ export async function updateNoteText(
 }
 
 /** 删除。按 owner 过滤，因此别人的笔记在这里一律是「找不到」 */
-export async function removeNote(db: D1Database, owner: string, id: string): Promise<Note> {
+export async function removeNote(db: PlatformDb, owner: string, id: string): Promise<Note> {
     const existing = await getNote(db, owner, id)
     if (!existing) throw new DataError(`找不到笔记：${id}`, 404, 'note_not_found')
 

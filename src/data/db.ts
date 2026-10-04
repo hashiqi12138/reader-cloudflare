@@ -11,6 +11,7 @@
 
 import type { BookSource } from '../engine/types'
 import { dumpJar, parseJar } from '../lib/cookies'
+import type { PlatformDb, PlatformStatement } from '../platform/types'
 import { BUILTIN_ID_PREFIX, DataError, userIdForUrl, type RegisteredSource } from './types'
 
 /** 单次导入的条数上限。D1 免费版每日写 10 万行，一次塞几十万条会直接把额度打满 */
@@ -57,7 +58,7 @@ interface SourceRow {
  * 只有 `enabledCookieJar === true` 才建：816 条源里 359 条作者明确关掉了，
  * 给关掉的源也建罐子，等于把它们的 `cookie.*` 从「只活本次求值」悄悄改成跨请求。
  */
-function rowToSource(row: SourceRow, db: D1Database): RegisteredSource {
+function rowToSource(row: SourceRow, db: PlatformDb): RegisteredSource {
     let parsed: BookSource
     try {
         parsed = JSON.parse(row.payload) as BookSource
@@ -119,7 +120,7 @@ const SELECT_COLUMNS =
     'id, name, url, group_name, enabled, sort_order, payload, variable, cookies, login_header, login_info'
 
 /** 全部用户书源，按展示顺序 */
-export async function listUserSources(db: D1Database): Promise<RegisteredSource[]> {
+export async function listUserSources(db: PlatformDb): Promise<RegisteredSource[]> {
     const { results } = await db
         .prepare(`SELECT ${SELECT_COLUMNS} FROM sources ORDER BY sort_order, name`)
         .all<SourceRow>()
@@ -162,7 +163,7 @@ interface SourceSummaryRow {
     logged_in: number
 }
 
-export async function listSourceSummaries(db: D1Database): Promise<SourceSummary[]> {
+export async function listSourceSummaries(db: PlatformDb): Promise<SourceSummary[]> {
     const { results } = await db
         .prepare(
             `SELECT
@@ -208,7 +209,7 @@ export async function listSourceSummaries(db: D1Database): Promise<SourceSummary
  * 分开写会留下「数据已改、版本号未变」的窗口，那期间浏览器拿到的 304 是过期的。
  * 自增放在 SQL 里做（而不是读出来 +1 再写回），并发写才不会互相覆盖。
  */
-function sourcesRevStatement(db: D1Database): D1PreparedStatement {
+function sourcesRevStatement(db: PlatformDb): PlatformStatement {
     return db
         .prepare(
             `INSERT INTO settings (key, value, updated_at) VALUES (?, '1', ?)
@@ -220,7 +221,7 @@ function sourcesRevStatement(db: D1Database): D1PreparedStatement {
 }
 
 /** 当前版本号；从没写过时是 `'0'`（与第一次 bump 之后的 `'1'` 区分得开） */
-export async function readSourcesRev(db: D1Database): Promise<string> {
+export async function readSourcesRev(db: PlatformDb): Promise<string> {
     const row = await db
         .prepare('SELECT value FROM settings WHERE key = ?')
         .bind(SOURCES_REV_KEY)
@@ -230,7 +231,7 @@ export async function readSourcesRev(db: D1Database): Promise<string> {
 
 /** 单个用户书源；不存在返回 undefined（与「读取出错」区分开） */
 export async function getUserSource(
-    db: D1Database,
+    db: PlatformDb,
     id: string,
 ): Promise<RegisteredSource | undefined> {
     const row = await db
@@ -256,7 +257,7 @@ export async function getUserSource(
  * 组内再按最近成功倒序：刚验证过还能用的排最前。
  */
 export async function listUserSourcePage(
-    db: D1Database,
+    db: PlatformDb,
     offset: number,
     limit: number,
 ): Promise<RegisteredSource[]> {
@@ -274,7 +275,7 @@ export async function listUserSourcePage(
 
 /** 按 id 批量取用户书源（只读点到的这几条，不碰整张表） */
 export async function listUserSourcesByIds(
-    db: D1Database,
+    db: PlatformDb,
     ids: string[],
 ): Promise<RegisteredSource[]> {
     if (ids.length === 0) return []
@@ -287,7 +288,7 @@ export async function listUserSourcesByIds(
 }
 
 /** 启用的用户书源总数（分页要让界面知道「还有多少个没搜」） */
-export async function countEnabledSources(db: D1Database): Promise<number> {
+export async function countEnabledSources(db: PlatformDb): Promise<number> {
     const row = await db
         .prepare('SELECT COUNT(*) AS n FROM sources WHERE enabled = 1')
         .first<{ n: number }>()
@@ -308,7 +309,7 @@ export async function countEnabledSources(db: D1Database): Promise<number> {
 export type SourceOutcome = 'ok' | 'fail' | 'idle'
 
 export async function recordSourceHealth(
-    db: D1Database,
+    db: PlatformDb,
     outcomes: { id: string; outcome: SourceOutcome }[],
 ): Promise<void> {
     const now = Date.now()
@@ -327,7 +328,7 @@ export async function recordSourceHealth(
     await db.batch(stmts)
 }
 
-export async function countUserSources(db: D1Database): Promise<number> {
+export async function countUserSources(db: PlatformDb): Promise<number> {
     const row = await db.prepare('SELECT COUNT(*) AS n FROM sources').first<{ n: number }>()
     return row?.n ?? 0
 }
@@ -342,7 +343,7 @@ export async function countUserSources(db: D1Database): Promise<number> {
  *
  * 内置书源不落库（它们是代码的一部分），由调用方过滤，这里不重复判断。
  */
-export async function saveSourceVariable(db: D1Database, id: string, value: string): Promise<void> {
+export async function saveSourceVariable(db: PlatformDb, id: string, value: string): Promise<void> {
     await db
         .prepare('UPDATE sources SET variable = ?, updated_at = ? WHERE id = ?')
         .bind(value, Date.now(), id)
@@ -356,7 +357,7 @@ export async function saveSourceVariable(db: D1Database, id: string, value: stri
  * 区别在**调用时机** —— 这个是「罐子真的变了」才调（取网层收完 `Set-Cookie`、
  * 或沙箱里的 `cookie.setCookie` 之后），所以一次请求通常只写一次，甚至一次都不写。
  */
-export async function saveSourceCookies(db: D1Database, id: string, value: string): Promise<void> {
+export async function saveSourceCookies(db: PlatformDb, id: string, value: string): Promise<void> {
     await db
         .prepare('UPDATE sources SET cookies = ?, updated_at = ? WHERE id = ?')
         .bind(value, Date.now(), id)
@@ -371,7 +372,7 @@ export async function saveSourceCookies(db: D1Database, id: string, value: strin
  * 还在飞的 promise 会被掐掉，那时用户看到的是「登录成功了」，下次进来却发现没生效。
  */
 export async function saveSourceLogin(
-    db: D1Database,
+    db: PlatformDb,
     id: string,
     value: { header: string; info: string },
 ): Promise<void> {
@@ -513,7 +514,7 @@ export function parseImportPayload(text: string): unknown[] {
  * 同名（同 bookSourceUrl）视为「刷新规则」：只覆盖 payload，
  * 保留用户本地的名字、分组与启用状态 —— 重新导入一次不该把停用过的书源又叫醒。
  */
-export async function importSources(db: D1Database, text: string): Promise<ImportReport> {
+export async function importSources(db: PlatformDb, text: string): Promise<ImportReport> {
     const list = parseImportPayload(text)
     if (list.length === 0) {
         throw new DataError('导入内容里没有任何书源', 400, 'empty_import')
@@ -530,7 +531,7 @@ export async function importSources(db: D1Database, text: string): Promise<Impor
     const existing = new Set((existingRows.results ?? []).map((r) => r.id))
 
     const rejected: RejectedSource[] = []
-    const statements: D1PreparedStatement[] = []
+    const statements: PlatformStatement[] = []
     const now = Date.now()
     let imported = 0
     let updated = 0
@@ -588,7 +589,7 @@ export async function importSources(db: D1Database, text: string): Promise<Impor
 
 /** 停用 / 启用。内置源由代码管理，不能在这里改 */
 export async function setSourceEnabled(
-    db: D1Database,
+    db: PlatformDb,
     id: string,
     enabled: boolean,
 ): Promise<void> {
@@ -604,7 +605,7 @@ export async function setSourceEnabled(
     }
 }
 
-export async function deleteUserSource(db: D1Database, id: string): Promise<void> {
+export async function deleteUserSource(db: PlatformDb, id: string): Promise<void> {
     assertUserSource(id)
     const [result] = await db.batch([
         db.prepare('DELETE FROM sources WHERE id = ?').bind(id),

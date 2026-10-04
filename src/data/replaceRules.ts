@@ -17,7 +17,7 @@
  *    「格式不对」等于没说。
  */
 
-import type { D1Database } from '@cloudflare/workers-types'
+import type { PlatformDb } from '../platform/types'
 
 import type { AccountUser } from './accounts'
 import { ownerForUser } from './accounts'
@@ -92,7 +92,7 @@ export function parseReplaceRules(raw: unknown): ReplaceRule[] {
 
 /** 读一份规则。从未同步过的账号得到空的一份，而不是报错 */
 export async function readReplaceRules(
-    db: D1Database,
+    db: PlatformDb,
     user: Pick<AccountUser, 'id'>,
 ): Promise<StoredReplaceRules> {
     const row = await db
@@ -134,7 +134,7 @@ export type WriteOutcome =
  * 不需要什么「强制」标志位（见前端那个卡片的两步提示）。
  */
 export async function writeReplaceRules(
-    db: D1Database,
+    db: PlatformDb,
     user: Pick<AccountUser, 'id'>,
     rules: ReplaceRule[],
     baseUpdatedAt: number,

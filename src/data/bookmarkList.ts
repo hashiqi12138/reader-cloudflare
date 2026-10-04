@@ -23,7 +23,7 @@
  * 所以能在 Node 里逐条单测；只有 `loadBookmarkRows` 碰 D1，交给冒烟验。
  */
 
-import type { D1Database } from '@cloudflare/workers-types'
+import type { PlatformDb } from '../platform/types'
 
 import type { AccountUser } from './accounts'
 import { ownerForUser } from './accounts'
@@ -235,7 +235,7 @@ export interface BookmarkFilter {
  * 排序按「章节 → 页」，与阅读顺序一致；书签是攒下来的东西，按添加时间排读起来是乱的。
  */
 export async function loadBookmarkRows(
-    db: D1Database,
+    db: PlatformDb,
     user: Pick<AccountUser, 'id'>,
     filter: BookmarkFilter = {},
 ): Promise<BookmarkListRow[]> {

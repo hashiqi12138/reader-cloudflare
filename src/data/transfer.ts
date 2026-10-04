@@ -17,6 +17,7 @@
  * （`test/transfer.test.ts`），而合并只在真库上验（`smoke` 第 7c 段）。
  */
 
+import type { PlatformDb } from '../platform/types'
 import { DataError } from './types'
 import type { AccountUser } from './accounts'
 import { ownerForUser } from './accounts'
@@ -184,7 +185,7 @@ export function buildBackup(
  * （比如书架列表要 join 出「最近读到第几章」，而备份只需要原始行）。
  */
 export async function exportBackup(
-    db: D1Database,
+    db: PlatformDb,
     user: Pick<AccountUser, 'id'>,
 ): Promise<BackupFile> {
     const owner = ownerForUser(user)
@@ -484,7 +485,7 @@ const keyOf = (sourceId: string, bookUrl: string): string => `${sourceId}\n${boo
  *   导入时用另一份覆盖本机那一份没有道理 —— 谁也不会希望导个备份把自己的笔记改掉。
  */
 export async function importBackup(
-    db: D1Database,
+    db: PlatformDb,
     user: Pick<AccountUser, 'id'>,
     raw: unknown,
 ): Promise<ImportReport> {

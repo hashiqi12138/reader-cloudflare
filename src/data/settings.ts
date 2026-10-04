@@ -4,6 +4,8 @@
  * 放在 D1 而不是环境变量，是为了让「媒体代理能工作」这件事不需要任何额外配置。
  */
 
+import type { PlatformDb } from '../platform/types'
+
 const MEDIA_SECRET_KEY = 'media_secret'
 
 /**
@@ -34,7 +36,7 @@ function randomSecret(): string {
  * 若各自用自己生成的那把密钥，就会出现「同一个部署签出的地址另一半验不过」，
  * 表现为图片时好时坏 —— 这种间歇性故障最难查。回读保证大家用的是同一条。
  */
-export async function getOrCreateMediaSecret(db: D1Database): Promise<string> {
+export async function getOrCreateMediaSecret(db: PlatformDb): Promise<string> {
     if (cachedSecret) return cachedSecret
     if (inflight) return inflight
 
