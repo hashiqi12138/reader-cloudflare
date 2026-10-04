@@ -4716,7 +4716,9 @@ console.log('\n=== 30. `<js>` 段 + JSONPath 尾段（`$[*]` / `$[:n]`） ===')
 
     const replaced = await search(ids[2])
     check(
-        replaced?.ok === true && replaced.books?.length === 1 && replaced.books[0]?.name === '脚本里的甲',
+        replaced?.ok === true &&
+            replaced.books?.length === 1 &&
+            replaced.books[0]?.name === '脚本里的甲',
         'JSONPath 尾段作用在**脚本输出**上（不是页面原文）',
         replaced?.error ?? JSON.stringify(replaced?.books?.[0]?.name),
     )
