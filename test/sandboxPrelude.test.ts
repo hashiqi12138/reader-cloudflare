@@ -27,7 +27,7 @@ const SOURCE = readFileSync(new URL('../src/engine/js.ts', import.meta.url), 'ut
 function literalOf(name: string): string {
     const found = new RegExp('const ' + name + ' = `([\\s\\S]*?)`\\n').exec(SOURCE)
     if (!found) throw new Error(`js.ts 里找不到 ${name} 的模板字符串`)
-    return found[1]
+    return found[1] ?? ''
 }
 
 /** 五个「宿主注入裸数据」的全局对象与它们的工厂函数 */

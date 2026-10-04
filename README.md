@@ -5125,7 +5125,7 @@ button 159 / text 40 / password 20 / **toggle 8** / **select 7** / **input 1**�
   之后没跑 `format` 就提交了；后来那一次 `npm run format` 把工作树修好了，但**修复本身
   没提交**（我只 `git add README.md`），于是仓库里那份仍是没格式化的。补一个 `style:`
   提交后 CI 绿。教训不变、但要说得更准：**改完就跑 `format`，而且 `format` 动过的文件
-  要**一起**提交**（第四 / 第五十六轮是「新段落没跑 format」，这一次是「跑了但没提交」）
+  要**一起**提交**（第五十四 / 五十六轮是「新段落没跑 format」，这一次是「跑了但没提交」）
 
 **五、线上核验**（`/api/probe` 报 `0.48.0`）。816 条源里 116 条带登录入口；挑四种形态各看一个：
 
@@ -5226,6 +5226,11 @@ quickjs-emscripten，三种情形各跑 200 次：
 - `test/sandboxObjects.test.ts` 的取块办法跟着改了（对象从 IIFE 变成工厂函数）
 - 冒烟第 43 段四条断言跟着新上限重写，并量出上面那组数；第 40 / 44 / 45 段不动，正好当回归
 - 测试站点 `/fixture/api/toc` 的 `n` 上限从 500 抬到 1600（要验 1200 那道边界）
+- CI：**红了一次**，红在「类型检查」—— 新增的 `test/sandboxPrelude.test.ts` 里
+  `found[1]` 在 `noUncheckedIndexedAccess` 下是 `string | undefined`。
+  与那几次 format 事故是**同一个形状的变体**：`npx vitest run` **不做类型检查**
+  （esbuild 只剥类型），所以「跑过测试」不等于「类型检查过」—— 提交前 `npm run typecheck`
+  与 `npm run format` 一样不能省
 
 **六、线上核验**（`/api/probe` 报 `0.49.0`）。这一轮**没能拿到一个真实的线上数据点**，
 如实记下：语料里「逐条标注要走沙箱」的源有 47 条、都在线上，但挑出来的 8 条里
