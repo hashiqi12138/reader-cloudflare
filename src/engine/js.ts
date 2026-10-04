@@ -149,6 +149,16 @@ export interface SandboxSession {
      * 而那句话是用户唯一能看到的结果 —— 接口得把它带回去。
      */
     lastLogs?: string[]
+    /**
+     * 这一次求值里**被改过的登录态**（`putLoginHeader` / `putLoginInfo` / `removeLogin*`）
+     *
+     * 只有登录接口在用。它回答的是「登录成功没有」，而**不能**用「loginInfo 非空」
+     * 去回答 —— 表单字段会被宿主先放进 loginInfo 让脚本读得到（官方文档里
+     * `login` 函数就是从 `source.getLoginInfoMap()` 取用户输入的），
+     * 那不是「登录成功」。退出登录（写成空串）也算「改过」，所以这里存的是一份
+     * **这次写出去的值**，不是布尔。
+     */
+    loginOut?: { header?: string; info?: string }
 }
 
 export function createSandboxSession(): SandboxSession {
@@ -2059,7 +2069,7 @@ async function executeInSandbox(
         await collectSourceVariable(vm, limits)
         await collectBookVars(vm, session, limits)
         await collectCookies(vm, limits)
-        await collectLogin(vm, limits)
+        await collectLogin(vm, limits, session)
         /**
          * 把这次求值的日志（`java.toast` / `java.log`）留一份在会话上
          *
@@ -2494,11 +2504,13 @@ async function collectCookies(vm: QuickJSAsyncContext, limits: SandboxLimits): P
  * 与 `collectCookies` 一样：只有上层给了落库路径才做，落库**要等**（响应一返回，
  * 还在飞的 promise 会被掐掉），失败只能咽掉。
  */
-async function collectLogin(vm: QuickJSAsyncContext, limits: SandboxLimits): Promise<void> {
-    const persist = limits.persistLogin
-    if (!persist) return
+async function collectLogin(
+    vm: QuickJSAsyncContext,
+    limits: SandboxLimits,
+    session: SandboxSession,
+): Promise<void> {
+    const patch: { header?: string; info?: string } = {}
     try {
-        const patch: { header?: string; info?: string } = {}
         for (const [global, key] of [
             ['__loginHeaderOut', 'header'],
             ['__loginInfoOut', 'info'],
@@ -2515,7 +2527,18 @@ async function collectLogin(vm: QuickJSAsyncContext, limits: SandboxLimits): Pro
             if (dumped === null || dumped === undefined) continue
             patch[key] = String(dumped)
         }
-        if (patch.header === undefined && patch.info === undefined) return
+    } catch {
+        /* 读不到全局就当这次没写登录态 */
+    }
+
+    // 「这一趟改没改登录态」先记在会话上 —— 登录接口用它报 `loggedIn`。
+    // 必须在 `persistLogin` 那个早退之前做：即使上层没给落库路径，这次求值
+    // 也确实改过（只是没存下来），这个事实不该丢。
+    if (patch.header !== undefined || patch.info !== undefined) session.loginOut = patch
+
+    const persist = limits.persistLogin
+    if (!persist || (patch.header === undefined && patch.info === undefined)) return
+    try {
         await persist(patch)
     } catch {
         /* 落库失败不影响这次求值的结果（书源那侧已经拿到它要的值了） */

@@ -6149,16 +6149,22 @@ console.log('\n=== 44. 登录态：跑一次 loginUrl，之后每趟请求都带
     for (const one of [id, coldId, urlId])
         await call('DELETE', `/api/sources?id=${encodeURIComponent(one)}`)
 
+    /**
+     * 脚本按**官方约定**写：实现一个 `login` 函数，由宿主调用；表单字段在
+     * `login` 函数里从 `source.getLoginInfoMap()` 取（官方文档「认证与登录」）。
+     * 语料里 40 条脚本型 loginUrl 有 33 条正是这个形状，而且没有一条自己调 ——
+     * 所以这一段同时验「宿主会调 login()」与「字段真的铺进了 loginInfo」。
+     */
     const loginScript =
-        `@js:(function(){` +
-        `var acc=String(result.get('账号'));` +
-        `var pw=String(result.get('密码'));` +
-        `var data=JSON.parse(String(java.post('${BASE}/fixture/login','username='+acc+'&password='+pw,{})));` +
-        `if(!data.token){ java.toast('账号或密码不对'); return; }` +
-        `source.putLoginHeader(JSON.stringify({'X-RC-Token':data.token}));` +
-        `source.putLoginInfo(JSON.stringify({user:acc}));` +
-        `java.toast('登录成功：'+acc+'（'+source.getLoginInfoMap().get('user')+'）');` +
-        `})()`
+        `@js:\nfunction login(){\n` +
+        `var acc=String(source.getLoginInfoMap().get('账号'));\n` +
+        `var pw=String(source.getLoginInfoMap().get('密码'));\n` +
+        `var data=JSON.parse(String(java.post('${BASE}/fixture/login','username='+acc+'&password='+pw,{})));\n` +
+        `if(!data.token){ java.toast('账号或密码不对'); return; }\n` +
+        `source.putLoginHeader(JSON.stringify({'X-RC-Token':data.token}));\n` +
+        `source.putLoginInfo(JSON.stringify({user:acc}));\n` +
+        `java.toast('登录成功：'+acc+'（'+source.getLoginInfoMap().get('user')+'）');\n` +
+        `}`
 
     const baseRules = {
         searchUrl: '/fixture/search?q={{key}}',

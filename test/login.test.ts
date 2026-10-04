@@ -2,14 +2,16 @@
  * 登录态：`loginUrl` 的三种形态与三层请求头
  *
  * 第五十七轮把三件事接起来：**能跑 `loginUrl`**、**落库**、**请求带上**。
- * 这里钉住其中不用起沙箱、不起网络的两段（形态 + 头序）：
+ * 这里钉住其中不用起沙箱、不起网络的那三段（形态 + 调用 + 头序）：
  *
  *   ① `loginUrl` 里那段脚本的**形态** —— 语料里既有裸脚本，也有按「规则字段」
  *      加了 `@js:` / `<js>…</js>` 标记的；标记不剥掉，沙箱会拿它当 JS 解析，
  *      报出来的是 `SyntaxError: unexpected token '@'`（把人往「书源写错了」方向带）。
  *   ② **一条登录页地址**（116 条 loginUrl 里 65 条）—— 那是 App 用 WebView 打开的
  *      页面，硬当 JS 跑只会报 SyntaxError；要认出来、给一句明白话。
- *   ③ 请求头的**三层叠加顺序** —— 登录头 → 默认头 → 书源自己的 `header`，
+ *   ③ **补上调用 `login()` 那一步** —— 脚本按约定只是「定义 login() 等着被调」
+ *      （40 条脚本型里 33 条如此、0 条自己调），不调用就等于没跑登录。
+ *   ④ 请求头的**三层叠加顺序** —— 登录头 → 默认头 → 书源自己的 `header`，
  *      后面的盖前面的。写反了会让一次登录的快照把书源写过的 UA / Cookie 闷掉。
  *
  * 沙箱内那半（`putLoginHeader` 写穿、`getLoginInfo` 读回来）不走单测 ——
@@ -20,7 +22,7 @@
 import { describe, expect, it } from 'vitest'
 
 import type { BookSource } from '../src/engine/types'
-import { loginAddressOf, normalizeLoginScript } from '../src/legado/loginScript'
+import { loginAddressOf, loginInvocation, normalizeLoginScript } from '../src/legado/loginScript'
 import { requestHeadersFor } from '../src/legado/sourceHeaders'
 
 /** 只放受测的那几列：`loginHeader` / `header` */
@@ -61,6 +63,35 @@ describe('normalizeLoginScript：`loginUrl` 里那段脚本的形态', () => {
 
     it('两侧的空白一并剪掉', () => {
         expect(normalizeLoginScript('  \n  login()  \n  ')).toBe('login()')
+    })
+})
+
+describe('loginInvocation：宿主补上「调用 login()」那一步', () => {
+    it('定义了 `login` 又没自己调 → 追加一句调用（语料 33/40 就是这个形状）', () => {
+        const script = 'function checkSite(){} function login(){ checkSite(); }'
+        const out = loginInvocation(script)
+        expect(out.startsWith(script)).toBe(true)
+        expect(out).toContain('if (typeof login === "function") { login(); }')
+    })
+
+    it('没有 `function login(` 的原样返回（🎬🔞黄豆短剧 那种没这一层）', () => {
+        const script = 'java.toast("没有登录函数");'
+        expect(loginInvocation(script)).toBe(script)
+    })
+
+    it('自己已经在顶层调过 `login()` 的原样返回（不重复跑一次登录）', () => {
+        const script = 'function login(){ java.toast("hi") }\nlogin();'
+        expect(loginInvocation(script)).toBe(script)
+    })
+
+    it('`function login()` 里那个 `login(` 不算调用 —— 只有声明时照样要追加', () => {
+        const script = 'function login(){ return 1 }\nfunction other(){}'
+        expect(loginInvocation(script)).toContain('if (typeof login === "function")')
+    })
+
+    it('`source.login()` 那种带点的也不算脚本自己调', () => {
+        const script = 'function login(){ source.login(); }'
+        expect(loginInvocation(script)).toContain('if (typeof login === "function")')
     })
 })
 

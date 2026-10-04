@@ -75,7 +75,7 @@ import {
     type FieldWarning,
 } from './legado/ops'
 import { fetchChapterContent } from './legado/media'
-import { loginAddressOf, normalizeLoginScript } from './legado/loginScript'
+import { loginAddressOf, loginInvocation, normalizeLoginScript } from './legado/loginScript'
 import { mediaRequestHeaders, sandboxHttp } from './legado/source'
 import { baseGlobals, sourceLimits } from './engine/globals'
 import { splitUrlAndOptions } from './legado/urlOptions'
@@ -481,11 +481,15 @@ app.delete('/api/sources', async (c) => {
  *
  * 于是「登录一次、之后每趟请求都带着」才成立。请求体：
  *
- *   `{ id, fields? }` —— fields 是用户填的表单。书源里两种读法都有
- *   （`result.get("账号")` 与 `result["账号"]`，🏷晋江文学 还先判 `typeof result`），
- *   所以沙箱那侧把它包成「同时支持两者」的对象。
+ *   `{ id, fields? }` —— fields 是用户填的表单。官方文档「认证与登录」把两种读法
+ *   分得很清：**登录按钮函数**里用 `result.get("账号")`，**`login` 函数**里用
+ *   `source.getLoginInfoMap().get("账号")`。两条路都铺（见下面 `fields` 那段注释）。
  *   一部分脚本型 loginUrl 不需要表单（「切换线路 / 保存设置」那类菜单），
  *   那种源直接 POST 一个 `{ id }` 就行。
+ *
+ * 还有一步不能省：脚本按约定只是**定义** `login()` 等着被宿主调（语料 40 条脚本型里
+ * 33 条如此、0 条自己调），所以要补上调用 —— 见 `legado/loginScript.ts` 的
+ * `loginInvocation`。
  *
  * 量了一条：116 条写了 loginUrl 的源里，**65 条根本不是脚本，是一条登录页地址**
  * （`https://m.uaa.com/` / `/login.php` / `{ "url": "null" }`）—— App 里那是在
@@ -525,14 +529,32 @@ app.post('/api/sources/login', async (c) => {
         body.fields && typeof body.fields === 'object' && !Array.isArray(body.fields)
             ? (body.fields as Record<string, unknown>)
             : {}
+    /**
+     * 表单字段要先**放进这次求值的内存 `loginInfo`**，`login` 函数才读得到
+     *
+     * 官方文档「认证与登录」写得很明确：用户输入在**登录按钮函数**里从
+     * `result.get("账号")` 取，在 **`login` 函数**里从 `source.getLoginInfoMap()` 取。
+     * 两条路都要铺：`fields` 既注成 `result`，也先塞进 `loginInfo`
+     * （语料里读 `getLoginInfoMap` 的绝大多数就在 `loginUrl` 里）。
+     *
+     * **只放内存、不落库** —— 脚本自己决定要不要 `putLoginInfo` 保存。不直接落库
+     * 有两个原因：一是那会把密码明文存进 D1；二是「登录成功没有」这个信号会失真。
+     */
+    // 铺表单之前先把**库里那份**记下来：下面算 `loggedIn` 时要用（表单不算登录态）
+    const storedLogin = { header: source.loginHeader ?? '', info: source.loginInfo ?? '' }
+    if (Object.keys(fields).length > 0) source.loginInfo = JSON.stringify(fields)
+
     const session = createSandboxSession()
     // `source` 必须显式带上：`evalContext` 只给 baseUrl / sandbox / 落库路径，
     // 而登录脚本要读 `source.getVariable()`、`source.bookSourceUrl` 这些
     const ctx: RuleContext = { ...evalContext(c.env.DB, source, session), source }
 
+    // 补上「调用 `login()`」那一步 —— 见 legado/loginScript.ts 的说明
+    const code = loginInvocation(loginScript)
+
     try {
         await runInSandbox(
-            loginScript,
+            code,
             {
                 ...baseGlobals(ctx),
                 __loginFields: JSON.stringify(fields),
@@ -554,7 +576,12 @@ app.post('/api/sources/login', async (c) => {
         ok: true,
         // 书源自己那句提示（toast）—— 登录成功与否，书源比我们清楚
         message: toastTextOf(session),
-        loggedIn: (source.loginHeader ?? '') !== '' || (source.loginInfo ?? '') !== '',
+        // 「这次写出去的登录态」非空才算登录成功；这次没写过（「切换线路」那类脚本、
+        // 或者密码不对早早 return）就看**库里原来那份** —— 注意不是 `source.loginInfo`，
+        // 那一份上面被表单铺过，拿它当判据会把「刚填了表单但没登上」当成已登录
+        loggedIn: session.loginOut
+            ? (session.loginOut.header ?? '') !== '' || (session.loginOut.info ?? '') !== ''
+            : storedLogin.header !== '' || storedLogin.info !== '',
     })
 })
 

@@ -36,6 +36,34 @@ export function normalizeLoginScript(raw: string | undefined | null): string {
 }
 
 /**
+ * 给登录脚本补上「调用 `login()`」那一步
+ *
+ * 登录 URL 的约定是：**脚本要实现一个 `login` 函数，由宿主调用它** ——
+ * 官方文档「认证与登录」原话：「可填写登录链接或实现登录逻辑的 JavaScript。
+ * 配合登录 UI 使用时，需要实现 `login` 函数。」（按钮那侧由登录 UI 触发，
+ * 而 `login` 是宿主调的。）
+ *
+ * 量了语料：**40 条脚本型 `loginUrl` 里 33 条**就是「定义 `login()` 等着被调」，
+ * 而且**没有一条自己调**。只求值不调用，那 33 条什么都不会发生（连 toast 都没有）——
+ * 而这一轮要的恰恰是「跑一次登录」。
+ *
+ * 两处刻意收窄：
+ * - 脚本里**没有** `function login(` 就原样返回（🎬🔞黄豆短剧 那种没这一层的）
+ * - 脚本自己**已经在顶层调过** `login()` 的原样返回（语料 0 条，但重复跑一次登录
+ *   可能真的重复提交一次请求，不值得赌）
+ *
+ * 追加在同一段脚本里（而不是另起一次求值），是为了共用同一套错误处理与日志收回；
+ * 沙箱每次求值都是新上下文，另起一次根本看不到上一步定义的 `login`。
+ */
+export function loginInvocation(script: string): string {
+    if (!/function\s+login\s*\(/.test(script)) return script
+    // 把声明本身抠掉再找调用，免得把 `function login()` 里那个 `login(` 当成调用
+    const withoutDeclarations = script.replace(/function\s+login\s*\([^)]*\)/g, '')
+    if (/(^|[^.\w$])login\s*\(\s*\)/.test(withoutDeclarations)) return script
+    return `${script}\n;if (typeof login === "function") { login(); }`
+}
+
+/**
  * 有的 `loginUrl` 根本不是脚本，而是**一条登录页地址**
  *
  * 语料里 116 条 `loginUrl` 有 **65 条**是这种：`https://m.uaa.com/`、`/login.php`、
