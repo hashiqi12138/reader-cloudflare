@@ -218,3 +218,21 @@ window.addEventListener('DOMContentLoaded', () => {
     applyPrefs()
     void render()
 })
+
+/**
+ * 注册 Service Worker（离线外壳 + 读过的章节，见 `sw.js` 与 `js/swPolicy.js`）
+ *
+ * 三条原则：
+ *   1. **失败不影响任何功能** —— 它只负责「断网还能开」，在线时可有可无。老浏览器
+ *      不认 `type: 'module'` 的 SW，注册会抛，这里吞掉（页面照常）。
+ *   2. **等 `load` 之后再注册** —— 首屏的带宽先留给样式、脚本和首页数据。
+ *   3. 不做「有新版本就弹窗让用户刷新」那一套：这个应用的策略是**网络优先**
+ *      （见 `swPolicy.js` 里为什么），新版本下一次打开就是新的，没有「请手动刷新」这一步。
+ */
+if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/sw.js', { type: 'module' }).catch((err) => {
+            console.warn('[sw] 注册失败（不影响使用）：', err?.message ?? err)
+        })
+    })
+}

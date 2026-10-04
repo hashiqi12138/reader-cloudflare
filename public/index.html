@@ -6,6 +6,18 @@
         <meta name="color-scheme" content="light dark" />
         <meta name="description" content="兼容 Legado 书源规则的聚合阅读器" />
         <title>书源阅读器</title>
+        <!--
+            装到桌面（PWA）：`manifest.json` 给名字/图标/独立窗口，`sw.js` 给离线外壳。
+            `theme-color` 与应用图标取同一个琥珀色（`--accent`，见 style.css）。
+            iOS 不认 manifest 里的图标，所以要单独给一张 `apple-touch-icon`；
+            `apple-mobile-web-app-*` 那几个 meta 是给老 iOS 的（新版本认 display: standalone）。
+        -->
+        <link rel="manifest" href="/manifest.json" />
+        <meta name="theme-color" content="#b4712a" />
+        <link rel="icon" href="/icon-192.png" />
+        <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+        <meta name="apple-mobile-web-app-capable" content="yes" />
+        <meta name="apple-mobile-web-app-title" content="书源阅读器" />
         <link rel="stylesheet" href="/style.css" />
         <!--
             刻意不做「先渲染骨架再水合」那一套：这是个单页小应用，

@@ -291,6 +291,19 @@ export function applyPrefs() {
 // ---------------------------------------------------------------- 接口
 
 /**
+ * 最近一次请求是不是「连不上」（而不是服务端答了个错）
+ *
+ * 为什么不用 `navigator.onLine`：它说的是**网卡有没有连上网络**，跟「我们这个服务端
+ * 现在答不答话」是两件事 —— 实测把本地服务停掉，`navigator.onLine` 仍然是 `true`。
+ * 这里以「自己这条请求真的抛了传输错误」为准，才是我们关心的那件事。
+ *
+ * 谁用它：阅读页保存进度（见 reader.js 的 `saveProgress`）。离线时那条 PUT 必然失败，
+ * 而它每翻一页就发一次，不管的话屏幕上会一直弹「进度没记上」，看着像坏了。
+ */
+let offline = false
+export const isOffline = () => offline
+
+/**
  * 本机匿名身份
  *
  * 升级到账号之前，书架挂在浏览器随机生成的 token 上。这个 token 现在只剩一个用途：
@@ -329,12 +342,20 @@ export const setUnauthorizedHandler = (fn) => {
  */
 export async function api(path, options = {}) {
     const { authAttempt = false, ...rest } = options
-    const response = await fetch(path, {
-        ...rest,
-        // 会话是 HttpOnly cookie，同源请求会自动带上
-        credentials: 'same-origin',
-        headers: { ...(rest.headers ?? {}), 'x-reader-user': anonToken() },
-    })
+    let response
+    try {
+        response = await fetch(path, {
+            ...rest,
+            // 会话是 HttpOnly cookie，同源请求会自动带上
+            credentials: 'same-origin',
+            headers: { ...(rest.headers ?? {}), 'x-reader-user': anonToken() },
+        })
+    } catch (err) {
+        // 连不上（离线 / 服务端挂了）：`fetch` 抛的是 TypeError，没有 HTTP 状态码。
+        // 记下来给 `isOffline()` 用，再照原样抛。
+        offline = true
+        throw err
+    }
 
     const raw = await response.text()
     let json = null
@@ -388,24 +409,70 @@ export const patchJson = (path, body) =>
 
 // ---------------------------------------------------------------- 登录态
 
+/**
+ * 上一次问到的账号，记在本地
+ *
+ * 只为了让**离线时界面还能渲染**：`/api/auth/me` 是唯一一个「问不到就什么都显示不了」
+ * 的接口（见 app.js 的 `render`），而离线时它必然失败 —— 于是整个界面只剩一个
+ * 「连不上服务」的红框，连缓存里存着的章节都读不到。
+ *
+ * 记的只是身份（用户名、显示名，没有凭据），凭据仍然只在 HttpOnly cookie 里。
+ * **只在「连不上」时用它**：服务端答了 401 就是真没登录，那必须清掉，
+ * 不能拿旧的顶上。回到线上时 `/me` 会再问一次，以服务端为准。
+ */
+const ACCOUNT_KEY = 'readerAccount'
+
+const rememberUser = (user) => {
+    try {
+        if (user) localStorage.setItem(ACCOUNT_KEY, JSON.stringify(user))
+        else localStorage.removeItem(ACCOUNT_KEY)
+    } catch {
+        /* 隐私模式等写不进去就算了：退化成「离线时回到登录页」 */
+    }
+}
+
+const rememberedUser = () => {
+    try {
+        const raw = localStorage.getItem(ACCOUNT_KEY)
+        return raw ? JSON.parse(raw) : null
+    } catch {
+        return null
+    }
+}
+
 let session = { loaded: false, user: null, claimable: false }
 
 export const currentUser = () => session.user
 
 export async function loadSession(force = false) {
     if (session.loaded && !force) return session
-    const data = await api('/api/auth/me')
+    let data
+    try {
+        data = await api('/api/auth/me')
+    } catch (err) {
+        // 连不上（离线）：用上一次记下的身份把界面撑起来，读缓存里的章节去。
+        // 有 `status` 的是服务端在答话（401 之类），照旧抛给调用方走失效处理。
+        if (err?.status) throw err
+        session = { loaded: true, user: rememberedUser(), claimable: false }
+        return session
+    }
+    // 这一条**从不进缓存**（见 swPolicy 的 cacheNameFor），所以它答了就是真的通了
+    offline = false
     session = { loaded: true, user: data.user ?? null, claimable: Boolean(data.claimable) }
+    rememberUser(session.user)
     return session
 }
 
 export function clearSession() {
     session = { loaded: true, user: null, claimable: false }
+    // 退出登录也要把记下的身份抹掉，否则「登出后离线打开」会又把人放进去
+    rememberUser(null)
 }
 
 export async function register(username, password) {
     const data = await postAuth('/api/auth/register', { username, password })
     session = { loaded: true, user: data.user, claimable: false }
+    rememberUser(session.user)
     return data.user
 }
 
@@ -413,6 +480,7 @@ export async function login(username, password) {
     const data = await postAuth('/api/auth/login', { username, password })
     // 登录成功后重新问一次 /me：它会顺带告诉本机有没有可并入的旧匿名书架
     session = { loaded: false, user: data.user, claimable: false }
+    rememberUser(data.user)
     return loadSession(true)
 }
 

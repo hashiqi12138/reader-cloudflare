@@ -24,6 +24,7 @@ import {
     currentUser,
     el,
     go,
+    isOffline,
     contextParams,
     PAPERS,
     PAPER_LABELS,
@@ -844,6 +845,9 @@ export async function viewRead(host) {
     }
 
     async function saveProgress() {
+        // 离线时不发这一条：它必然失败，而每翻一页都弹一句「进度没记上」会让人以为坏了。
+        // 回到线上后下一次翻页会重新开始记 —— 进度是「最后一次为准」，丢几页没有影响。
+        if (isOffline()) return
         try {
             await api('/api/progress', {
                 method: 'PUT',
