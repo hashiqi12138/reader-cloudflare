@@ -6196,7 +6196,7 @@ console.log('\n=== 44. 登录态：跑一次 loginUrl，之后每趟请求都带
             },
             {
                 // 第三种形态：loginUrl 根本**不是脚本**，是一条登录页地址
-                // （语料里 116 条 loginUrl 有 65 条是这种）—— 要回一句明白话，
+                // （语料里 116 条 loginUrl 有 76 条是这种）—— 要回一句明白话，
                 // 而不是让沙箱去报 SyntaxError
                 bookSourceName: '登录（地址型）',
                 bookSourceUrl: `${BASE}/login-57-url`,

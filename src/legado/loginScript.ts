@@ -66,7 +66,7 @@ export function loginInvocation(script: string): string {
 /**
  * 有的 `loginUrl` 根本不是脚本，而是**一条登录页地址**
  *
- * 语料里 116 条 `loginUrl` 有 **65 条**是这种：`https://m.uaa.com/`、`/login.php`、
+ * 语料里 116 条 `loginUrl` 有 **76 条**是这种：`https://m.uaa.com/`、`/login.php`、
  * `http://m.zhuishushenqi.com/login?source=/setting`；另有几条是「地址 + 选项」的
  * JSON 写法（`{ "url": "null" }` / `{ "url": "" }`）。App 遇到它们就是**用 WebView
  * 打开那个页面**让人手动登录，不存在「跑一段脚本」这回事。

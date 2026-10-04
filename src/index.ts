@@ -491,7 +491,7 @@ app.delete('/api/sources', async (c) => {
  * 33 条如此、0 条自己调），所以要补上调用 —— 见 `legado/loginScript.ts` 的
  * `loginInvocation`。
  *
- * 量了一条：116 条写了 loginUrl 的源里，**65 条根本不是脚本，是一条登录页地址**
+ * 量了一条：116 条写了 loginUrl 的源里，**76 条根本不是脚本，是一条登录页地址**
  * （`https://m.uaa.com/` / `/login.php` / `{ "url": "null" }`）—— App 里那是在
  * WebView 里打开让人手登的。本平台没有 WebView，所以这一档直接回一句明白话，
  * 而不是让沙箱去报 `SyntaxError`（那会把原因指到「书源写错了」上去）。
