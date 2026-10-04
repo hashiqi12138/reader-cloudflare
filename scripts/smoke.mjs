@@ -5863,6 +5863,103 @@ console.log('\n=== 41. cookie 罐：收 / 发 / 跨请求落库（`enabledCookie
     )
 }
 
+console.log('\n=== 42. 重定向是自己跟的（302 上的 Set-Cookie 与 Location） ===')
+{
+    /**
+     * 量出来的两笔（第五十五轮）：
+     *   - 站点常用 **302 下发会话 cookie**（`/cookies/set` 那种）—— 交给 `fetch` 的
+     *     `redirect: 'follow'` 会把中间响应整份吃掉，cookie 就丢了（第五十四轮那个漏点）
+     *   - 线上 **11 个源**的 searchUrl 写成 `java.post(url, body, {}).header('location')`，
+     *     它们拿 POST 的 302 去**找真正的搜索页地址**（无忧书城 / 米读小说 / 天悦小说 …）
+     *
+     * 靶子：`/fixture/redirect-set` 302 + `Set-Cookie: rc55=1` + Location 指向
+     * `/fixture/redirect-land`，而**落地页本身要求带着 rc55**（否则 403）。
+     * 于是这一次搜索同时验三件事：跟了重定向、302 上的 cookie 进了罐（第二跳带着它才 200）、
+     * `Location` 交得回去（不然书源拿到空地址，根本请求不出这一趟）。
+     *
+     * 再补两条：跨请求（详情那一趟在另一个请求里）与反向对照（不带重定向直接请求落地页 → 403）。
+     */
+    const id = `user:${BASE}/redirect-55`
+    const plainId = `user:${BASE}/redirect-plain`
+    for (const one of [id, plainId])
+        await call('DELETE', `/api/sources?id=${encodeURIComponent(one)}`)
+
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: '重定向（临时）',
+                bookSourceUrl: `${BASE}/redirect-55`,
+                enabledCookieJar: true,
+                // 书源那种写法：拿 POST 的 Location 当真正的搜索页地址
+                searchUrl: `@js:java.post("${BASE}/fixture/redirect-set", "", {}).header("location")`,
+                ruleSearch: {
+                    bookList: '@css:div.result-item',
+                    name: '@css:h3.title@text',
+                    bookUrl: '@js:"/fixture/redirect-need"',
+                },
+                ruleBookInfo: { name: '@css:h1.book-name@text' },
+            },
+            {
+                // 对照：直接请求落地页（没有那一次 302），站点照样拦住
+                bookSourceName: '重定向（对照·不带 302）',
+                bookSourceUrl: `${BASE}/redirect-plain`,
+                enabledCookieJar: true,
+                searchUrl: '/fixture/redirect-land',
+                ruleSearch: {
+                    bookList: '@css:div.result-item',
+                    name: '@css:h3.title@text',
+                    bookUrl: '@js:"/fixture/redirect-need"',
+                },
+            },
+        ]),
+    )
+
+    const res = await fetch(`${BASE}/api/search`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ keyword: '测试', sourceIds: [id, plainId] }),
+    })
+    const sources = (await res.json()).sources ?? []
+    const one = sources.find((s) => s.sourceId === id)
+    const plain = sources.find((s) => s.sourceId === plainId)
+
+    check(
+        one?.ok === true && one?.count > 0,
+        '书源用 `java.post(...).header("location")` 拿到了地址，重定向也跟到了落地页',
+        `count=${one?.count} ${String(one?.error ?? '')}`,
+    )
+    check(
+        String(plain?.error ?? '').includes('403'),
+        '对照：不带那一次 302 直接请求落地页 → 403（证明 cookie 是第二跳才有的）',
+        String(plain?.error ?? '（居然没被拦）'),
+    )
+
+    const bookUrl = one?.books?.[0]?.bookUrl
+    if (bookUrl) {
+        const info = await getJson(
+            `/api/book?sourceId=${encodeURIComponent(id)}&url=${encodeURIComponent(String(bookUrl))}`,
+        )
+        check(
+            info.json?.name === '测试小说·甲',
+            '302 上那个 Set-Cookie 落了库：详情是**另一个请求**，照样带着它',
+            String(info.json?.name ?? info.json?.error ?? ''),
+        )
+    } else {
+        check(false, '能取到书目地址（后面那条跨请求的验法要用它）', String(one?.error ?? ''))
+    }
+
+    for (const one2 of [id, plainId])
+        await call('DELETE', `/api/sources?id=${encodeURIComponent(one2)}`)
+    check(
+        !((await getJson('/api/sources')).json?.sources ?? []).some((s) =>
+            String(s.id).includes('redirect-'),
+        ),
+        '重定向的两个测试源已清理',
+    )
+}
+
 console.log('\n=== 结果 ===')
 if (failures.length === 0) {
     console.log(

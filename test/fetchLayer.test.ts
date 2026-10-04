@@ -24,6 +24,7 @@ import type { FetchPlan } from '../src/engine/types'
 
 interface Seen {
     method: string
+    url: string
     contentType: string | undefined
     cookie: string | undefined
     body: string
@@ -43,10 +44,67 @@ beforeAll(async () => {
         req.on('end', () => {
             seen.push({
                 method: req.method ?? '',
+                url: req.url ?? '',
                 contentType: req.headers['content-type'],
                 cookie: req.headers.cookie,
                 body,
             })
+            /**
+             * 重定向的靶子（第五十五轮）
+             *
+             * 这些端点以前是测不到的：`redirect: 'follow'` 会把 302 连同它的
+             * `Set-Cookie` 与 `Location` 一起吃干净。改成自己跟之后才有得验 ——
+             * 而「每一跳的 cookie 都要收」「POST 变成 GET」这类语义**错一点都很难发现**：
+             * 站点侧要么收到重复提交、要么会话丢了，表现都是别的东西。
+             */
+            if (req.url?.startsWith('/redirect/set')) {
+                res.setHeader('Set-Cookie', 'rc_r=1; Path=/')
+                res.setHeader('Location', '/target')
+                res.statusCode = 302
+                res.end('去别处')
+                return
+            }
+            if (req.url?.startsWith('/redirect/post')) {
+                res.setHeader('Location', '/echo')
+                res.statusCode = 302
+                res.end('去别处')
+                return
+            }
+            if (req.url?.startsWith('/redirect/keep')) {
+                res.setHeader('Location', '/echo')
+                res.statusCode = 307
+                res.end('去别处')
+                return
+            }
+            if (req.url?.startsWith('/redirect/relative')) {
+                // 相对 Location：按**当前这一跳的地址**解析，不是按最初的地址
+                res.setHeader('Location', 'target-relative')
+                res.statusCode = 302
+                res.end('去别处')
+                return
+            }
+            if (req.url?.startsWith('/redirect/loop')) {
+                res.setHeader('Location', '/redirect/loop')
+                res.statusCode = 302
+                res.end('绕圈')
+                return
+            }
+            // 两跳各慢 150ms：用来量「超时是整条链共享的」
+            if (req.url?.startsWith('/redirect/slow2')) {
+                setTimeout(() => {
+                    res.setHeader('Content-Type', 'text/html; charset=utf-8')
+                    res.end('<html><body>慢</body></html>')
+                }, 150)
+                return
+            }
+            if (req.url?.startsWith('/redirect/slow')) {
+                setTimeout(() => {
+                    res.setHeader('Location', '/redirect/slow2')
+                    res.statusCode = 302
+                    res.end('慢')
+                }, 150)
+                return
+            }
             // `/stall` 故意不响应：用来量超时
             if (req.url === '/stall') return
             // `/forbidden` 演一出「非 2xx + 带 Set-Cookie」：java.connect 的 code()/headers() 靠它
@@ -251,5 +309,84 @@ describe('cookie 罐的收发', () => {
     it('没有罐子时行为与以前一模一样（书源关掉 CookieJar 的 359 条就是这条路）', async () => {
         await fetchText(plan({ url: `${base}/set-cookie` }))
         expect(seen.at(-1)!.cookie).toBeUndefined()
+    })
+})
+
+/**
+ * 重定向：自己跟（第五十五轮）
+ *
+ * 以前是交给 `fetch` 的 `redirect: 'follow'`，代价是两样东西被吃掉：
+ * **每一跳的 `Set-Cookie`**（站点常用 302 下发会话 cookie）与 **`Location` 本身**
+ * （线上 11 个源的 searchUrl 靠它找真正的搜索页地址）。
+ *
+ * 自己跟就要把规矩抄全，否则会静默地做出与浏览器不一样的事 ——
+ * 「302 之后 POST 变 GET 且不再发 body」这一条尤其要紧：站点把「表单已提交」的
+ * 那一次 302 指向结果页，再发一遍 body 就是**重复提交**。
+ */
+describe('重定向是自己跟的', () => {
+    it('跟到最终页面，正文是最后一跳的', async () => {
+        const text = await fetchText(plan({ url: `${base}/redirect/set` }))
+        expect(text).toContain('好了')
+        expect(seen.at(-1)!.url).toBe('/target')
+    })
+
+    it('302 上的 Set-Cookie 也进罐（这是「302 下发会话」那个漏点）', async () => {
+        const jar = emptyJar()
+        await fetchText(plan({ url: `${base}/redirect/set`, cookieJar: jar }))
+        expect(jar.hosts['127.0.0.1']).toBe('rc_r=1')
+    })
+
+    it('第一跳的 status 与 Location 留在 redirectedFrom 里（11 个源要的就是它）', async () => {
+        const response = await fetchDetailed(plan({ url: `${base}/redirect/set` }))
+        expect(response.status).toBe(200)
+        expect(response.redirectedFrom).toEqual({
+            status: 302,
+            location: `${base}/target`,
+        })
+        // 没有跳转时不该有这个字段（别让书源以为每次请求都被重定向了）
+        expect((await fetchDetailed(plan({}))).redirectedFrom).toBeUndefined()
+    })
+
+    it('302 之后 POST 变 GET、并且不再发 body（不该重复提交）', async () => {
+        await fetchText(plan({ url: `${base}/redirect/post`, method: 'POST', body: 'q=1&p=1' }))
+        const first = seen.at(-2)!
+        const second = seen.at(-1)!
+        expect([first.method, first.body]).toEqual(['POST', 'q=1&p=1'])
+        expect([second.method, second.body, second.url]).toEqual(['GET', '', '/echo'])
+        // 第二跳连 Content-Type 都不该带（没有 body 了）
+        expect(second.contentType).toBeUndefined()
+    })
+
+    it('307 之后 POST 还是 POST、body 原样（站点明确要求保留时不能改）', async () => {
+        await fetchText(plan({ url: `${base}/redirect/keep`, method: 'POST', body: 'q=1&p=1' }))
+        const second = seen.at(-1)!
+        expect([second.method, second.body, second.url]).toEqual(['POST', 'q=1&p=1', '/echo'])
+    })
+
+    it('相对 Location 按**当前这一跳**的地址解析', async () => {
+        await fetchText(plan({ url: `${base}/redirect/relative` }))
+        expect(seen.at(-1)!.url).toBe('/redirect/target-relative')
+    })
+
+    it('绕圈时停下来（跳数有上限），最终那个 302 照常当失败报出来', async () => {
+        const before = seen.length
+        await expect(fetchText(plan({ url: `${base}/redirect/loop` }))).rejects.toThrowError(
+            /上游返回 HTTP 302/,
+        )
+        // 1 次 + 最多 5 跳：既没绕死，也没少跟
+        expect(seen.length - before).toBe(6)
+    })
+
+    it('整条链共享一份超时预算（不是每一跳各给一份）', async () => {
+        /**
+         * 两跳各慢 150ms，给 220ms：共享预算下第二跳会被掐掉；
+         * 要是每一跳各给一份（220 + 220 = 440 > 300），这次请求反而会「成功」。
+         * 所以这条断言能分辨那两种实现 —— 而症状差别是「搜索整页被一个源拖住 5 倍时间」。
+         */
+        const started = Date.now()
+        await expect(
+            fetchText(plan({ url: `${base}/redirect/slow`, timeoutMs: 220 })),
+        ).rejects.toThrowError(/请求超时/)
+        expect(Date.now() - started).toBeLessThan(400)
     })
 })

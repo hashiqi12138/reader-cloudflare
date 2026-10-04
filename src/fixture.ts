@@ -84,6 +84,16 @@ function page(title: string, body: string): string {
 <body>${body}</body></html>`
 }
 
+/**
+ * 请求里带没带某一对 cookie（`名字=值`）
+ *
+ * 只比一对完整的 `k=v`，不解析属性也不比键名 —— 靶子要判的是「这个会话带过来了没有」，
+ * 而按键名判会把 `rc55=` 这种空值也算成带上了。
+ */
+function hasCookie(request: Request, pair: string): boolean {
+    return (request.headers.get('cookie') ?? '').split(';').some((part) => part.trim() === pair)
+}
+
 export function fixtureSearchPage(keyword: string, pageNo: number): string {
     const hits = BOOKS.filter(
         (b) => keyword === '' || b.name.includes(keyword) || b.author.includes(keyword),
@@ -725,10 +735,37 @@ export async function handleFixture(request: Request, url: URL): Promise<Respons
         })
     }
     if (pathname === '/fixture/cookie-need') {
-        const cookie = request.headers.get('cookie') ?? ''
-        if (!cookie.split(';').some((part) => part.trim() === 'rc54=1')) {
+        if (!hasCookie(request, 'rc54=1')) {
             return new Response('需要会话 cookie（rc54）', { status: 403 })
         }
+        return html(fixtureBookPage('1'))
+    }
+
+    /**
+     * 重定向的三个靶子（第五十五轮）
+     *
+     * `/fixture/redirect-set` 用 **302** 下发 `rc55=1`，并把 `Location` 指向下一页；
+     * `/fixture/redirect-land` 只在请求**带着** `rc55=1` 时才回 200（否则 403），
+     * 页面是一页书目（条目指向 `/fixture/redirect-need`，同样要 cookie）。
+     *
+     * 一次搜索就能验三件事，缺一件结论都不成立：
+     *   1. **跟了重定向**（拿到的是落地页，不是那句「去下一页」）
+     *   2. **302 上那个 `Set-Cookie` 进了罐** —— 第二跳正是带着它才拿到 200 的
+     *   3. **`Location` 本身交得回去**（书源那侧 `java.post(...).header('location')`
+     *      要的地址就是它；线上 11 个源的 searchUrl 全是这个写法）
+     */
+    if (pathname === '/fixture/redirect-set') {
+        return new Response('去下一页', {
+            status: 302,
+            headers: { Location: '/fixture/redirect-land', 'Set-Cookie': 'rc55=1; Path=/' },
+        })
+    }
+    if (pathname === '/fixture/redirect-land') {
+        if (!hasCookie(request, 'rc55=1')) return new Response('需要 rc55', { status: 403 })
+        return html(fixtureSearchPage('测试', 1))
+    }
+    if (pathname === '/fixture/redirect-need') {
+        if (!hasCookie(request, 'rc55=1')) return new Response('需要 rc55', { status: 403 })
         return html(fixtureBookPage('1'))
     }
 
