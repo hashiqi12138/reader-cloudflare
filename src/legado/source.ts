@@ -11,7 +11,7 @@
  */
 
 import { runInSandbox, sandboxResultToString } from '../engine/js'
-import { sourceGlobals, sourceLimits } from '../engine/globals'
+import { baseGlobals, sourceLimits } from '../engine/globals'
 import type { BookSource, FetchPlan, RuleContext, SandboxHttp } from '../engine/types'
 import { parseLooseJson } from '../lib/json'
 import { defaultHeaders, fetchDetailed, fetchText, UpstreamError } from '../lib/http'
@@ -39,14 +39,9 @@ export async function resolveTemplate(template: string, ctx: RuleContext): Promi
         } else {
             const value = await runInSandbox(
                 expr,
-                {
-                    key: ctx.key ?? '',
-                    page: ctx.page ?? 1,
-                    book: ctx.book ?? {},
-                    baseUrl: ctx.baseUrl,
-                    // URL 模板里也会用 source / jsLib（`Search_()`、`host()` 这类函数）
-                    ...sourceGlobals(ctx),
-                },
+                // 与规则求值共用同一份全局（含 source / jsLib / book / chapter）——
+                // URL 模板里也会用 `Search_()`、`host()`、`book.name` 这些名字
+                baseGlobals(ctx),
                 { http: ctx.http, ...sourceLimits(ctx) },
             )
             out += sandboxResultToString(value)
@@ -202,12 +197,9 @@ export async function buildPlan(
         const value = await runInSandbox(
             js.code,
             {
-                key: templateCtx.key ?? '',
-                page: templateCtx.page ?? 1,
-                book: templateCtx.book ?? {},
-                baseUrl: templateCtx.baseUrl,
+                ...baseGlobals(templateCtx),
+                // URL 脚本的 `result` 是**没展开过 `{{}}` 的原文**（见上）
                 result: js.prefix,
-                ...sourceGlobals(templateCtx),
             },
             { http: templateCtx.http, ...sourceLimits(templateCtx) },
         )

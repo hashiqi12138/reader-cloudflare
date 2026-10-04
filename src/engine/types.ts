@@ -37,6 +37,36 @@ export class UnsupportedRuleError extends Error {
     }
 }
 
+/**
+ * 当前这本书（Legado 的 `Book`）。`@js:` 里是 `book`
+ *
+ * 字段名与 Legado 一致。`origin`（书源名）由引擎从实际用的书源补，
+ * 其余来自调用方 —— 引擎在求值 `ruleBookInfo` 时**正是在算** name/author，
+ * 所以它自己并不知道这两个值，得由客户端把它已经知道的那份带上来。
+ */
+export interface BookContext {
+    name?: string
+    author?: string
+    bookUrl?: string
+    /** 书源名（Legado 的 `book.origin`） */
+    origin?: string
+    kind?: string
+    intro?: string
+    /** 这份书源变量（`source.setVariable` 存的那一份） */
+    variable?: string
+    [key: string]: string | undefined
+}
+
+/** 当前这一章（Legado 的 `Chapter`）。`@js:` 里是 `chapter` */
+export interface ChapterContext {
+    /** 章节名（`chapter.title` 是语料里用得最多的那个） */
+    title?: string
+    /** 章节在目录里的序号 */
+    index?: number
+    url?: string
+    [key: string]: string | number | undefined
+}
+
 /** 求值上下文，对应 Legado 在 js 里暴露的那些全局变量 */
 export interface RuleContext {
     /**
@@ -57,8 +87,30 @@ export interface RuleContext {
     /** `@put` / `@get` 的变量表，跨规则传递 */
     vars?: Record<string, string>
 
-    /** 书籍信息，供 `{{book.xxx}}` 这类模板引用 */
-    book?: Record<string, string>
+    /**
+     * 当前这本书。`@js:` 规则里以 `book` 暴露（`book.name` / `book.author` / …）
+     *
+     * 线上用得很多：`book.name` 54 处 / 39 源、`book.author` 27 处 / 18 源、
+     * `book.bookUrl` 32 处 / 16 源、`book.origin` 13 处 / 10 源、`book.intro` 11 处 / 8 源。
+     * 而 `book` 在 `baseGlobals` 里以前是 `ctx.book ?? {}` —— 也就是说**没人给它赋过值**，
+     * 这些字段一直是 `undefined`：不报错，但 `'【' + book.name + '】'` 会拼出「【undefined】」。
+     * 这类静默错值比抛异常难查得多。
+     *
+     * 由**调用方**（`index.ts` 的路由）从客户端带上来的 `book` 参数填 —— 取书接口是无状态的，
+     * 引擎自己记不住「这一章属于哪本书」。
+     */
+    book?: BookContext
+
+    /** 当前这一章（`chapter.title` 32 处 / 30 源、`chapter.index` 4 处 / 4 源） */
+    chapter?: ChapterContext
+
+    /**
+     * 这本书已存的变量（`book.getVariable` 的初值，由上层从库里取）
+     *
+     * 与 `RuleContext.vars`（`java.put` / `java.get(k)` 那张按请求活的表）不是一回事，
+     * 与 `BookSource.variable` 也不是一回事 —— 三者的作用域分别是「这本书 / 这次请求 / 这个源」。
+     */
+    bookVars?: Record<string, string>
 
     /** 当前页码，模板 `{{page}}` 用 */
     page?: number
@@ -98,6 +150,23 @@ export interface RuleContext {
      * 调用方**应当等它写完**再返回响应：Worker 的响应一返回就掐掉还在飞的 promise。
      */
     persistSourceVariable?: (value: string) => void | Promise<void>
+
+    /**
+     * `book.putVariable(名字, 值)` / `chapter.putVariable(...)` 的落库路径
+     *
+     * 与书源变量是**两份不同的东西**，别合并：
+     *   - 书源变量（`source.setVariable(整串)`）是一段**自由字符串**，作用域是「这个源」
+     *   - 书的变量（`book.getVariable("custom")`）是**带名字的 map**，作用域是「这本书」
+     *
+     * 为什么书要留着自己那份：📂掌阅书城 / 📂就去看网 / 📂言情小说 的正文规则会
+     * **探一次规则形状**（试到第 i 个能解析出来），然后 `book.putVariable("序", i)`
+     * 记下来 —— 下一章再来时先读 `序`，就不必再探一遍。一章一次请求，所以它必须跨请求活着，
+     * 否则每章都重探一次（结果仍然对，只是白花 CPU 与上游请求）。
+     *
+     * 不注入时只活在本次请求里 —— 对上面那种「探测结果」来说是可接受的降级，
+     * 对 ⚡📂穿越小说 / ⚡📂小小阅读 那种**用户手填**的 `custom` 来说则本来就该是空串。
+     */
+    persistBookVariable?: (name: string, value: string) => void | Promise<void>
 
     /**
      * 发现页的筛选状态（Legado 的 `infoMap`）

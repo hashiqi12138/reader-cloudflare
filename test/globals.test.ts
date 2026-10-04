@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { sourceGlobals, sourceLimits, sourcePayload } from '../src/engine/globals'
+import { sourceGlobals, sourceLimits, sourcePayload, baseGlobals } from '../src/engine/globals'
 import type { BookSource, RuleContext } from '../src/engine/types'
 
 /**
@@ -126,5 +126,77 @@ describe('sourceLimits', () => {
         expect(
             sourceLimits(ctx({ source: { ...source, jsLib: '   \n ' } })).preludeJs,
         ).toBeUndefined()
+    })
+})
+
+/**
+ * `baseGlobals` 是**所有**沙箱求值共用的那一份全局
+ *
+ * 它以前在四个地方各写了一份（规则求值、`{{}}` 模板、URL 里的 `@js:`、发现页），
+ * 于是每加一个字段就要在四处补齐 —— 而漏掉一处**不会报错**，只会让那一处的书源
+ * 少看见一个全局（`book` 就是这样被漏掉的：`book.name` 54 处 / 39 源一直是 undefined）。
+ */
+describe('baseGlobals', () => {
+    it('book / chapter 缺省是空对象 —— 脚本里拼出来的是空串，而不是 undefined', () => {
+        const globals = baseGlobals(ctx())
+        expect(globals.book).toEqual({})
+        expect(globals.chapter).toEqual({})
+    })
+
+    it('book / chapter 有值时原样透传（书源靠它拿书名、作者、章节号）', () => {
+        const globals = baseGlobals(
+            ctx({
+                book: { name: '斗破苍穹', author: '天蚕土豆' },
+                chapter: { title: '第一章 陨落的天才', index: 0 },
+            }),
+        )
+        expect(globals.book).toEqual({ name: '斗破苍穹', author: '天蚕土豆' })
+        expect(globals.chapter).toEqual({ title: '第一章 陨落的天才', index: 0 })
+    })
+
+    it('key / page 是标量全局（与 `source.key` 那个「书源地址」不是一回事）', () => {
+        const globals = baseGlobals(ctx({ page: 3 }))
+        expect(globals.key).toBe('斗破')
+        expect(globals.page).toBe(3)
+    })
+
+    it('书的变量以 JSON 串注入 —— 那是沙箱里 `book.getVariable` 的初值', () => {
+        const globals = baseGlobals(ctx({ bookVars: { 序: '7' } }))
+        expect(JSON.parse(String(globals.__bookVars))).toEqual({ 序: '7' })
+    })
+
+    it('会话里写过的书变量**优先**于库里读到的那份（同一次请求内先写后读）', () => {
+        // 结构化地造一个会话：只要形状对，不需要真的实例化 QuickJS
+        const session = {
+            module: Promise.resolve(),
+            queue: Promise.resolve(),
+            vars: {},
+            bookVars: { 序: '3' },
+        } as unknown as RuleContext['sandbox']
+        const globals = baseGlobals(ctx({ bookVars: { 序: '7', 元: 'div' }, sandbox: session }))
+        expect(JSON.parse(String(globals.__bookVars))).toEqual({ 序: '3', 元: 'div' })
+    })
+
+    it('同时也带上 source / __sourceVars / __infoMap（两条求值路径共用同一份）', () => {
+        const globals = baseGlobals(ctx())
+        expect(globals.__source).not.toBeNull()
+        expect('__sourceVars' in globals).toBe(true)
+        expect(globals.__infoMap).toEqual({})
+    })
+})
+
+describe('sourceLimits 的两条落库路径', () => {
+    it('persistSourceVariable / persistBookVariable 都跟着上下文走', () => {
+        const a = () => {}
+        const b = () => {}
+        const limits = sourceLimits(ctx({ persistSourceVariable: a, persistBookVariable: b }))
+        expect(limits.persistSourceVariable).toBe(a)
+        expect(limits.persistBookVariable).toBe(b)
+    })
+
+    it('没注入时不传这两个键 —— 变量只活在本请求内，而不是抛错', () => {
+        const limits = sourceLimits(ctx())
+        expect('persistSourceVariable' in limits).toBe(false)
+        expect('persistBookVariable' in limits).toBe(false)
     })
 })

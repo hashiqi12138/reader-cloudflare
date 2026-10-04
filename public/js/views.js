@@ -10,6 +10,7 @@ import {
     api,
     append,
     claimAnonymous,
+    contextParams,
     coverNode,
     currentUser,
     el,
@@ -1743,9 +1744,26 @@ export async function viewBook(host) {
     let chapters = []
     let warning = null
     try {
-        info = await api(`/api/book?${paramsOf({ sourceId, url: target })}`)
+        // 地址里可能带着从搜索/书架点进来时的书名作者（见 `bookUrl`），先带上，
+        // 详情页算出来之后再补一份更准的 —— 规则里 `book.name` 54 处 / 39 源在用
+        const hint = {
+            name: route.get('name') ?? '',
+            author: route.get('author') ?? '',
+            bookUrl: target,
+        }
+        info = await api(`/api/book?${paramsOf({ sourceId, url: target, ...contextParams(hint) })}`)
         if (info.tocUrl) {
-            const toc = await api(`/api/toc?${paramsOf({ sourceId, url: info.tocUrl })}`)
+            const toc = await api(
+                `/api/toc?${paramsOf({
+                    sourceId,
+                    url: info.tocUrl,
+                    ...contextParams({
+                        name: info.name || hint.name,
+                        author: info.author || hint.author,
+                        bookUrl: target,
+                    }),
+                })}`,
+            )
             chapters = toc.chapters ?? []
             warning = toc.warning ?? null
         }

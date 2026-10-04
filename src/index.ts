@@ -52,9 +52,16 @@ import { bookmarkFileName, loadBookmarkRows, renderCsv, renderMarkdown } from '.
 import { parseReplaceRules, readReplaceRules, writeReplaceRules } from './data/replaceRules'
 import { buildHomeSections, readHomeCache, writeHomeCache } from './data/home'
 import { DataError, bookKey } from './data/types'
+import { loadBookVariables, saveBookVariable } from './data/bookVars'
 import { getOrCreateMediaSecret } from './data/settings'
 import { UnsupportedRuleError } from './engine/analyze'
-import { SOURCE_TYPE, type MediaLink, type RuleContext } from './engine/types'
+import {
+    SOURCE_TYPE,
+    type BookContext,
+    type ChapterContext,
+    type MediaLink,
+    type RuleContext,
+} from './engine/types'
 import { SandboxError, createSandboxSession, runInSandbox, type SandboxSession } from './engine/js'
 import { javaSurfaceSummary } from './engine/platform'
 import { parseHtml } from './engine/select'
@@ -151,6 +158,100 @@ function evalContext(
         baseUrl: source.bookSourceUrl,
         sandbox: sandbox ?? createSandboxSession(),
         persistSourceVariable: (value) => persistSourceVariable(db, source, value),
+    }
+}
+
+/**
+ * 读一个 JSON 形式的查询参数（前端把 `book` / `chapter` 序列化后带上来）
+ *
+ * 解析失败一律当「没传」：这是给书源规则用的上下文，缺了只会让规则少看见一个字段，
+ * 不该因此让整次取书失败（书源本来就要能容忍空上下文，见 `BookContext` 的说明）。
+ */
+function jsonParam(raw: string | undefined): Record<string, unknown> {
+    if (!raw) return {}
+    try {
+        const parsed: unknown = JSON.parse(raw)
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            return parsed as Record<string, unknown>
+        }
+    } catch {
+        /* 按没传处理 */
+    }
+    return {}
+}
+
+/**
+ * 从请求里取出「这本书」
+ *
+ * 书名 / 作者这类字段**引擎算不出来** —— 它求值 `ruleBookInfo` 时正在算的恰恰是这两个，
+ * 所以只能由客户端把它在搜索或详情页已经知道的那份带上来（`book` 参数，JSON）。
+ * `book.origin`（书源名）反过来由引擎补：客户端不知道它也无关紧要。
+ */
+function requestBookContext(
+    c: Context<{ Bindings: Env }>,
+    source: RegisteredSource,
+    fallbackBookUrl: string,
+): { bookUrl: string; book: BookContext } {
+    const raw = jsonParam(c.req.query('book'))
+    const book: BookContext = {}
+    for (const key of [
+        'name',
+        'author',
+        'kind',
+        'intro',
+        'coverUrl',
+        'latestChapterTitle',
+        'tocUrl',
+    ]) {
+        const value = raw[key]
+        if (typeof value === 'string' && value !== '') book[key] = value
+    }
+    const declared = typeof raw.bookUrl === 'string' && raw.bookUrl !== '' ? raw.bookUrl : ''
+    const bookUrl = declared !== '' ? declared : fallbackBookUrl
+    book.bookUrl = bookUrl
+    // 书源名由引擎补：语料里 `book.origin` 13 处 / 10 源在用（多源聚合时用来区分来源）
+    book.origin = source.bookSourceName
+    return { bookUrl, book }
+}
+
+/** 从请求里取出「这一章」（章节名 / 序号 / 地址）；没传返回 undefined */
+function requestChapterContext(c: Context<{ Bindings: Env }>): ChapterContext | undefined {
+    const raw = jsonParam(c.req.query('chapter'))
+    const chapter: ChapterContext = {}
+    if (typeof raw.title === 'string') chapter.title = raw.title
+    if (typeof raw.name === 'string') chapter.name = raw.name
+    if (typeof raw.url === 'string') chapter.url = raw.url
+    const index = Number(raw.index)
+    if (Number.isFinite(index)) chapter.index = index
+    return Object.keys(chapter).length > 0 ? chapter : undefined
+}
+
+/**
+ * 取书链路（详情 / 目录 / 正文）的求值上下文
+ *
+ * 在基础上下文上补三样：`book` / `chapter`（给 `book.name`、`chapter.title` 这些
+ * 54 + 32 处规则）、`bookVars`（`book.getVariable` 的初值，从库里读一次）、
+ * `persistBookVariable`（`book.putVariable` 的落库路径）。
+ *
+ * `book_key` 用**书籍地址**（不是这次请求的目录/章节地址）：书的变量属于「这本书」，
+ * 一章的地址每章都不同，拿它当键等于每章换一本书 —— 规则探测出来的抓取形状就传不到下一章。
+ */
+async function bookEvalContext(
+    c: Context<{ Bindings: Env }>,
+    source: RegisteredSource,
+    fallbackBookUrl: string,
+    sandbox?: SandboxSession,
+): Promise<RuleContext> {
+    const { bookUrl, book } = requestBookContext(c, source, fallbackBookUrl)
+    const chapter = requestChapterContext(c)
+    const key = bookKey(source.id, bookUrl)
+    const bookVars = await loadBookVariables(c.env.DB, key)
+    return {
+        ...evalContext(c.env.DB, source, sandbox),
+        book,
+        ...(chapter ? { chapter } : {}),
+        bookVars,
+        persistBookVariable: (name, value) => saveBookVariable(c.env.DB, key, name, value),
     }
 }
 
@@ -1165,7 +1266,7 @@ app.get('/api/book', async (c) => {
     if (!target) return c.json({ error: '缺少 url 参数' }, 400)
 
     try {
-        const info = await fetchBookInfo(source, target, evalContext(c.env.DB, source))
+        const info = await fetchBookInfo(source, target, await bookEvalContext(c, source, target))
         return c.json({ sourceId: source.id, ...info })
     } catch (err) {
         return fail(c, err)
@@ -1201,7 +1302,7 @@ app.get('/api/toc', async (c) => {
         const { chapters, warning } = await fetchChapters(
             source,
             target,
-            evalContext(c.env.DB, source),
+            await bookEvalContext(c, source, target),
         )
         return c.json({
             sourceId: source.id,
@@ -1348,7 +1449,11 @@ app.get('/api/content', async (c) => {
     if (!target) return c.json({ error: '缺少 url 参数' }, 400)
 
     try {
-        const content = await fetchChapterContent(source, target, evalContext(c.env.DB, source))
+        const content = await fetchChapterContent(
+            source,
+            target,
+            await bookEvalContext(c, source, target),
+        )
         const head = { sourceId: source.id, url: target, kind: content.kind }
 
         switch (content.kind) {

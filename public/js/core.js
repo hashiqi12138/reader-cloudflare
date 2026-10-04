@@ -63,6 +63,37 @@ export const paramsOf = (obj) => {
     return search.toString()
 }
 
+/** 去掉空值（undefined / null / 空串）；全空时返回 null */
+function compactObject(obj) {
+    if (!obj) return null
+    const out = {}
+    for (const [key, value] of Object.entries(obj)) {
+        if (value === undefined || value === null || value === '') continue
+        out[key] = value
+    }
+    return Object.keys(out).length > 0 ? out : null
+}
+
+/**
+ * 取书接口（/api/book、/api/toc、/api/content）要带的 `book` / `chapter` 参数
+ *
+ * 这两样**只有客户端知道**：引擎求值 `ruleBookInfo` 时正在算的就是书名与作者，
+ * 章节名与序号同理。而书源规则里偏偏用得很密 —— `book.name` 54 处 / 39 源、
+ * `chapter.title` 32 处 / 30 源、`book.author` 27 处 / 18 源。
+ * 不带上去的话那些规则拿到的是空串（以前是 undefined，会拼出「【undefined】」）。
+ *
+ * 全空的字段直接省掉：服务端把「没传」与「传了空串」当同一件事处理，多传无益。
+ * `index` 为 0 是有效值，别被当作空（`compactObject` 只滤 undefined/null/空串）。
+ */
+export const contextParams = (book, chapter) => {
+    const out = {}
+    const b = compactObject(book)
+    if (b) out.book = JSON.stringify(b)
+    const c = compactObject(chapter)
+    if (c) out.chapter = JSON.stringify(c)
+    return out
+}
+
 export const go = (hash) => {
     if (location.hash === hash) return
     location.hash = hash

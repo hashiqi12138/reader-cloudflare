@@ -16,7 +16,7 @@
 import { applyAllInOne, applyRegexOps, splitRegexChain } from './regex'
 import { UnsupportedRuleError, type RuleContext, type RuleResult } from './types'
 import { parseJsoupRule } from './jsoup'
-import { sourceGlobals, sourceLimits } from './globals'
+import { baseGlobals, sourceLimits } from './globals'
 import { extractValues, parseHtml, reparseFragment, selectNodes } from './select'
 import { jsonPathToStrings } from './jsonpath'
 import { runInSandbox, sandboxResultToString, sandboxResultToStrings } from './js'
@@ -818,17 +818,6 @@ function sandboxLimits(sel: Selection, ctx: RuleContext): SandboxLimits {
         getString: sandboxGetString(sel, ctx),
         getElements: sandboxGetElements(sel, ctx),
         ...sourceLimits(ctx),
-    }
-}
-
-function baseGlobals(ctx: RuleContext): Record<string, unknown> {
-    return {
-        baseUrl: ctx.baseUrl,
-        book: ctx.book ?? {},
-        key: ctx.key ?? '',
-        page: ctx.page ?? 1,
-        // `source` / `infoMap` 在沙箱预置里由这几个变量组装（见 engine/globals.ts）
-        ...sourceGlobals(ctx),
     }
 }
 

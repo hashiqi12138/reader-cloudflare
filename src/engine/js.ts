@@ -129,6 +129,18 @@ export interface SandboxSession {
      * 不经过这张表。
      */
     vars: Record<string, string>
+    /**
+     * **书的变量**：`book.putVariable(名字, 值)` / `book.getVariable(名字)` 用这一张
+     *
+     * 与上面 `vars` 的区别是**作用域**：这一张属于「这本书」，落库在 `book_variables`
+     * 表上（见 `collectBookVars`），并且**下一次求值的起点就是它** —— 一章一次请求，
+     * 「探测出来的规则形状」必须跨请求留住，否则下一章要重探一遍。
+     *
+     * 会话里也留一份，是为了同一次请求内的**跨求值**：一次规则求值跑完 VM 就销毁，
+     * 后一次求值的 `__bookVarsOut` 是从这里 + `RuleContext.bookVars` 重新组装的
+     * （见 engine/globals.ts 的 bookVars）。
+     */
+    bookVars: Record<string, string>
 }
 
 export function createSandboxSession(): SandboxSession {
@@ -142,6 +154,7 @@ export function createSandboxSession(): SandboxSession {
         },
         queue: Promise.resolve(),
         vars: {},
+        bookVars: {},
     }
 }
 
@@ -186,6 +199,21 @@ const JAVA_PRELUDE = `
 var __varsOut = (function () {
   try { return JSON.parse(String(globalThis.__sourceVars || '{}')) || {} } catch (e) { return {} }
 })()
+
+// ---------------------------------------------------------------- 书的变量
+//
+// book.putVariable(名字, 值) / book.getVariable(名字)（以及 chapter 上的同名方法）
+// 读写的这张表 —— 与上面那张会话变量表分开，因为它**跨请求**：语料里
+// 📂掌阅书城 / 📂就去看网 / 📂言情小说 的正文规则会探一次「第几个选择器能解析出来」，
+// 再 book.putVariable('序', i) 记下来，下一章先读它、就不必重探。
+//
+// 起点是库里存的那一份（宿主每次求值注入 __bookVars），下面 __bookVarsDirty 只记
+// **这次求值写过的名字** —— 没写过的原名回传没有意义，全量写回还会多打几条 UPDATE。
+// 注意：这一段是模板字符串的一部分，注释里**不能写反引号**。
+var __bookVarsOut = (function () {
+  try { return JSON.parse(String(globalThis.__bookVars || '{}')) || {} } catch (e) { return {} }
+})()
+var __bookVarsDirty = {}
 
 /**
  * 给一个对象挂上 Legado 的 StrResponse 方法（body / code / statusCode / header(s) / url / raw）
@@ -753,6 +781,71 @@ function __toJavaMap(text) {
   return out
 }
 
+// ---------------------------------------------------------------- book / chapter
+//
+// 当前这本书与这一章。宿主每次求值把客户端带上来的那份 JSON 注进来
+// （见 engine/globals.ts 的 baseGlobals），这里只挂上变量读写。
+//
+// 语料上它们是**用得最多的一组上下文**：book.name 54 处 / 39 源、book.author 27/18、
+// book.bookUrl 32/16、book.origin 13/10、chapter.title 32/30、chapter.index 4/4。
+// 在此之前 ctx.book 从来没人赋过值，于是 '【' + book.name + '】' 拼出「【undefined】」
+// —— 不报错，只是结果不对，比抛异常难查得多。
+var book = (function () {
+  var data = globalThis.book || {}
+  var obj = {}
+  for (var k in data) obj[k] = data[k]
+  // 名字/地址这类标量**总是**给字符串：书源里普遍直接拼（'【' + book.name + '】'），
+  // 给 undefined 会拼出字面量 "undefined"，给 null 更糟（'null'）。
+  if (obj.name === undefined || obj.name === null) obj.name = ''
+  if (obj.author === undefined || obj.author === null) obj.author = ''
+  if (obj.bookUrl === undefined || obj.bookUrl === null) obj.bookUrl = ''
+  if (obj.origin === undefined || obj.origin === null) obj.origin = ''
+  // book.getVariable(name) 读这本书的变量（Legado 的 Book.getVariable）。
+  // 语料里 14 处全是**带名字**的（book.getVariable("custom") / ("bid")），
+  // 没有无参写法 —— 无参给空串，绝不回整张表的 JSON。
+  obj.getVariable = function (name) {
+    var v = __bookVarsOut[String(name)]
+    return v === undefined || v === null ? '' : String(v)
+  }
+  // book.putVariable(name, value) 写这本书的变量（语料 20 处，全部两参）。
+  // 写进 __bookVarsOut 供同一次请求后面的规则立刻读到，同时记进 __bookVarsDirty
+  // 交给宿主落库（见 collectBookVars）—— 一章一次请求，不落库就要每章重探一次。
+  obj.putVariable = function (name, value) {
+    var key = String(name)
+    var text = value === undefined || value === null ? '' : String(value)
+    __bookVarsOut[key] = text
+    __bookVarsDirty[key] = text
+  }
+  // 别名：Legado 的 Book 上没有这两个，但书源里偶有 get/put 写法，给它们不至于报错
+  obj.get = obj.getVariable
+  obj.put = obj.putVariable
+  obj.setVariable = obj.putVariable
+  obj.getVariableMap = function () { return __bookVarsOut }
+  obj.putVariableMap = function (map) {
+    if (!map) return
+    for (var k in map) obj.putVariable(k, map[k])
+  }
+  return obj
+})()
+
+// 当前这一章（chapter.title 32 处 / 30 源、chapter.index 4 处 / 4 源）
+//
+// 章节变量与书的变量**共用一张表**：Legado 里 Chapter 也有自己的一张，但语料里
+// chapter.getVariable 是 0 处、只有 📂就去看网 / 📂言情小说 写 chapter.putVariable("next", …)
+// （而且读回来用的是 java.get("next")，不是 chapter.getVariable）。各自一张的话，
+// 写进去的值没有任何人能读到；共表既不报错，也顺带让它跨请求留住。
+var chapter = (function () {
+  var data = globalThis.chapter || {}
+  var obj = {}
+  for (var k in data) obj[k] = data[k]
+  if (obj.title === undefined || obj.title === null) obj.title = ''
+  if (obj.name === undefined || obj.name === null) obj.name = obj.title
+  obj.getVariable = function (name) { return book.getVariable(name) }
+  obj.putVariable = function (name, value) { book.putVariable(name, value) }
+  obj.getVariableMap = function () { return book.getVariableMap() }
+  return obj
+})()
+
 // ---------------------------------------------------------------- source
 
 var source = (function () {
@@ -1287,6 +1380,15 @@ export interface SandboxLimits {
      * 不注入时书源变量只活在本请求内 —— 「设置成功、下次进来又没了」。
      */
     persistSourceVariable?: (value: string) => void | Promise<void>
+    /**
+     * `book.putVariable(名字, 值)`（含 `chapter.putVariable`）的落库路径
+     *
+     * 与 `persistSourceVariable` 是**两条不同的路**：那一条写的是书源自己的一段
+     * 自由字符串（作用域=源），这一条写的是「这本书」的名字→值表。
+     * 不注入时书的变量只活在本请求内 —— 对「探一次规则形状、下一章读回来」那种
+     * 用法是可接受的降级（每章重探一次），对用户手填的 `custom` 反而更接近本意。
+     */
+    persistBookVariable?: (name: string, value: string) => void | Promise<void>
 }
 
 /**
@@ -1696,6 +1798,7 @@ async function executeInSandbox(
         // 全靠这一步跨过两次求值（见 SandboxSession.vars）
         collectSourceVars(vm, session)
         await collectSourceVariable(vm, limits)
+        await collectBookVars(vm, session, limits)
         releaseHostBridge(vm, runtime)
     }
 }
@@ -2016,6 +2119,47 @@ async function collectSourceVariable(
         handle.value.dispose()
         if (dumped === null || dumped === undefined) return
         await limits.persistSourceVariable(String(dumped))
+    } catch {
+        /* 落库失败不影响这次求值的结果（书源那侧已经拿到它要的值了） */
+    }
+}
+
+/**
+ * 把这次求值里写过的**书的变量**交给上层落库
+ *
+ * 读取端是预置脚本里的 `globalThis.__bookVarsDirty`：`book.putVariable(名字, 值)`
+ * 每写一次就记一笔。只写改动过的名字 —— 与书源变量那条「整串覆盖」不同，
+ * 这里是**一张按名字索引的表**，把没动过的名字原样回传没有意义，还会多打几条 UPDATE。
+ *
+ * 为什么要落库：📂掌阅书城 / 📂就去看网 / 📂言情小说 的正文规则会先探「第几个选择器
+ * 能解析出来」，再 `book.putVariable("序", i)` 记下 —— 一章一次请求，下一章先读 `序`
+ * 就不必重探。不落库的话每章都要重探一遍：结果仍然对，只是白花 CPU 与上游请求。
+ *
+ * 与 `collectSourceVariable` 一样：只有上层给了落库路径才做（`RuleContext.persistBookVariable`），
+ * 落库**要等**（调用方 await）—— 响应一返回，Worker 会掐掉还在飞的 promise。
+ * 任何一步失败都只能咽掉：结果或错误都已经定了，这里再抛一个只会盖掉真正的失败原因。
+ */
+async function collectBookVars(
+    vm: QuickJSAsyncContext,
+    session: SandboxSession,
+    limits: SandboxLimits,
+): Promise<void> {
+    const persist = limits.persistBookVariable
+    try {
+        const handle = vm.evalCode('JSON.stringify(globalThis.__bookVarsDirty || {})')
+        if (handle.error) {
+            handle.error.dispose()
+            return
+        }
+        const text = String(vm.dump(handle.value) ?? '')
+        handle.value.dispose()
+        const parsed = JSON.parse(text) as Record<string, unknown>
+        for (const name of Object.keys(parsed)) {
+            const value = String(parsed[name] ?? '')
+            // 先落到会话：同一次请求里后面的求值要立刻读到（跨请求的那一份走 persist）
+            session.bookVars[name] = value
+            if (persist) await persist(name, value)
+        }
     } catch {
         /* 落库失败不影响这次求值的结果（书源那侧已经拿到它要的值了） */
     }

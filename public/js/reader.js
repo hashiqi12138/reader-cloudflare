@@ -24,6 +24,7 @@ import {
     currentUser,
     el,
     go,
+    contextParams,
     PAPERS,
     PAPER_LABELS,
     paramsOf,
@@ -75,9 +76,24 @@ export async function viewRead(host) {
     const cacheKey = `${sourceId}\n${bookUrl}`
     if (bookCache?.key !== cacheKey) {
         try {
-            const info = await api(`/api/book?${paramsOf({ sourceId, url: bookUrl })}`)
+            // 书名/作者先用手上有的（搜索结果带在地址里的 name/author），
+            // 详情页算出来之后再补 —— 规则里 `book.name` 用得很多，空着会拼出「【】」
+            const hint = { name: nameHint, author: authorHint, bookUrl }
+            const info = await api(
+                `/api/book?${paramsOf({ sourceId, url: bookUrl, ...contextParams(hint) })}`,
+            )
             const tocUrl = info.tocUrl || bookUrl
-            const toc = await api(`/api/toc?${paramsOf({ sourceId, url: tocUrl })}`)
+            const toc = await api(
+                `/api/toc?${paramsOf({
+                    sourceId,
+                    url: tocUrl,
+                    ...contextParams({
+                        name: info.name || nameHint,
+                        author: info.author || authorHint,
+                        bookUrl,
+                    }),
+                })}`,
+            )
             bookCache = {
                 key: cacheKey,
                 sourceId,
@@ -279,7 +295,18 @@ export async function viewRead(host) {
     // ---- 取正文 ----
     let content
     try {
-        content = await api(`/api/content?${paramsOf({ sourceId, url: chapter.url })}`)
+        content = await api(
+            `/api/content?${paramsOf({
+                sourceId,
+                url: chapter.url,
+                // 正文规则是「书 context」用得最重的一处：`book.name` / `book.bookUrl`
+                // 要用来拼地址，`book.getVariable("序")` 要跨章记住探测出来的抓取形状
+                ...contextParams(
+                    { name: book.name, author: book.author, bookUrl },
+                    { title: chapter.name, index, url: chapter.url },
+                ),
+            })}`,
+        )
     } catch (err) {
         body.replaceChildren(
             alertBox('error', '正文取不到', err.message),

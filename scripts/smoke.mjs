@@ -3888,6 +3888,133 @@ console.log('\n=== 22. 书源变量跟着书源走（source.getVariable / setVar
     check(!left.some((s) => s.id === idA || s.id === idB), '书源变量测试源已清理')
 }
 
+console.log('\n=== 23. 书的上下文与书的变量（book.* / chapter.* / book.putVariable） ===')
+{
+    /**
+     * 取书链路（详情 / 目录 / 正文）以前**从来没有把「这本书 / 这一章」交给沙箱**：
+     * `ctx.book` 没有任何调用方赋过值。于是书源里 `book.name`（54 处 / 39 源）、
+     * `book.author`（27 / 18）、`chapter.title`（32 / 30）拿到的一直是 undefined ——
+     * `'【' + book.name + '】'` 拼出「【undefined】」，不报错，只是结果不对。
+     *
+     * 另一样是**书的变量**：`book.putVariable(名字, 值)`（20 处）/ `book.getVariable(名字)`
+     * （14 处）是一张按名字索引的表，作用域是「这本书」，与第 22 段那条「书源自己的整串
+     * 变量」是两份东西。📂掌阅书城 / 📂就去看网 / 📂言情小说 的正文规则靠它把
+     * 「第几个选择器能解析出正文」记给下一章 —— 一章一次请求，不落库就要每章重探一遍。
+     *
+     * 这一段的断言**跨请求**：三次调用（详情 → 正文 → 详情）是三个独立的 Worker 请求，
+     * 第一次写下的变量必须在第三次还读得到；同时又必须在**另一本书**上读不到
+     * —— 只测「写进去能读出来」的话，「存在全局」这种错法也能蒙过去。
+     */
+    const id = `user:${BASE}`
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+
+    // 每次运行换一个书籍地址：书的变量按「书源 id + **书籍**地址」落库，
+    // 固定地址会让上一次运行的残留把 BEFORE 断言弄飘（只有真读库才看得出来的坑）
+    const run = Date.now()
+    const BOOK = `${BASE}/fixture/book/1?run=${run}`
+    const BOOK2 = `${BASE}/fixture/book/2?run=${run}`
+    const bookParam = JSON.stringify({ name: '变量之书', author: '作者乙', bookUrl: BOOK })
+    const book2Param = JSON.stringify({ name: '另一本书', author: '作者丙', bookUrl: BOOK2 })
+
+    await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: '书的上下文测试源',
+                bookSourceUrl: BASE,
+                ruleBookInfo: {
+                    // 一次求值里同时验：上下文可见、`book.bookUrl` 是**书**的地址（不是这次请求
+                    // 的地址）、`origin` 由引擎补，以及「写进变量之后立刻读得到」
+                    name:
+                        `@js:(function(){var b=book.getVariable('序');book.putVariable('序','7');` +
+                        `return ['NAME='+book.name,'AUTHOR='+book.author,` +
+                        `'URL='+(book.bookUrl==='${BOOK}'?'OK':'BAD'),'ORIGIN='+book.origin,` +
+                        `'BEFORE='+b,'AFTER='+book.getVariable('序')].join('|')})()`,
+                    // 与上面是**两次求值**：读到的是同一个请求里刚写下的值（会话内跨求值）
+                    author: "@js:'SAME=' + book.getVariable('序')",
+                    // 空 tocUrl → 目录地址就是书籍地址（这一段不测目录）
+                    tocUrl: '',
+                },
+                ruleToc: {
+                    chapterList: '@css:div.chapter-list li',
+                    chapterName: '@css:a@text',
+                    chapterUrl: '@css:a@href',
+                },
+                ruleContent: {
+                    // 章节上下文 + 跨请求读变量 + `chapter.putVariable` 不报错（与 book 共用一张表）
+                    content:
+                        "@js:(function(){chapter.putVariable('next','NEXT-OK');" +
+                        "return ['TITLE='+chapter.title,'INDEX='+chapter.index," +
+                        "'VAR='+book.getVariable('序'),'CHAPTER='+book.getVariable('next')].join('|')})()",
+                },
+            },
+        ]),
+    )
+
+    const qs = (extra) => new URLSearchParams({ sourceId: id, ...extra }).toString()
+
+    // ① 详情页：这本书还没有任何变量
+    const first = await getJson(`/api/book?${qs({ url: BOOK, book: bookParam })}`)
+    const firstName = String(first.json?.name ?? '')
+    check(
+        firstName.includes('NAME=变量之书') &&
+            firstName.includes('AUTHOR=作者乙') &&
+            firstName.includes('URL=OK') &&
+            firstName.includes('ORIGIN=书的上下文测试源') &&
+            firstName.includes('BEFORE=') &&
+            firstName.includes('AFTER=7'),
+        'book.name / book.author / book.bookUrl / book.origin 都交给了沙箱（以前是 undefined）',
+        firstName || first.text.slice(0, 120),
+    )
+    check(
+        String(first.json?.author ?? '') === 'SAME=7',
+        '同一个请求里的**下一次求值**读得到刚写的书变量（会话内跨求值）',
+        String(first.json?.author ?? ''),
+    )
+
+    // ② 正文：章节上下文可见 + 书的变量跨请求读回来 + chapter.putVariable 可用
+    const content = await getJson(
+        `/api/content?${qs({
+            url: `${BASE}/fixture/chapter/1/1`,
+            book: bookParam,
+            chapter: JSON.stringify({ title: '第一章 起风了', index: 0 }),
+        })}`,
+    )
+    const contentText = String(content.json?.content ?? '')
+    check(
+        ['TITLE=第一章 起风了', 'INDEX=0', 'VAR=7', 'CHAPTER=NEXT-OK'].every((part) =>
+            contentText.includes(part),
+        ),
+        '正文规则里 chapter.title / chapter.index 可见、书的变量跨请求读得到、chapter.putVariable 不报错',
+        contentText || content.text.slice(0, 120),
+    )
+
+    // ③ **换一个请求**再读详情：这一步才是「落库」的证明
+    const again = await getJson(`/api/book?${qs({ url: BOOK, book: bookParam })}`)
+    const againName = String(again.json?.name ?? '')
+    check(
+        againName.includes('BEFORE=7') && againName.includes('AFTER=7'),
+        '下一次请求仍然读得到（书的变量真的落库了，不是只活在请求里）',
+        againName || again.text.slice(0, 120),
+    )
+
+    // ④ 另一本书读不到：变量挂在**这本书**上，不是全局
+    const other = await getJson(`/api/book?${qs({ url: BOOK2, book: book2Param })}`)
+    const otherName = String(other.json?.name ?? '')
+    check(
+        otherName.includes('NAME=另一本书') && otherName.includes('BEFORE='),
+        '另一本书读不到这本书的变量（作用域是「这本书」，不是全局）',
+        otherName || other.text.slice(0, 120),
+    )
+
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(id)}`)
+    const left = (await getJson('/api/sources')).json?.sources ?? []
+    // 书的变量行会留在库里（没有删它的接口），键是「书源 id + 书籍地址」，
+    // 而书籍地址每次运行都不同，所以不会影响下一次运行的断言
+    check(!left.some((s) => s.id === id), '书的上下文测试源已清理')
+}
+
 console.log('\n=== 结果 ===')
 if (failures.length === 0) {
     console.log(

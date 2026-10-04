@@ -110,15 +110,55 @@ function sessionVars(ctx: RuleContext): Record<string, string> {
 }
 
 /**
+ * 这本书的变量（`book.getVariable` / `book.putVariable`）
+ *
+ * 与书源变量（`source.getVariable()`，见 `sourcePayload`）分开放，因为它们是两份东西：
+ *   - 书源变量：一段**自由字符串**，作用域是「这个源」，起点空串
+ *   - 书的变量：**名字 → 值**的一张表，作用域是「这本书」，起点空表
+ *
+ * 会话里存过的那一份**优先**：同一次请求里正文规则刚 `book.putVariable("序", i)` 写过的，
+ * 同一个源后面的规则要立刻读得到（📂掌阅书城 就是「先读 `序`，为空才探一次并写回」）。
+ */
+function bookVars(ctx: RuleContext): Record<string, string> {
+    const session = ctx.sandbox as { bookVars?: Record<string, string> } | undefined
+    return { ...(ctx.bookVars ?? {}), ...(session?.bookVars ?? {}) }
+}
+
+/**
+ * **所有**沙箱求值共用的那一组全局变量
+ *
+ * 它以前在四个地方各写了一份（规则求值、`{{}}` 模板、URL 里的 `@js:`、发现页），
+ * 于是每加一个字段就要在四处补齐 —— 而漏掉一处**不会报错**，只会让那一处的书源
+ * 少看见一个全局。`book` 就是被这样漏掉的：`baseGlobals` 里写着 `ctx.book ?? {}`，
+ * 但**没有任何调用方给 ctx.book 赋过值**，于是 `book.name` 54 处 / 39 源、
+ * `chapter.title` 32 处 / 30 源一直是 `undefined` ——
+ * `'【' + book.name + '】'` 拼出「【undefined】」，不报错，只是结果不对。
+ */
+export function baseGlobals(ctx: RuleContext): Record<string, unknown> {
+    return {
+        baseUrl: ctx.baseUrl,
+        book: ctx.book ?? {},
+        chapter: ctx.chapter ?? {},
+        key: ctx.key ?? '',
+        page: ctx.page ?? 1,
+        // `source` / `sourceVars` / `infoMap` 在沙箱预置里由这几个变量组装
+        ...sourceGlobals(ctx),
+        // 书的变量单独走一路：它要落库（见 collectBookVars），而会话变量只活一次请求
+        __bookVars: JSON.stringify(bookVars(ctx)),
+    }
+}
+
+/**
  * 沙箱资源上限里与书源有关的部分
  *
- * 三样都要跟着上下文走，缺一样都会让整类书源表现异常：
+ * 四样都要跟着上下文走，缺一样都会让整类书源表现异常：
  *   - `preludeJs`：书源自带的 JS 库（那些源里的 `GetUL()` / `host()` 全来自它）
- *   - `session`：本次请求的沙箱会话（模块实例、会话变量表）
+ *   - `session`：本次请求的沙箱会话（模块实例、会话变量表、书的变量）
  *   - `persistSourceVariable`：`source.setVariable(整串)` 的落库路径（上层注入）
+ *   - `persistBookVariable`：`book.putVariable(名字, 值)` 的落库路径（上层注入）
  *
  * 放这里而不是各自的调用点：analyze 的规则求值、`resolveTemplate` 的 `{{}}` 模板、
- * `buildPlan` 的 URL 脚本三条路都要它，各写一遍必然有一处漏掉 —— 而漏掉的表现是
+ * `buildPlan` 的 URL 脚本几条路都要它，各写一遍必然有一处漏掉 —— 而漏掉的表现是
  * 「书源里设置成功、下次进来又没了」，很难往这上面想。
  */
 export function sourceLimits(ctx: RuleContext): SandboxLimits {
@@ -129,5 +169,6 @@ export function sourceLimits(ctx: RuleContext): SandboxLimits {
         // 这里换回 SandboxSession 的具体类型，形状本就一致，只是 `module` 的泛型更精确
         ...(ctx.sandbox ? { session: ctx.sandbox as SandboxSession } : {}),
         ...(ctx.persistSourceVariable ? { persistSourceVariable: ctx.persistSourceVariable } : {}),
+        ...(ctx.persistBookVariable ? { persistBookVariable: ctx.persistBookVariable } : {}),
     }
 }
