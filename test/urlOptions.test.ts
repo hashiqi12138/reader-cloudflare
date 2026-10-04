@@ -34,7 +34,9 @@ describe('splitUrlAndOptions', () => {
     })
 
     it('`\\t` 与多个空格同样算空白', () => {
-        expect(splitUrlAndOptions('https://a.com/, \t {"charset":"gbk"}').url).toBe('https://a.com/')
+        expect(splitUrlAndOptions('https://a.com/, \t {"charset":"gbk"}').url).toBe(
+            'https://a.com/',
+        )
         expect(splitUrlAndOptions('https://a.com/, \t {"charset":"gbk"}').options).toEqual({
             charset: 'gbk',
         })
@@ -57,7 +59,9 @@ describe('splitUrlAndOptions', () => {
     })
 
     it('带可选段又带选项时，只认后面那个逗号', () => {
-        const out = splitUrlAndOptions('https://a.com/list/<,index_{{page}}.html>, {"method":"GET"}')
+        const out = splitUrlAndOptions(
+            'https://a.com/list/<,index_{{page}}.html>, {"method":"GET"}',
+        )
         expect(out.url).toBe('https://a.com/list/<,index_{{page}}.html>')
         expect(out.options).toEqual({ method: 'GET' })
     })

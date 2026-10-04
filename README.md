@@ -2573,18 +2573,160 @@ SHA-1/256/384/512 走 `crypto.subtle`；HMAC 同理。沙箱里只有一个 `jav
 （这一轮又踩了一次同一个坑：预置是拼进 `JAVA_PRELUDE` 模板字符串的，
 注释里**不能出现反引号与 `${`**。同一条约束在表生成器里也再钉了一遍。）
 
+### 第三十三轮：`source.getKey()` 给的是「搜索词」—— 顺手拔出来的三笔老账
+
+这一轮本来是去修两个「线上在用、引擎只会说 `not a function`」的形状
+（`java.connect(...).raw().request().url()` 与 `result.toArray()`）。
+写端到端断言时先撞上的却是**第三个、也是最大的一个**：
+
+**一、`source.getKey()` 必须是书源地址，不是搜索词。**
+
+`source.getKey()` / `source.key` 以前返回的是**本次搜索的关键字**。而全量 816 条源里
+**122 个源、206 处**把它们当**站点地址**用：
+
+| 用法                                                   | 域里的例子                                 | 拿到搜索词之后               |
+| ------------------------------------------------------ | ------------------------------------------ | ---------------------------- |
+| `source.getKey() + "/search.html"`                     | 📂天悦小说                                 | 拼出 `斗破苍穹/search.html`  |
+| `java.connect(source.getKey())`（写进 searchUrl 模板） | 📂八一中文 / ⚡📂三五中文 / ⚡📂香书小说 … | 去连一个叫「斗破苍穹」的主机 |
+| `java.ajax(source.key)`                                | ⚡📂九九藏书 / 📂冰清阁小说 / ⚡📂全本小说 | 请求一个搜索词               |
+| `cookie.removeCookie(source.getKey())`                 | 📂一本阁 / 📂小书本网 / 🔞爱丽丝书屋 …     | 清的是另一个 key，等于没清   |
+| `` `${source.bookSourceName}::${source.getKey()}` ``   | 🏷七猫小说                                  | 书源的身份不再是身份         |
+| `if (/xmxsapp/.test(source.getKey()))`                 | ⚡📂星空小说                               | 按域名的分支永远走 else      |
+
+它们在 Legado 那边都对：`BaseSource.getKey()` 返回的就是 `bookSourceUrl`
+（书源的身份、cookie 与缓存的 tag 都用它）；**搜索词是单独的 `key` 全局**。
+所以修法就是把 `sourcePayload` 里那个 `key` 换成 `bookSourceUrl`，并把那个
+「从上下文拿搜索词」的参数一并删掉 —— 搜索词本来就有 `{{key}}` / `@js:key` 这条正路。
+
+**为什么它藏了这么久**：把它当搜索词时，绝大多数写法**不报错** ——
+`source.key + "/search.html"` 只是拼出一个不像地址的地址，`java.ajax` 去请求它、
+失败信息指向「站点」，书源本身看着毫无问题。只有 `java.connect` 那 9 处会当场炸。
+
+**二、`java.connect(url)` 返回的是 Legado 的 `StrResponse`**（22 源 / 27 处）。
+
+旧实现是个**错的模型**：`connect(url).header(k,v).get().body()` —— 那是 Jsoup 的
+HTTP 客户端，不是 Legado 的 `connect`。新实现按真实形状给：
+
+| 脚本里的写法                | 说明                                                                        |
+| --------------------------- | --------------------------------------------------------------------------- |
+| `res.url()`                 | 请求地址（`AnalyzeUrl` 解析后的绝对地址）                                   |
+| `res.body()` / `res.code()` | 正文 / 状态码                                                               |
+| `res.isSuccessful()`        | 2xx                                                                         |
+| `res.raw().request().url()` | 同一个地址（OkHttp 的形状）                                                 |
+| `res.raw().headers(name)`   | 响应头，**数组**（`Set-Cookie` 靠它，📂天籁小说 整条 searchUrl 就是干这个） |
+
+三处刻意的取舍：
+
+- **「取地址」不发请求。** `url()` 与 `raw().request().url()` 走一条**同步桥**解析地址
+  （`AnalyzeUrl` 也是在发请求之前就把地址定下来的）。9 个只在 URL 模板里取地址的源
+  （`{{java.connect(source.getKey()).raw().request().url()}}…`）不必为一个地址多打一次网络。
+- **真要 `body()` / `code()` / `raw().headers()` 时才发那一次，且只发一次**（结果缓存）。
+  冒烟里用「测试站点每次请求回一个不同的随机串」来钉住这一点：`r.body() === r.body()`
+  对，说明两次读的是同一份缓存。
+- **HTTP 非 2xx 不抛错。** 书源用 `res.code() == 403` 决定要不要换 cookie，抛错等于把
+  「判断」变成「异常」。为此在取网层拆出 `fetchDetailed`（非 2xx 不抛、把状态码与响应头
+  一起交出来），而 `fetchText` 保持原样 —— 搜索 / 目录 / 正文那条路仍然「不是 2xx 就是失败」。
+- 上游失败时 `raw` 是 `null`（脚本随即 NPE），这里始终给一个形状完整的对象、`headers()`
+  取不到就给空数组。另外 header 参数上游只收 JSON 字符串，📚聚合书库 传的是对象，两种都收。
+
+**三、`result.toArray()`**（jsoup 的 `Elements.toArray()`，20 源 / 28 处）。
+
+要动的地方比想象的多，因为「`result` 该是什么」其实是**两件事**，以前挤在一个判据里：
+
+| 问题                                  | 判据                                    | 结论                                                           |
+| ------------------------------------- | --------------------------------------- | -------------------------------------------------------------- |
+| 绑成**数组**还是**字符串**            | `wantsJsoupResult`（字符串写法优先）    | 两种写法混写时绑**字符串**（只有盒装字符串能同时满足两种）     |
+| 交给脚本的是**节点 HTML**还是**文本** | `usesJsoupOnResult`（只要调了节点方法） | **给 HTML** —— 调了 `attr` / `select` / `toArray` 就说明要标记 |
+
+拆开之后修了三处：
+
+- `RESULT_AS_JSOUP` 补上 `toArray`（漏认的后果是「把节点集当纯文本」，然后在
+  `result.toArray` 上 `not a function`；📂文学小说 的 `list = result.toArray()` 就是这一条）
+- 沙箱包装器补 `toArray`：数组形态的 Elements 返回**纯数组**，因为 📂文学小说 用
+  `for (i in list)` 遍历它 —— 返回带附加方法的那个数组，`for...in` 会把集合级方法名
+  一起枚举出来，`html += list[i]` 就把**函数源码**拼进了正文里
+- `<js>` 块那条路（不是 `@js:` 尾巴）以前**不看脚本要什么**，一律给默认取值（文本）。
+  6 条「海马书屋」形状的目录规则（`class.BCsectionTwo-top-chapter@li\n<js>…</js>\ntag.a`）
+  就在这条路上，`result.toArray()` 只能解析一堆纯文本，得到**空数组** —— 不报错，只是目录空了
+
+**四、顺手带出来的第四笔：`search.php, {` 里的那个空格。**
+
+上面三处修完，⚡📂书趣阁 报的是「请求超时 `http://wap.xshuquge.net/search.php,%20%7B%22method%22…`」
+—— 选项段被当成 URL 的一部分、被 `new URL()` 百分号编码进了路径。
+起因是拆选项的分界只认**紧贴**的 `,{`，而书源里 `, {`（逗号后有空格或换行）
+有 **407 处、31 个源**（🏷书旗小说、⚡📂点众阅读 ……）。Legado 是「逗号之后整段 trim 再
+`JSON.parse`」，同样容得下空白。改成 `,\s*\{` 之后这些源的地址才对。
+
+顺带把 `splitUrlAndOptions` 与 `UrlOptions` 抽进纯模块 `src/legado/urlOptions.ts`
+（它们原本和源文件待在一起，而那个文件会连带引入带 WASM 的沙箱，Node 里跑不起来），
+`test/urlOptions.test.ts` 把 8 种形态钉住：紧贴 / 空格 / 制表符 / 可选段 `<,{{page}}>`
+不被误拆 / 非法 JSON 必须抛错。
+
+**先数再动手，这一轮也一样。** `RESULT_AS_JSOUP` 那三个判据挪进了纯模块
+`resultShape.ts`（原来只能在 `analyze.ts` 里，而那个文件带着沙箱、进不了单测），
+于是一个新的全量扫描 `test/resultHtml.scan.test.ts` 能把改动的**影响面**量出来：
+
+|                              |                                                                               |
+| ---------------------------- | ----------------------------------------------------------------------------- |
+| 选择器 + JS 的规则           | 523 处                                                                        |
+| 会用上节点 HTML（影响面）    | **15 处**                                                                     |
+| 其中同时按字符串用（风险面） | **6 处**，全是 `ruleToc.chapterList`，且**每一处都真的在调 `attr`/`toArray`** |
+
+「6 处、且每一处都需要标记」这个结论只有整份集合量得出来 —— 靠翻书源是翻不出来的。
+
+**验证**
+
+- 单测 **641 项**（新增 `test/urlOptions.test.ts` 8 条、`resultHtml.scan.test.ts`、
+  `fetchDetailed` 三组、`nodeBinding` 的 `toArray` 两条、`globals` 的 `key` 语义两条）
+- 冒烟新增第 21 段：`{{java.connect(...).raw().request().url()}}` 写进 searchUrl 能搜到书、
+  `StrResponse` 的六个形状、HTTP 403 不抛错、同一个响应只发一次请求、
+  两条 `toArray` 路径、`source.getKey()` 等于书源地址
+- **线上定点复测**（47 个目标源，逐个单源搜索 + 进书 + 拉目录）：
+
+|                             | 修复前    | 修复后   |
+| --------------------------- | --------- | -------- |
+| `TypeError: not a function` | **14 处** | **0 处** |
+| 搜索 ERROR 总数             | 31        | 15       |
+| 搜索 HIT                    | 10        | 9        |
+
+`not a function` 归零是最确定的信号：那 14 处正好就是这一轮点名的源
+（⚡📂三五中文 / 📂八一中文 / ⚡📂书趣阁 / ⚡📂️读趣网站 / 📂福书小说 / 📂笔仙阁子 /
+📂言情小说#6 / 🎭全本同人小说网 / 📂文学小说 / 📂海鹰看书 / ⚡📂废纸文学 / 🔞新龙小说 /
+🔞PO5 / 📂海棠看书）。它们现在要么真的搜到了书，要么变成一个**指向站点**的错
+（超时 / 403 / 520）—— 前者是修好了，后者是站点自己的事。
+
+**这一轮没做完的（都记在这里，不装作不存在）**
+
+- **`source.getVariable()` 的语义还不对**（126 处 / 29 源）。Legado 里它是**书源的
+  `variable` 字段**（一个自由字符串，书源自己往里存域名 / 开关 / 设备号），
+  `source.setVariable()` 写回**书源本身**（README 的早期版本里也提到过这个字段）。
+  本引擎目前把它和「本次请求的变量表」混在一起：`getVariable()` 无参时回的是
+  `java.put` 那张会话表的 JSON。它在**一次请求内**读写是对的（🏷七猫小说 那种
+  「读配置 → 改配置 → 刷发现」能跑），但**跨请求不落库**，于是
+  🌍🔞爱丽丝书屋 / 🎨漫蛙 / 🏷阅文集团 这类「第一次初始化、以后读回来」的源每次都要重来。
+  它需要的是「书源变量跟着书源持久化」——一次 D1 写回 + 一份缓存，是**单独一轮**的活。
+  ⚡📂八一中文网 现在报的 `无法解析为合法地址：http://www.x81zws.com{"key":"斗破苍穹"}`
+  就是这一条：脚本把 `getVariable()` 拼在域名后面，而它拿到的是变量表。
+- **PO5 家族 6 个源的目录**现在不再说 `not a function`，改成脚本自己那句
+  `String(result).match(/<li…" (\S+-\S+)="\d+">/)[1]` 取不到东西而 `cannot read property of null`。
+  比原来更靠近真正的失败点了（说明 `toArray()` 与节点 HTML 都到位了），
+  但还差一步：要看清那几页的 `<li>` 到底长什么样、以及 `String(Elements)` 该拼成什么。
+- URL 字段里的脚本拿到的是**裸字符串**（`⚡📂八一中文网` 的 `if(!!result.size())`），
+  它没有 jsoup 方法 —— 与 `resultGlobals` 那套判据还没接上。
+
 ## 验证
 
 ```bash
 npm install
 npm run db:migrate   # 建本地 D1 表（首次、以及每次新增迁移后）
-npm test             # 单元测试（627 项，Node 里毫秒级跑完；另有六个默认跳过的全量扫描，见下）
+npm test             # 单元测试（641 项，Node 里毫秒级跑完；另有七个默认跳过的全量扫描，见下）
 npm run dev          # 起本地服务，浏览器打开首页即可用；另开一个终端跑下面这条
-npm run smoke        # 端到端：链路 + 书源管理 + 静态资源 + 账号/书架/进度/书签 + 改显示名/改密码 + 导出导入备份 + 书签清单 + 替换净化同步 + 笔记 + 媒体 + 字段模板 + 选择器@js: + 空选择器取值 + 列表标记（+ / 顶格 <js>）+ 沙箱助手 + setContent/digestHex/UI 动作 + 节点级助手/加解密 + 连接符切分 + 列表规则 + URL 字段 JS + 发现/首页
+npm run smoke        # 端到端：链路 + 书源管理 + 静态资源 + 账号/书架/进度/书签 + 改显示名/改密码 + 导出导入备份 + 书签清单 + 替换净化同步 + 笔记 + 媒体 + 字段模板 + 选择器@js: + 空选择器取值 + 列表标记（+ / 顶格 <js>）+ 沙箱助手 + setContent/digestHex/UI 动作 + 节点级助手/加解密 + 连接式取网与 result.toArray() + 连接符切分 + 列表规则 + URL 字段 JS + 发现/首页
 ```
 
 单元测试只覆盖**纯函数**（规则解析、规则文本切分、规则前缀的匹配、规则尾巴的先后与取值、
-XPath 适配层与规则文本、`选择器@js:` 里 `result` 的绑法判定、位置选择、正则链、JSONPath、
+XPath 适配层与规则文本、`选择器@js:` 里 `result` 的绑法判定、**`result` 该给节点 HTML 还是文本**、
+位置选择、正则链、JSONPath、**地址与请求选项的拆解**、
 导入校验、旧身份 token 校验、口令哈希、exploreUrl 分类解析、图片地址提取、媒体签名、
 模板分类、时间格式化、MD5 摘要与 HMAC（与 `node:crypto` 对拍）、AES 与 DES、对称加密的形态、base64 的 UTF-8 语义、
 书签输入校验、**笔记输入校验**、章内搜索的切分与摘录、**搜索结果的按书合并**、
@@ -2625,7 +2767,7 @@ XPath 适配层与规则文本、`选择器@js:` 里 `result` 的绑法判定、
 内置测试站点（`/fixture/*`）是项目自己造的，不依赖任何第三方站点 —— 第三方站会改版、
 会挂、在 CI 机房会被墙，拿它做回归会出现"今天绿明天红，却说不清是谁的问题"。
 
-`npm run smoke` 分二十九段，其中二十六段值得单独说：
+`npm run smoke` 分三十段，其中二十七段值得单独说：
 
 **多方言对照。** 内置站点配了七套书源 —— 分别用 `@css:`、XPath、`@js: + java.ajax`、
 JSONPath、顶格 `@js:` 引用 `result`、字段 `{{}}` 模板、`选择器@js:` 七种规则写法打同一份数据。
@@ -2779,16 +2921,17 @@ B 导入 → B 的书架、阅读位置（含「停在第几页」）、书签�
 ### 用真实书源全量扫描
 
 冒烟跑的是内置站点 —— 它证明「运行时可跑」，但证明不了「线上 800 多条书源里没有漏网的」。
-有些结论只能拿整份集合去量，现在有六个扫描（各自独立，都默认跳过）：
+有些结论只能拿整份集合去量，现在有七个扫描（各自独立，都默认跳过）：
 
-| 扫描                         | 量什么                                                                 |
-| ---------------------------- | ---------------------------------------------------------------------- |
-| `ruleSplitting.scan.test.ts` | 有没有一个 JS 区域被连接符切开（切碎了**不报错**，只是结果悄悄不对）   |
-| `rulePrefix.scan.test.ts`    | `@css:`/`@json:`/`@js:`/`@xpath:` 的大小写写法有没有漏认、有没有多认   |
-| `xpathRule.scan.test.ts`     | 拆掉取值后缀之后每一段 XPath 是否都能解析；`/@属性` 有没有被误当成后缀 |
-| `resultShape.scan.test.ts`   | 脚本在 `result` 上调字符串方法 / 做下标访问时，绑法判得对不对          |
-| `ruleTail.scan.test.ts`      | 规则尾巴的三种语义：`@js:` 的位置、空选择器、`###` 的分布              |
-| `listMarker.scan.test.ts`    | 列表规则开头的 `+`：落在哪些字段、剥完是什么形态（是不是 AllInOne）    |
+| 扫描                         | 量什么                                                                           |
+| ---------------------------- | -------------------------------------------------------------------------------- |
+| `ruleSplitting.scan.test.ts` | 有没有一个 JS 区域被连接符切开（切碎了**不报错**，只是结果悄悄不对）             |
+| `rulePrefix.scan.test.ts`    | `@css:`/`@json:`/`@js:`/`@xpath:` 的大小写写法有没有漏认、有没有多认             |
+| `xpathRule.scan.test.ts`     | 拆掉取值后缀之后每一段 XPath 是否都能解析；`/@属性` 有没有被误当成后缀           |
+| `resultShape.scan.test.ts`   | 脚本在 `result` 上调字符串方法 / 做下标访问时，绑法判得对不对                    |
+| `ruleTail.scan.test.ts`      | 规则尾巴的三种语义：`@js:` 的位置、空选择器、`###` 的分布                        |
+| `listMarker.scan.test.ts`    | 列表规则开头的 `+`：落在哪些字段、剥完是什么形态（是不是 AllInOne）              |
+| `resultHtml.scan.test.ts`    | 改用「节点 HTML」会波及多少规则（影响面 / 风险面各多少处、是不是都真的需要标记） |
 
 ```bash
 # 导出一份书源（wrangler --json 的原样输出即可，也接受裸数组或探索结果的 json）
@@ -2796,7 +2939,7 @@ npx wrangler d1 execute reader-cloudflare --remote --json \
   --command "SELECT name, payload FROM sources" > sources.json
 SOURCES_DUMP=sources.json npx vitest run test/ruleSplitting.scan.test.ts test/rulePrefix.scan.test.ts \
   test/xpathRule.scan.test.ts test/resultShape.scan.test.ts test/ruleTail.scan.test.ts \
-  test/listMarker.scan.test.ts
+  test/listMarker.scan.test.ts test/resultHtml.scan.test.ts
 ```
 
 **默认整组跳过**，所以 CI 与日常 `npm test` 不受影响，书源也不会进仓库（dump 在 `.gitignore` 里）。
@@ -3143,6 +3286,16 @@ cheerio 能不能解析、QuickJS 的 WASM 能不能在线上加载、D1 绑定�
     正确的方向是把这次请求的求值挪到一个独立的 Durable Object 上跑 ——
     那里有自己的 isolate，也就有自己的模块与队列，天然绕开这两条约束。
     试过在一个 isolate 里堆模块实例（全局池），会被 CPU 预算反噬
+12. **书源变量要跟着书源持久化** —— 见「第三十三轮」最后那一段。Legado 的
+    `source.getVariable()` / `setVariable()` 读写的是**书源自己的 `variable` 字段**
+    （一个自由字符串，书源往里存域名 / 开关 / 设备号），而本引擎把它和「本次请求的
+    变量表」（`java.put` / `java.get(k)`）混成了一张表 —— 一次请求内读写是对的，
+    跨请求不落库。线上 29 个源、126 处在用，其中 🌍🔞爱丽丝书屋 / 🎨漫蛙 / 🏷阅文集团
+    是「第一次初始化、以后读回来」那一类，现在每次都要重来。
+    要做的是：给 `source` 表加一列（或复用 payload）+ 一条写回路径 + 一份进程内缓存，
+    并决定 `setVariable` 是「立刻写库」还是「请求结束批量写」。这中间有一条**并发**的
+    取舍要定：同一个源被两个请求同时改，谁赢 —— 与进度那条「更新者胜」不同，
+    这里书源变量是**配置**，多数情况该「后写覆盖」，但要让覆盖是可预期的。
 
 （原先列在这里的「查清 `internal error; reference = ...`」已经查清，见上文「真实书源验证」：
 从本机直连同样失败、各卡 10 秒超时，属于站点/链路层面的问题被 workerd 包了一层，
