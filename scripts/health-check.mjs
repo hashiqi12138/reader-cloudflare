@@ -10,7 +10,16 @@
  * 默认打**线上**那台（不是本地冒烟站）：体检要的就是真实书源面对真实站点。
  * 请求间隔默认 4 秒 —— 一页 3 个源（与前端步长一致），快过这个数容易被 Cloudflare 掐。
  *
- * 输出：分类计数 + 每类的样例 + （可选）SCAN_OUT 指定的 JSON 明细。
+ * 第五十一轮加了两层 —— 「源能搜到」与「那本书的字段填上了」是两件事：
+ *
+ *   1. **字段填充率**（零额外请求）：在搜索响应上直接数 name / author / intro /
+ *      kind / coverUrl 各填了多少本。第四十五~五十轮修的多半是「这一格静默空着」
+ *      （字段容错、单斜杠 XPath、`class.A B`），只看「有没有结果」是照不出来的。
+ *   2. **封面真的取得到吗**（可选，`SCAN_COVERS=1`，默认开）：每个「有结果」的源取
+ *      首本封面，走代取地址（`/api/media/…`）或原地址各试一次 —— 第四十七/四十八轮
+ *      改的就是封面（防盗链、http 混合内容）。
+ *
+ * 输出：分类计数 + 字段填充率 + 封面存活 + 每类样例 + （可选）SCAN_OUT 指定的 JSON 明细。
  */
 
 import { writeFileSync } from 'node:fs'
@@ -21,6 +30,12 @@ const STEP = Number(process.env.SCAN_STEP ?? '13')
 const LIMIT = Number(process.env.SCAN_LIMIT ?? '60')
 const GAP_MS = Number(process.env.SCAN_GAP_MS ?? '4000')
 const OUT = process.env.SCAN_OUT ?? ''
+/** 封面存活抽查：默认开，`SCAN_COVERS=0` 关掉 */
+const COVERS = (process.env.SCAN_COVERS ?? '1') !== '0'
+/** 最多抽查几张（每张一次请求，别有几十张的时候把时间耗在这上面） */
+const COVER_MAX = Number(process.env.SCAN_COVER_MAX ?? '24')
+/** 封面抽查的间隔：打的是我们自己的 /api/media 或上游图站，比搜索松一点 */
+const COVER_GAP_MS = Number(process.env.SCAN_COVER_GAP_MS ?? '1200')
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
@@ -53,6 +68,18 @@ export function classify(row) {
     return '报错·其他'
 }
 
+/** 展示用字段：这几格坏了只留空（不报错），所以要单独量 */
+const FIELD_KEYS = ['name', 'author', 'intro', 'kind', 'coverUrl']
+
+/** 数一批书里各字段填了几本（`name` 是必填，正常应当 100%） */
+function countFilled(books) {
+    const out = {}
+    for (const key of FIELD_KEYS) {
+        out[key] = books.filter((b) => typeof b?.[key] === 'string' && b[key].trim() !== '').length
+    }
+    return out
+}
+
 const list = await getJson('/api/sources')
 const all = list?.sources ?? []
 if (all.length === 0) {
@@ -81,23 +108,32 @@ for (let i = 0; i < sample.length; i += 3) {
     }
     for (const batchSource of batch) {
         const hit = sources.find((s) => s.sourceId === batchSource.id)
-        rows.push(
-            hit
-                ? {
-                      name: hit.sourceName ?? batchSource.name,
-                      ok: hit.ok === true,
-                      count: hit.count ?? 0,
-                      error: String(hit.error ?? ''),
-                      elapsedMs: hit.elapsedMs ?? 0,
-                  }
-                : {
-                      name: batchSource.name,
-                      ok: false,
-                      count: 0,
-                      error: '（这一页没有回结果）',
-                      elapsedMs: 0,
-                  },
-        )
+        if (!hit) {
+            rows.push({
+                name: batchSource.name,
+                ok: false,
+                count: 0,
+                error: '（这一页没有回结果）',
+                elapsedMs: 0,
+                books: 0,
+                fields: {},
+                firstCover: '',
+                firstProxy: '',
+            })
+            continue
+        }
+        const books = Array.isArray(hit.books) ? hit.books : []
+        rows.push({
+            name: hit.sourceName ?? batchSource.name,
+            ok: hit.ok === true,
+            count: hit.count ?? 0,
+            error: String(hit.error ?? ''),
+            elapsedMs: hit.elapsedMs ?? 0,
+            books: books.length,
+            fields: countFilled(books),
+            firstCover: String(books[0]?.coverUrl ?? ''),
+            firstProxy: String(books[0]?.coverProxyUrl ?? ''),
+        })
     }
     process.stdout.write(`\r  已搜 ${Math.min(i + 3, sample.length)}/${sample.length}`)
     await sleep(GAP_MS)
@@ -109,6 +145,61 @@ for (const row of rows) tally.set(classify(row), (tally.get(classify(row)) ?? 0)
 console.log('=== 分类 ===')
 for (const [kind, n] of [...tally.entries()].sort((a, b) => b[1] - a[1])) {
     console.log(`  ${String(n).padStart(3)}  ${kind}  ${((n / rows.length) * 100).toFixed(0)}%`)
+}
+
+/**
+ * 字段填充率
+ *
+ * 只在**有结果**的那批里算：搜不到的源本来就没有字段可填，混进来会把水搅浑。
+ */
+const withBooks = rows.filter((r) => r.books > 0)
+const totalBooks = withBooks.reduce((sum, r) => sum + r.books, 0)
+console.log(`\n=== 字段填充率（${withBooks.length} 个有结果的源，共 ${totalBooks} 本书）===`)
+if (totalBooks > 0) {
+    for (const key of FIELD_KEYS) {
+        const n = withBooks.reduce((sum, r) => sum + (r.fields?.[key] ?? 0), 0)
+        const pct = ((n / totalBooks) * 100).toFixed(0)
+        console.log(`  ${key.padEnd(9)} ${String(n).padStart(4)}  ${pct}%`)
+    }
+}
+
+if (COVERS) {
+    const targets = withBooks.filter((r) => r.firstProxy !== '' || r.firstCover !== '')
+    const picked = targets.slice(0, COVER_MAX)
+    console.log(`\n=== 封面（每个有结果的源取首本，抽 ${picked.length} 张）===`)
+    let proxyOk = 0
+    let proxyBad = 0
+    let directOk = 0
+    let directBad = 0
+    for (const r of picked) {
+        // 有代取地址就走代取（第四十七/四十八轮那条路），否则按浏览器直连量
+        const viaProxy = r.firstProxy !== ''
+        const url = viaProxy ? BASE + r.firstProxy : r.firstCover
+        let line = ''
+        try {
+            const res = await fetch(url)
+            const type = res.headers.get('content-type') ?? ''
+            const isImg = res.status === 200 && type.startsWith('image/')
+            if (viaProxy) {
+                if (isImg) proxyOk += 1
+                else proxyBad += 1
+            } else if (isImg) {
+                directOk += 1
+            } else {
+                directBad += 1
+            }
+            line = `${isImg ? 'OK  ' : 'BAD '} ${res.status} ${type.padEnd(16)} ${viaProxy ? '代取' : '直连'}  ${r.name}`
+        } catch (err) {
+            if (viaProxy) proxyBad += 1
+            else directBad += 1
+            line = `ERR  ${String(err.message).slice(0, 32).padEnd(34)} ${viaProxy ? '代取' : '直连'}  ${r.name}`
+        }
+        console.log(`  ${line}`)
+        await sleep(COVER_GAP_MS)
+    }
+    console.log(
+        `  → 代取：取到图 ${proxyOk} / 取不到 ${proxyBad}    直连：取到图 ${directOk} / 取不到 ${directBad}`,
+    )
 }
 
 const slowest = rows
