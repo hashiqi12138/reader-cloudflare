@@ -261,13 +261,30 @@ export function mediaRequestHeaders(source: BookSource, mediaUrl: string): Recor
  * 沙箱里的 java.ajax 又回头取网 —— 一条 `{{java.ajax(...)}}` 就能把自己绕成递归。
  * 这里只处理「地址 + 可选的请求选项」，不碰模板。
  *
- * 请求次数与总时限的上限由沙箱统一控制（见 engine/js.ts）。
+ * 请求次数与总时限的上限由沙箱统一控制（见 engine/js.ts）—— 但**总时限可以在这里调紧**：
+ * 搜索那一趟自己的预算是 6 秒（见 `SEARCH_TIMEOUT_MS`），沙箱里的 `java.ajax` 就该在这 6 秒
+ * 里跑完，而不是花掉沙箱默认的 8 秒（`budgetMs`）。
  */
-export function sandboxHttp(source: BookSource, baseUrl: string): SandboxHttp {
+export function sandboxHttp(
+    source: BookSource,
+    baseUrl: string,
+    /**
+     * 整次求值的总时限（毫秒）—— 就是 `SandboxHttp.totalTimeoutMs`
+     *
+     * 不传时用沙箱的默认值（8 秒）。调用方**有**自己的预算时应该传进来：
+     * 搜索是 6 秒（一页几个源并发，整页的等待等于最慢的那个源）。
+     */
+    budgetMs?: number,
+): SandboxHttp {
     /** 「地址（可能带 `,{...}` 选项）+ 调用方选项」→ 一份取网计划 */
     function buildPlan(
         url: string,
-        options: { method?: string; body?: string; headers?: Record<string, string> } = {},
+        options: {
+            method?: string
+            body?: string
+            headers?: Record<string, string>
+            timeoutMs?: number
+        } = {},
     ): FetchPlan {
         const { url: rawTarget, options: urlOptions } = splitUrlAndOptions(url)
         const plan = planFromResolvedUrl(rawTarget, source, baseUrl)
@@ -275,6 +292,12 @@ export function sandboxHttp(source: BookSource, baseUrl: string): SandboxHttp {
             ...plan,
             method: (options.method ?? urlOptions.method ?? 'GET').toUpperCase(),
             body: options.body ?? urlOptions.body,
+            /**
+             * 这一次取网的时限由沙箱传下来（「整次求值还剩多少」）——
+             * 不接住它的话，沙箱里一次 `java.ajax` 会用 20 秒的默认值，
+             * 而整次求值的预算（默认 8 秒）只在**发请求之前**被看过一眼（见第六十轮）。
+             */
+            ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
             // 书源里 `,{"charset":"gbk"}` 指的是**响应编码**（见 Legado 的「URL 参数详解」），
             // 这里以前漏掉了它，凡是走 java.ajax/java.post 的 GBK 站点都会拿到乱码
             charset: urlOptions.charset ?? plan.charset,
@@ -304,5 +327,7 @@ export function sandboxHttp(source: BookSource, baseUrl: string): SandboxHttp {
                 return String(url)
             }
         },
+        // 调用方给了预算就用它的（沙箱每次取网都会按「还剩多少」传 timeoutMs，见 engine/js.ts）
+        ...(budgetMs !== undefined ? { totalTimeoutMs: budgetMs } : {}),
     }
 }

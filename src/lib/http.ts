@@ -359,7 +359,23 @@ export async function fetchDetailed(plan: FetchPlan): Promise<FetchedResponse> {
 
     // 循环里一定会先赋值再 break（`hop >= MAX_REDIRECTS` 那一支兜底）
     const { response, headers: collected } = final!
-    const buffer = await readBounded(response)
+    /**
+     * 读正文这一步也会被时限掐断，而且**只有它**会
+     *
+     * 一个「响应头立刻回来、正文拖很久」的站点就是这样：`fetch()` 那一层顺利返回，
+     * 超时直到读流时才炸。这一层以前没有兜，于是报出来的是
+     * `The operation was aborted` 这种看不出所以然的话（第六十轮体检抽到的
+     * 📂夜伴书屋 21.4 秒 / 🎨拷贝漫画 20.8 秒就是这条路上的）。
+     */
+    let buffer: ArrayBuffer
+    try {
+        buffer = await readBounded(response)
+    } catch (err) {
+        if (isTimeout(err)) {
+            throw new UpstreamError(`请求超时（>${timeoutMs}ms，读正文时超时）：${target}`)
+        }
+        throw err
+    }
 
     let charset = normalizeCharset(plan.charset)
     if (!charset || charset === 'auto') {

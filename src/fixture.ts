@@ -955,6 +955,34 @@ export async function handleFixture(request: Request, url: URL): Promise<Respons
     }
 
     /**
+     * 一个「很慢才把正文吐出来」的端点（第六十轮）
+     *
+     * 给「沙箱里的取网必须跟着这次求值的预算走」那条断言当靶子：书源脚本里一句
+     * `java.ajax('/fixture/slow?ms=12000')` 以前会用取网层的默认 20 秒，
+     * 于是一次搜索能被拖到 20 秒以上（体检抽到的两个真源就是这么慢的）。
+     *
+     * 用**流**而不是 `await sleep` 是因为这个处理函数是同步的 —— 而这样也
+     * 更贴近真实情形：上游把头也压着不发。
+     */
+    if (pathname === '/fixture/slow') {
+        const ms = Math.max(
+            1,
+            Math.min(15_000, Number(url.searchParams.get('ms') ?? '1000') || 1000),
+        )
+        return new Response(
+            new ReadableStream({
+                start(controller) {
+                    setTimeout(() => {
+                        controller.enqueue(new TextEncoder().encode('slow-ok'))
+                        controller.close()
+                    }, ms)
+                },
+            }),
+            { headers: { 'Content-Type': 'text/plain; charset=utf-8' } },
+        )
+    }
+
+    /**
      * 目录的 JSON 接口（第五十六轮）：每条带 `isVip` / `isPay` / `isVolume` / `time`
      *
      * 这几个字段是 `ruleToc` 里与 `chapterName` 同层的**逐条规则**，引擎以前整片丢掉。

@@ -229,7 +229,19 @@ export interface SandboxHttp {
     /** 取回文本；失败时抛错，错误信息会带回给脚本 */
     fetchText(
         url: string,
-        options?: { method?: string; body?: string; headers?: Record<string, string> },
+        options?: {
+            method?: string
+            body?: string
+            headers?: Record<string, string>
+            /**
+             * 这一次取网的时限（毫秒）
+             *
+             * 由沙箱按「整次求值还剩多少」传下来（见 `totalTimeoutMs`）——
+             * 不传就退回 `lib/http.ts` 的默认 20 秒，那是**单次请求**的口径，
+             * 沙箱里一次 `java.ajax` 拖满 20 秒就是它（见第六十轮）。
+             */
+            timeoutMs?: number
+        },
     ): Promise<string>
     /**
      * 取回**响应本身**（状态码 + 响应头 + 正文）；HTTP 非 2xx **不抛错**
@@ -239,7 +251,13 @@ export interface SandboxHttp {
      */
     fetchResponse?(
         url: string,
-        options?: { method?: string; body?: string; headers?: Record<string, string> },
+        options?: {
+            method?: string
+            body?: string
+            headers?: Record<string, string>
+            /** 同 `fetchText` 的 `timeoutMs` */
+            timeoutMs?: number
+        },
     ): Promise<{
         url: string
         status: number

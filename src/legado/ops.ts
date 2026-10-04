@@ -306,7 +306,9 @@ export async function searchBooks(
         key: keyword,
         page,
         baseUrl: base,
-        http: sandboxHttp(source, base),
+        // 沙箱也按搜索的预算走：脚本里的 java.ajax 不该花掉沙箱默认的 8 秒
+        //（一页几个源并发，整页的等待等于最慢的那个源 —— 见上面那行注释）
+        http: sandboxHttp(source, base, SEARCH_TIMEOUT_MS),
         // 搜索里的 `@put:` 是**逐条**写同一个键（最后一条覆盖前面），本来就是有损的；
         // 而且搜索没有「这本书」可挂。所以这一组不落库 —— 见 `infoVars.writeInfoVar`
         infoVarCrossKeys: crossRequestInfoKeys(source, 'ruleSearch'),

@@ -1729,19 +1729,17 @@ var Packages = (function () {
  *      逼出来的：第一版写成「就地刷新」，报的是 `book.__refresh` 不是函数
  *
  * 注意：这一段也是模板字符串的一部分，注释里**不能写反引号**。
+ *
+ * 另外：下面这两段模板里**故意不写注释**。它们是每次求值都要重新解析的文本，
+ * 按实测「解析 1KB 约 0.1ms」算，注释也要钱（第六十轮把注释挪到这里的 TS 注释里，
+ * 同一批求值的这段从 0.18ms 降到 0.05ms 量级）。
  */
 const PER_EVAL_PRELUDE_BASE = `
-// 1) 两张变量表换新（下面的 __build* 会读它们，所以必须最先）
 __refreshVars()
-// 2) 清掉上一次的回传值（宿主在这之后才读它们，见 collectSourceVariable / collectBookVars
-//    / collectCookies / collectLogin）。注意**不能**动 result / book / chapter / __xxx：
-//    那些是这次求值的输入，刚由宿主注入
 delete globalThis.__sourceVariableOut
 delete globalThis.__loginHeaderOut
 delete globalThis.__loginInfoOut
 delete globalThis.__cookieJarOut
-// 3) 重新造那几个全局对象。**必须是「造」而不是「改」**：宿主每次求值注入的是裸数据，
-//    而它注入的名字正好就是 book / chapter —— 会直接把上一轮造好的对象盖掉
 book = __buildBook()
 chapter = __buildChapter()
 source = __buildSource()
@@ -1759,9 +1757,10 @@ infoMap = globalThis.__infoMap || {}
  * 冒烟第 40 段那几条与第 45 段第 ④ 条当场报出来。
  * 所以它单独成一段，由两处**拼**上去（`GLOBALS_PRELUDE + PER_EVAL_TAIL`），
  * 免得两边写法漂移。
+ *
+ * 与上面那段同理：模板里不写注释（每次求值都要解析它）。
  */
 const PER_EVAL_TAIL = `
-// result 的两种语义（要用到静态段里的 org.jsoup）
 if (globalThis.__resultAsJsoup) {
   if (Array.isArray(globalThis.result)) {
     globalThis.result = __elemsFrom(globalThis.result)
@@ -1769,7 +1768,6 @@ if (globalThis.__resultAsJsoup) {
     globalThis.result = __boxHtml(globalThis.result)
   }
 }
-// 登录表单：把用户填的字段包成 result（只在跑登录脚本那一次注入）
 if (globalThis.__loginFields !== undefined && globalThis.result === undefined) {
   globalThis.result = __toJavaMap(globalThis.__loginFields)
 }
@@ -2213,29 +2211,24 @@ async function executeInSandbox(
         host.dispose()
 
         /**
-         * 复用路径：先把**上一次**注入的那些名字删掉
+         * 注入这次的全局，并且**先把上一次注入的那些名字删掉**（第六十轮合成一次求值）
          *
-         * 不删就会串味：这一次没注入 `result`（比如一段不带 result 的代码）时，
-         * 上一次那个 `result` 还挂在全局上，规则会读到**上一次的值** —— 而且不报错。
-         * 这正是复用上下文最危险的那种错，所以删名单要跟着注入一起维护。
+         * 删是必须的：这一次没注入 `result`（比如一段不带 result 的代码）时，上一次那个
+         * `result` 还挂在全局上，规则会读到**上一次的值** —— 而且不报错。
+         *
+         * 两次「过边界」以前是分开的（一次删、一次注入），现在拼进同一段脚本：
+         * 复用之后每次求值要过好几趟宿主↔VM 边界，每趟都是实打实的开销。
+         *
+         * 注入走 JSON.parse，这样数组/对象/数字的类型都能保住；一个值坏掉只跳过它
+         * （与以前一样，书源里的坏值不该让整次求值挂掉）。
          */
-        if (reuse && batch.injected.length > 0) {
-            const clear = vm.evalCode(
-                batch.injected.map((key) => `delete globalThis[${JSON.stringify(key)}]`).join(';'),
-            )
-            if (clear.error) clear.error.dispose()
-            else clear.value.dispose()
+        const statements: string[] = []
+        if (reuse) {
+            for (const key of batch.injected) {
+                statements.push(`delete globalThis[${JSON.stringify(key)}]`)
+            }
             batch.injected = []
         }
-
-        /**
-         * 注入变量：走 JSON.parse，这样数组/对象/数字的类型都能保住
-         *
-         * 第五十九轮把它们**合成一次求值**：以前一个全局一次 `evalCode`，一批要过
-         * 十几次宿主↔VM 边界 —— 复用 context 之后那点开销反而成了大头。
-         * 一个值坏掉只跳过它（与以前一样，书源里的坏值不该让整次求值挂掉）。
-         */
-        const assignments: string[] = []
         for (const [key, value] of Object.entries(globals)) {
             if (value === undefined) continue
             let json: string
@@ -2244,16 +2237,16 @@ async function executeInSandbox(
             } catch {
                 continue
             }
-            assignments.push(
+            statements.push(
                 `globalThis[${JSON.stringify(key)}] = JSON.parse(${JSON.stringify(json)})`,
             )
             // 记下来，下一次求值前要删掉（见上面那段）
             if (reuse) batch.injected.push(key)
         }
-        if (assignments.length > 0) {
-            const injected = vm.evalCode(assignments.join(';'))
-            if (injected.error) injected.error.dispose()
-            else injected.value.dispose()
+        if (statements.length > 0) {
+            const applied = vm.evalCode(statements.join(';'))
+            if (applied.error) applied.error.dispose()
+            else applied.value.dispose()
         }
 
         if (reuse && batch.ready) {
@@ -2548,7 +2541,15 @@ async function handleHttpRequest(
         })
     }
 
-    if (ctx.now() > ctx.hardDeadline) {
+    /**
+     * **整次求值还剩多少，就只给这次取网多少**（第六十轮）
+     *
+     * 以前只在发请求**之前**看一眼预算，请求本身则用取网层的默认 20 秒 ——
+     * 于是搜索里一条 `@js:java.ajax(...)` 能把一次搜索拖到 20 秒以上
+     * （第六十轮体检抽到的两个源：📂夜伴书屋 21.4 秒、🎨拷贝漫画 20.8 秒）。
+     */
+    const remaining = ctx.hardDeadline - ctx.now()
+    if (remaining <= 0) {
         return JSON.stringify({ ok: false, error: '整次求值已超时，请求被中止' })
     }
 
@@ -2569,6 +2570,7 @@ async function handleHttpRequest(
             method: options.method,
             body: options.body,
             headers: options.headers,
+            timeoutMs: remaining,
         })
         return JSON.stringify({ ok: true, body: text })
     } catch (err) {
@@ -2615,7 +2617,9 @@ async function handleHttpResponse(
         })
     }
 
-    if (ctx.now() > ctx.hardDeadline) {
+    // 与 java.ajax 那条同理：整次求值还剩多少，就只给这次取网多少（见 handleHttpRequest）
+    const remaining = ctx.hardDeadline - ctx.now()
+    if (remaining <= 0) {
         return JSON.stringify({ ok: false, error: '整次求值已超时，请求被中止' })
     }
 
@@ -2636,6 +2640,7 @@ async function handleHttpResponse(
             method: options.method,
             body: options.body,
             headers: options.headers,
+            timeoutMs: remaining,
         })
         return JSON.stringify({
             ok: true,
