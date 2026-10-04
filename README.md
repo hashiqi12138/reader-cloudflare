@@ -32,7 +32,7 @@
 | 前端：书架 / 搜索 / 书源管理 / 阅读页                                                               | 已实现（书源与阅读进度都落 D1）                                                                                                                                                                                                                                                                                                                 |
 | **图片源 / 音频源 / 文件源**（`bookSourceType` 1 / 2 / 3）                                          | 已实现（见「媒体类书源」一节）                                                                                                                                                                                                                                                                                                                  |
 | 媒体代取（防盗链 / 混合内容 / 跨域）                                                                | 已实现（签名地址 + Range 透传；**防盗链封面**也走它 —— 带选项的封面签发 `coverProxyUrl`，见「第四十七轮」）                                                                                                                                                                                                                                     |
-| 沙箱里的 `source` / `cookie` / `cache` / `infoMap` 全局                                             | 已实现（见「沙箱里的全局对象」；`source.getKey()` 线上用了 413 次；`getLoginInfoMap()` / `putLoginInfo` 给的是 Map 语义 —— 见「第五十一轮」）                                                                                                                                                                                                   |
+| 沙箱里的 `source` / `book` / `chapter` / `cookie` / `cache` / `infoMap` 全局                        | 已实现（见「沙箱里的全局对象」；`source.getKey()` 线上用了 413 次；`getLoginInfoMap()` / `putLoginInfo` 给的是 Map 语义；这五个对象的**方法面**有一张登记表 `test/sandboxSurface.ts`、语料差集必须为空 —— 见「第五十一 / 五十三轮」）                                                                                                           |
 | 书源自带的 `jsLib` 全局函数库                                                                       | 已实现（35 条源在用；作为沙箱前置脚本执行，失败不中断但会说明原因）                                                                                                                                                                                                                                                                             |
 | 沙箱里的 `book` / `chapter` 上下文与**书的变量**（`book.getVariable` / `putVariable`）              | 已实现（`book.name` 54 处 / 39 源、`chapter.title` 32 处 / 30 源；变量落 `book_variables`，见「第三十五轮」）                                                                                                                                                                                                                                   |
 | `org.jsoup.Jsoup` + Element/Elements API                                                            | 已实现（宿主桥 + cheerio 句柄；写操作是空操作，未实现的方法报出方法名；`<script>` / `<style>` 也是元素 —— 见「第四十九轮」）                                                                                                                                                                                                                    |
@@ -1092,6 +1092,25 @@ OpenCC 的 `TSCharacters.txt` 有几千条、且带「一简对多繁」的分�
 书源里绝大多数用法是「同一段脚本里先存后取」，内存版足够。
 `cache.getFile` / `putFile` 明确返回空（服务端没有可持久化的私有文件系统）。
 
+`cookie.getKey(url, key)` 是第五十三轮补的：它按**域**从 jar 里取某一个 cookie 键的值
+（🏷起点 的发现页地址模板 `{{cookie.getKey("https://qidian.com","_csrfToken")}}` 用它拼接口地址，
+338 处模板都在用；🏷阅文集团 的登录脚本也用）。**但要说清这个缺口的性质**：
+响应里的 `Set-Cookie` 还没有收进这个 jar（只有同一段脚本里 `cookie.setCookie` 写进来的才有），
+而它要的键本来是浏览器登录后由站点下发的 —— 所以线上多半返回空串。
+这是**没实现**，不是**没这个名字**：补上它之前，那一句是 `TypeError`，整条分类地址都建不出来。
+
+`cookie.mapToCookie` 属于同类但**没补**：它要的是 `response.cookies()` 的返回值，
+而那个方法也没有、`Set-Cookie` 也不收 —— 单独补它不解决问题（登录流程整条没实现，见下）。
+
+### 五个对象全局的**方法面**是一张登记表
+
+`java.*` 那边靠 `JAVA_SURFACE` 生成预置，表与实现天然一致；这五个对象是手写在
+`GLOBALS_PRELUDE` 里的，没有生成关系，所以第五十三轮给它们补了同样的一张表
+（`test/sandboxSurface.ts`）：**每个对象「沙箱里真的有什么」+「语料用到却明知不做的是什么，
+以及为什么」**。两个方向各有一条测试钉着 ——
+`test/sandboxObjects.test.ts`（表 ↔ 实现，文本级比对，永远跑）与
+`test/sandboxObjects.scan.test.ts`（表 ↔ 816 条语料，默认跳过）。
+
 ### `infoMap`：空对象而不是 undefined
 
 发现页脚本会写 `infoMap["频道"] || "分类"` 来读用户在筛选器里的选择。我们没有那套交互界面，
@@ -1100,8 +1119,8 @@ OpenCC 的 `TSCharacters.txt` 有几千条、且带「一简对多繁」的分�
 
 ### 明确报错的那些
 
-`java.webView` / `java.setContent` / `java.startBrowserAwait` / `java.showBrowser` /
-`java.reLoginView` / `java.getFile` / `java.queryTTF`
+`java.webView` / `java.setContent` / `java.startBrowserAwait` / `java.reLoginView` /
+`java.getFile` / `java.queryTTF`
 都需要 WebView、浏览器或私有文件系统，引擎里没有对应能力，**一律抛出带名字的错误**。
 `java.connect` 已实现基础形态；`java.createSymmetricCrypto` / `java.aesBase64DecodeToString`
 见上（AES 与 DES 的 CBC / ECB，CFB、ISO10126Padding、DESede 会带名字报错）。
@@ -1109,6 +1128,12 @@ OpenCC 的 `TSCharacters.txt` 有几千条、且带「一简对多繁」的分�
 「降级但内容正确」比抛错让整条规则失败要好。
 `java.base64Decoder` 是**上游也没有的名字**（疑似 `base64Decode` 的笔误），
 登记它是为了让报错说出来，而不是只给一句 `not a function`（见「第五十二轮」）。
+
+`java.showBrowser` 与它们不一样：**它连桩都没有**（`keep-absent`），因为 🏷七猫小说
+拿 `typeof java.showBrowser == 'function'` 当探测、串了一条「`this.java` → `java` →
+`QM_C_RUNTIME_JAVA`」的降级链。给它一个会报错的函数，探测就为真、它会挑走那一支然后再炸；
+缺着反而能落到自己的兜底上。这也是那张表里 `absent` / `keep-absent` 的分界：
+**只有「书源会无条件调用」的成员才生成报错桩**（见「第五十三轮」）。
 
 ## 真实书源验证
 
@@ -4418,6 +4443,9 @@ this.classNames = className.trim().split("\\s+");   // 然后要求**每一个**
 | `reLoginView`   | 1    | 🏷七猫小说    | 刷新登录界面 → **平台能力缺失**                      |
 | `base64Decoder` | 1    | ⚡📂顾淮小说 | **上游也没有这个名字** —— 源自己的笔误               |
 
+（`showBrowser` 这一行**第五十三轮改过**：🏷七猫小说 拿 `typeof` 探测它来选分支，
+所以它的正确类别是 `keep-absent` 而不是 `absent` —— 见那一轮。上面这张表记的是当时量到的判断。）
+
 第三个的判断依据是这张表自己：表里的 `upstream` 一栏是**从上游源码原样抄下来的签名**，
 `base64Decode` / `base64DecodeToByteArray` 都在，独独没有 `base64Decoder`。
 
@@ -4447,6 +4475,7 @@ this.classNames = className.trim().split("\\s+");   // 然后要求**每一个**
 | `getCookie` / `reLoginView` / `replaceFont` / `queryTTF` / `queryBase64TTF` / `downloadFile` / `readTxtFile` / `base64Decoder` | 各 1/1        |
 
 将来真要接一个带 WebView 的运行时，优先级就按这份清单排。
+（`showBrowser` 第五十三轮从 `absent` 改成了 `keep-absent`，所以这份清单现在是 **16 个**。）
 
 **四、验证。**
 
@@ -4477,6 +4506,96 @@ this.classNames = className.trim().split("\\s+");   // 然后要求**每一个**
 | `java.reLoginView()`       | 同上                        | **`java.reLoginView：本引擎没有这个能力（需要 App 界面（上游用它刷新登录界面））`**                |
 | `java.base64Decoder('x')`  | 同上                        | **`java.base64Decoder：本引擎没有这个能力（上游也没有这个名字，疑似 base64Decode 的笔误）`**       |
 | `java.androidId()`（对照） | —                           | `java.androidId：本引擎没有这个能力（需要 Android 运行时）`                                        |
+
+### 第五十三轮：把「表外私货」扫到另外五个沙箱对象上 —— 以及一处「模板字符串把反斜杠吃掉」
+
+第五十二轮量的是 `java.*`。这一轮问同一件事的另一半：**`source` / `book` / `chapter` /
+`cookie` / `cache` 这五个对象**，语料里在用、而沙箱里没有的名字有哪些。
+
+**一、办法：让沙箱自己报出它的面。** 不去猜实现里写了什么，而是用一个临时书源在
+`@js:` 里打 `Object.keys(...)` —— 拿到的就是**书源脚本真正看得见的那一面**
+（`source` 21 个键、`book` 11、`chapter` 5、`cookie` 5、`cache` 10）。再拿 816 条语料对差集。
+
+**二、量到的 13 个名字。** 分类之后补了 9 个：
+
+| 名字                       | 处数 / 源 | 为什么补                                                                             |
+| -------------------------- | --------- | ------------------------------------------------------------------------------------ |
+| `cookie.getKey`            | 338 / 2   | 🏷起点 的发现页地址模板、🏷阅文集团 的登录脚本；没它就是 `TypeError`，整条分类建不出来 |
+| `book.setReverseToc`       | 6 / 2     | 写在 **ruleBookInfo.name 的中途**，抛错连书名一起丢                                  |
+| `source.removeLoginHeader` | 6 / 4     | 退出登录那条路，与已实现的 `putLoginHeader` 对称                                     |
+| `source.putConcurrent`     | 4 / 2     | App 侧书架刷新的并发控制 → 空实现                                                    |
+| `book.putCustomVariable`   | 3 / 2     | 上游语义未确认；3 处都只放一条状态字符串、没人读回 → 存下来、不抛错                  |
+| `source.getLoginInfo`      | 2 / 2     | 与 `putLoginInfo` 配套（源自己 `JSON.parse` 后按键取）                               |
+| `source.removeLoginInfo`   | 1 / 1     | 退出登录                                                                             |
+| `chapter.putImgUrl`        | 1 / 1     | 节点集在宿主侧是共享的，改它会串到别的句柄上 → 空实现                                |
+| `chapter.isVip`            | 1 / 1     | 🏷起点(部分可看) 的**正文规则**里 `if(chapter.isVip())`；抛错则整章正文一条都取不到   |
+
+剩下 4 个**判定为不该做**，但都写进了表里（连同理由），因为它们同样是「扫描出来的名字」，
+不写清楚下次还会被当成漏掉：
+
+| 名字                 | 处数 | 判断                                                                                                                                             |
+| -------------------- | ---- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `cookie.mapToCookie` | 1    | 上游有，但它属于**登录流程** —— 那条流程整条没实现（上一步的 `response.cookies()` 也没有、响应的 `Set-Cookie` 也不收进 jar），单独补它不解决问题 |
+| `cookie.split`       | 1    | **不是沙箱对象**：源自己作用域里的 cookie **字符串**（🌍🔞爱丽丝书屋 jsLib 里 `var cookie = cookieArray[i].trim()`）                             |
+| `book.includes`      | 1    | **不是沙箱对象**：源自己箭头函数的参数（`booklist.findIndex(book => …)`）                                                                        |
+| `chapter.substring`  | 1    | **不是沙箱对象**：源把 `chapter` 这个名字**重新赋成了字符串**（🏷晋江文学 的 replaceRegex 里先 `c = chapter` 再 `chapter = intro.match(…)`）      |
+
+`chapter.isVip` 有一点要说清：目录带上来的章节上下文**只有 title / name / url / index**
+（`index.ts` 的 `requestChapterContext`），没有 vip 标记，所以它现在恒为 `false` ——
+免费章会走对分支、付费章会走错。这是**缺信息**，不是**缺方法**；哪天真把标记带过来，
+这个实现自动就对。
+
+**三、顺手拔出来的两笔。**
+
+1. **`java.showBrowser` 的类别选错了。** 第五十二轮把它登记成 `absent`（生成带名字的报错桩），
+   可 🏷七猫小说 是拿 `typeof java.showBrowser == 'function'` **探测**它、串了一条
+   「`this.java` → `java` → `QM_C_RUNTIME_JAVA`」的降级链 —— 给一个（哪怕会报错的）函数，
+   探测就为真、它会挑走那一支再炸。按表开头的规矩（`absent` 只给「书源会无条件调用」的成员）
+   改成 `keep-absent`。`test/platform.test.ts` 里那条「需要 WebView 的能力一定是 `absent`」
+   也跟着改成「一定不是 `implemented`；其中被 `typeof` 探测的那一个（且只有它）是 `keep-absent`」。
+
+2. **预置脚本是模板字符串，里面的反斜杠会被吃掉。** 这一轮给 `cookie` 写 `hostOf` 时用了
+   `/^[a-z][a-z0-9+.-]*:\/\//i` 与 `/^\s+|\s+$/g` —— 在**源码文本**里它们没问题，
+   可模板字符串求值时 `\/` 只剩 `/`，正则提前收尾，整段预置变成语法错误。
+   线上表现是所有需要沙箱的规则一起失败，报的却是
+   **`沙箱预置失败（全局对象）：[object Object]`**（QuickJS 的 Error 被 dump 成对象，
+   `String()` 出来就是这个），完全指不到「哪里写错了」。改成两个**一个反斜杠都不用**的小助手。
+
+    真正抓住它的是**一条新测试**：`test/platform.test.ts` 里「预置按模板字符串**解转义之后**
+    仍然能解析」。注意这件事的要害 —— 只把源码文本丢给 `new Script()` 是**会通过的**，
+    那种检查会替坏代码背书；必须先把模板字符串求出实际值再解析。同一条测试还钉住
+    「预置里除了换行那一种转义，不该再有别的反斜杠」，把 `\s` 变 `s` 这类**静默错**也一起挡住。
+
+**四、验证。**
+
+- 单测 **765 → 769**（新增 `test/sandboxObjects.test.ts` 四条：表 ↔ 实现文本比对、不做名单的
+  两个方向、方法名不重复）
+- 全量扫描账本 **14 → 15 条 / 44 → 46 项**（新增 `test/sandboxObjects.scan.test.ts`：
+  「语料用到的对象方法」要么在沙箱里、要么在「明知不做」名单里；那份名单还会**自己过期** ——
+  某个名字语料里已经没人用了就得删掉）
+- 冒烟**新增第 40 段**：在 `@js:` 里把 9 个方法各调一遍，断言的不只是「不报错」，
+  还有值对不对（`cookie.getKey` 两种域名写法都命中、别的站回空串；`getLoginInfo` 读得回
+  `putLoginInfo` 写进去的值；`remove*` 真的清掉）
+- 线上核验：见下
+
+**五、线上核验**（`/api/probe` 报 `0.43.0`）。
+
+| 场景                 | 改前（0.42.0）                                            | 改后（0.43.0）                                                           |
+| -------------------- | --------------------------------------------------------- | ------------------------------------------------------------------------ |
+| 🏷起点 的发现页分类   | 整条分类报错（模板里那句 `cookie.getKey` 是 `TypeError`） | 分类建得出来（`_csrfToken` 为空 —— `Set-Cookie` 还没收进 jar，如实说明） |
+| 🏷晋江文学 的目录     | `book.setReverseToc is not a function`（**连书名都丢**）  | 书名取得回来                                                             |
+| 🏷起点(部分可看) 正文 | `chapter.isVip is not a function`（**整章正文空**）       | 免费章正文取得到                                                         |
+
+**这一轮仍然没做完的**
+
+- **`cookie.getKey` 的值多半是空的**：响应的 `Set-Cookie` 还没收进 jar。要真让它有值，
+  得先做「按书源隔离的 cookie 表」+ 响应头回写 —— 与下面的登录状态是同一件事
+- **登录状态没有实现**：`putLoginHeader` / `putLoginInfo` 只在**本次求值**里有效
+  （第四十一 / 五十一 / 五十三轮都只是让它别抛一个指错方向的错）
+- **`chapter.isVip` 缺信息**：章节上下文里没有 vip 标记（见上）
+- `parseFragments` 把「整篇文档」当一段的怪相、选项里 `{{}}` 与 `body` 混用、
+  `media.ts` 的两条多行地址路、`java.get(键)` 读不到持久化的书变量 —— 都还挂着（前几轮记的）
+- **WebView 那一族（16 个名字）**：本平台的取舍就是没有 WebView
 
 ## 验证
 
@@ -4697,7 +4816,7 @@ B 导入 → B 的书架、阅读位置（含「停在第几页」）、书签�
 ### 用真实书源全量扫描
 
 冒烟跑的是内置站点 —— 它证明「运行时可跑」，但证明不了「线上 800 多条书源里没有漏网的」。
-有些结论只能拿整份集合去量，现在有十四个扫描（各自独立，都默认跳过）：
+有些结论只能拿整份集合去量，现在有十五个扫描（各自独立，都默认跳过）：
 
 | 扫描                            | 量什么                                                                                   |
 | ------------------------------- | ---------------------------------------------------------------------------------------- |
@@ -4715,6 +4834,7 @@ B 导入 → B 的书架、阅读位置（含「停在第几页」）、书签�
 | `fieldCssStops.scan.test.ts`    | 字段规则里 CSS 式**多段 `@`** 的每一段中间段都判过性质吗（第三十八轮）                   |
 | `putGet.scan.test.ts`           | `@get:` / `@put:` / `init` 的量级、单键形状、括号配平与写法分类（第三十九轮）            |
 | `javaSurface.scan.test.ts`      | 脚本用到的 `java.*` 名字表里都有登记吗（没登记就是 `not a function`，第五十二轮）        |
+| `sandboxObjects.scan.test.ts`   | `source`/`book`/`chapter`/`cookie`/`cache` 上用到的方法都在表里吗（同上，第五十三轮）    |
 
 ```bash
 # 导出一份书源（wrangler --json 的原样输出即可，也接受裸数组或探索结果的 json）
@@ -4724,7 +4844,8 @@ SOURCES_DUMP=sources.json npx vitest run test/ruleSplitting.scan.test.ts test/ru
   test/xpathRule.scan.test.ts test/resultShape.scan.test.ts test/ruleTail.scan.test.ts \
   test/listMarker.scan.test.ts test/resultHtml.scan.test.ts test/jsTailList.scan.test.ts \
   test/listExtract.scan.test.ts test/listCssHeadIndex.scan.test.ts test/bangIndex.scan.test.ts \
-  test/fieldCssStops.scan.test.ts test/putGet.scan.test.ts test/javaSurface.scan.test.ts
+  test/fieldCssStops.scan.test.ts test/putGet.scan.test.ts test/javaSurface.scan.test.ts \
+  test/sandboxObjects.scan.test.ts
 ```
 
 **默认整组跳过**，所以 CI 与日常 `npm test` 不受影响，书源也不会进仓库（dump 在 `.gitignore` 里）。
