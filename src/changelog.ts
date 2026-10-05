@@ -25,6 +25,11 @@ export interface ReleaseNote {
 
 export const CHANGELOG: ReleaseNote[] = [
     {
+        version: '0.63.0',
+        date: '2026-10-05',
+        note: '多了第二条腿：整套东西现在也能跑在自己的一台机器上（`npm run start:node`）—— 不碰 Cloudflare、没有每请求 10 毫秒的 CPU 上限，书源与进度存在本机 SQLite 里；线上那份部署一行没变',
+    },
+    {
         version: '0.62.0',
         date: '2026-10-05',
         note: '目录又修好一批：脚本要按标记认条目时（`Array.from(result)` + `String(块).includes("<h3")`）以前拿到的是纯文本，于是目录 0 章还不报错 —— 🎨漫画搬运 现在 462 章；顺带把「脚本执行时限」改成只算脚本自己转的时间（宿主解析不再被算成脚本在转），并且死循环照样会被中断',
