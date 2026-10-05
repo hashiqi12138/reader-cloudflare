@@ -280,6 +280,10 @@ const COMPARE_EXCLUDED = new Set([
     'builtin:fixture-cross-var',
     'builtin:fixture-map-toc',
     'builtin:fixture-spin',
+    // 这一条的目录也是脚本算出来的（按属性序号取值），不走 `ul.chapter-list`
+    'builtin:fixture-attr-toc',
+    // 这一条的 `intro` 故意不是那一坨 CSS 取值（要显示搜索里 put 的变量），逐字对照必然不等
+    'builtin:fixture-search-var',
 ])
 const textSources = list.filter(
     (source) => source.builtin && (source.type ?? 0) === 0 && !COMPARE_EXCLUDED.has(source.id),
@@ -2709,6 +2713,94 @@ console.log('\n=== 12f. 脚本死循环仍然会被中断（VM 时限那条底�
         (toc.json?.chapters ?? []).length === 0,
         '被中断的那次求值不产出章节（也没有半截结果）',
         JSON.stringify(toc.json?.chapters),
+    )
+}
+
+console.log('\n=== 12g. 按属性序号取值（attributes() + Attribute.toString()） ===')
+{
+    /**
+     * 线上唯一一处用 `attributes()` 的源是 📂贝壳读书，它的目录脚本**不按属性名取值**，
+     * 而是「第 n 个属性」：
+     *
+     *     let b = Array.from(a.selectFirst(ys).attributes());
+     *     return b[num - 1]?.toString().match(/"(.+)"/)?.[1];
+     *
+     * 也就是要 `attributes()` 存在、要 `Attribute.toString()` 是 `key="value"`、
+     * 还要**顺序就是标签里的书写顺序**。缺一样都不是报错而是「取出来是别人」——
+     * 以前桥里没这个 op，报的是 `attributes is not a function`，指向规则那一行。
+     *
+     * 靶子 `builtin:fixture-attr-toc`：页面里一半条目把书名放第 3 个属性、
+     * 一半放第 4 个（与真源那段 `isBase64` 分支对应），两半都要取对。
+     */
+    const src = 'builtin:fixture-attr-toc'
+    const hint = encodeURIComponent(JSON.stringify({ name: '测试小说·甲', author: '作者甲' }))
+    const info = await getJson(
+        `/api/book?sourceId=${encodeURIComponent(src)}&url=${encodeURIComponent(`${BASE}/fixture/book/1`)}&book=${hint}`,
+    )
+    check(
+        String(info.json?.tocUrl ?? '').endsWith('/fixture/attr-toc/1'),
+        '详情页换到了「按属性序号取值」那个目录页（否则下面测的是别的页面）',
+        String(info.json?.tocUrl ?? ''),
+    )
+    const toc = await getJson(
+        `/api/toc?sourceId=${encodeURIComponent(src)}&url=${encodeURIComponent(info.json?.tocUrl ?? '')}&book=${hint}`,
+    )
+    const chapters = toc.json?.chapters ?? []
+    check(
+        chapters.map((c) => c.name).join('|') === ['第一章 起风了', '第二章 雨落下来', '第三章 天晴了'].join('|'),
+        '两种属性顺序下，章名都按**序号**取对了（书名在第 3 位、在第 4 位各一半）',
+        toc.json?.error ?? JSON.stringify(chapters.map((c) => c.name)),
+    )
+    check(
+        chapters.map((c) => String(c.url ?? '').replace(/^.*\/fixture\//, '')).join('|') ===
+            ['chapter/1/1', 'chapter/1/2', 'chapter/1/3'].join('|'),
+        '地址那一个属性也取对了（它是 base64 的，取错就解码出一串乱码）',
+        JSON.stringify(chapters.map((c) => c.url)),
+    )
+    check(
+        chapters.every((c) => !String(c.name).startsWith('/') && String(c.name).length < 30),
+        '没有把 base64 地址当成书名（这一条正是「顺序错了」的样子）',
+        JSON.stringify(chapters.map((c) => c.name)),
+    )
+}
+
+console.log('\n=== 12h. 搜索里 put、详情里 get（按每条各自的 bookUrl 落库） ===')
+{
+    /**
+     * 这一族写法在 816 条源里有 9 条，其中 **5 条真的能靠它修好**（📂阿巴小说 / ⚡📂飛天小說 /
+     * 🔊潇社音乐 / 🏷七猫小说 / 📂乐乎文章）：`java.put` 写在**搜索那一条的字段规则**里
+     * （大半在 `bookUrl` 上），`java.get` 在详情 / 目录 / 正文那一趟。
+     *
+     * 难点是搜索这一趟**没有「这本书」**：落库得等这一条的 `bookUrl` 算出来才知道挂给谁，
+     * 而那个 put 恰恰就在算 bookUrl 的那一段脚本里。
+     *
+     * 靶子让每条写一个**互不相同**的值（书地址最后那一段），于是这条断言能区分三种实现：
+     *   - 按条落 → 两本书各自的 `bid`（**本轮的实现**）
+     *   - 只落最后一次 → 两本都是 `bid=2`
+     *   - 完全不落 → 两本都是 `bid=`
+     */
+    const src = 'builtin:fixture-search-var'
+    const searched = await call('POST', '/api/search', { keyword: '测试', sourceIds: [src] })
+    const one = searched.json?.sources?.[0]
+    const books = one?.books ?? []
+    check(
+        one?.ok === true && books.length === 2,
+        '搜索拿到了两条结果（每一条都会写自己的 bid）',
+        one?.error ?? `count=${books.length}`,
+    )
+
+    const infos = []
+    for (const book of books) {
+        const info = await getJson(
+            `/api/book?sourceId=${encodeURIComponent(src)}&url=${encodeURIComponent(book.bookUrl)}`,
+        )
+        const tail = String(book.bookUrl).split('/').pop()
+        infos.push({ url: book.bookUrl, mine: `bid=${tail}`, got: String(info.json?.intro ?? '') })
+    }
+    check(
+        infos.every((x) => x.got === x.mine),
+        '每一本的详情读到的都是**它自己**那条搜索结果写下的值（不是最后一条、也不是空）',
+        JSON.stringify(infos),
     )
 }
 
@@ -5935,13 +6027,30 @@ console.log('\n=== 37. `<script>` / `<style>` 也是元素（`getElement("script
      *
      * 用 fixture 里同形状的页面（目录写在 script 的 JSON 里 + 一个 `.btn-read` 兜底入口）：
      *   ① `java.getElements('script')` 数得出脚本（改前是 0），`getElement` 不再是 null
-     *   ② 51漫画 那条规则**不再抛错**，并走兜底分支拿到那一章
+     *   ② 51漫画 那条规则**不再抛错**
      *   ③ 对照：`select("script")` 走的是 css-select，**一直是对的**（所以这个 bug 看起来
      *      像「只有 java.getElement 坏了」）
+     *
+     * 第七十六轮把这条断言**改强了**：补上 `Symbol.iterator` 之后
+     * `Array.from(java.getElement("script"))` 才真的给得出那一个脚本，于是这条规则
+     * 走的是它**本来要走的那一支**（从 script 里的 JSON 读目录），而不是兜底那一支。
+     * 以前走到兜底不是「设计如此」，是 `Array.from` 对不可迭代对象**安静地**给空数组 ——
+     * 目录于是只有一章（`book.name`），整本书的章节列表都是错的。
+     *
+     * 兜底那一支仍然要守着（脚本里没有「目录」两个字时就是它），所以另加一条
+     * 只改了过滤词的对照源（idFallback）。
      */
     const idA = `user:${BASE}/script-rule`
     const idB = `user:${BASE}/script-count`
-    for (const x of [idA, idB]) await call('DELETE', `/api/sources?id=${encodeURIComponent(x)}`)
+    const idFallback = `user:${BASE}/script-fallback`
+    for (const x of [idA, idB, idFallback]) await call('DELETE', `/api/sources?id=${encodeURIComponent(x)}`)
+    /** 🎨51漫画 ruleToc.chapterList 的形状；把过滤词换掉就落到兜底那一支 */
+    const comicRule = (needle) =>
+        `<js>\nconst scripts = Array.from(java.getElement("script")).filter(e => String(e).includes('${needle}'));\n` +
+        `const c = scripts[0];\n\n` +
+        `d = c\n  ? JSON.parse(c.html()).itemListElement.map(e => ({ title: e.name, url: e.url }))\n` +
+        `  : [{ title: book.name, url: java.getString(".btn-read@href", src) }];\n\n` +
+        `JSON.stringify(d);\n</js>\n$[*]`
     await call(
         'POST',
         '/api/sources',
@@ -5949,14 +6058,17 @@ console.log('\n=== 37. `<script>` / `<style>` 也是元素（`getElement("script
             {
                 bookSourceName: '目录写在 script 里（临时）',
                 bookSourceUrl: `${BASE}/script-rule`,
-                // 🎨51漫画 ruleToc.chapterList 的原样形状
                 ruleToc: {
-                    chapterList:
-                        `<js>\nconst scripts = Array.from(java.getElement("script")).filter(e => String(e).includes('目录'));\n` +
-                        `const c = scripts[0];\n\n` +
-                        `d = c\n  ? JSON.parse(c.html()).itemListElement.map(e => ({ title: e.name, url: e.url }))\n` +
-                        `  : [{ title: book.name, url: java.getString(".btn-read@href", src) }];\n\n` +
-                        `JSON.stringify(d);\n</js>\n$[*]`,
+                    chapterList: comicRule('目录'),
+                    chapterName: '$.title',
+                    chapterUrl: '$.url',
+                },
+            },
+            {
+                bookSourceName: '目录写在 script 里·兜底（临时）',
+                bookSourceUrl: `${BASE}/script-fallback`,
+                ruleToc: {
+                    chapterList: comicRule('这一段在页面里不存在'),
                     chapterName: '$.title',
                     chapterUrl: '$.url',
                 },
@@ -5988,9 +6100,17 @@ console.log('\n=== 37. `<script>` / `<style>` 也是元素（`getElement("script
         String(tocA.json?.error ?? '').slice(0, 120),
     )
     check(
-        (tocA.json?.count ?? 0) >= 1 && tocA.json?.chapters?.[0]?.name === '测试漫画',
-        '走兜底分支拿到那一章（`book.name` + `.btn-read@href`）',
-        JSON.stringify(tocA.json?.chapters?.[0] ?? null),
+        (tocA.json?.chapters ?? []).map((c) => c.name).join('|') === '第一话|第二话',
+        '走的是**它本来要走的那一支**：从 script 里的 JSON 读出真目录（以前只有兜底的一章）',
+        JSON.stringify(tocA.json?.chapters ?? null),
+    )
+
+    const tocFallback = await tocOf(idFallback)
+    check(
+        (tocFallback.json?.chapters ?? []).length === 1 &&
+            tocFallback.json?.chapters?.[0]?.name === '测试漫画',
+        '过滤词命中不了时仍然走兜底分支（`book.name` + `.btn-read@href`）',
+        JSON.stringify(tocFallback.json?.chapters?.[0] ?? null),
     )
 
     const tocB = await tocOf(idB)
@@ -6000,10 +6120,14 @@ console.log('\n=== 37. `<script>` / `<style>` 也是元素（`getElement("script
         String(tocB.json?.chapters?.[0]?.name ?? ''),
     )
 
-    for (const x of [idA, idB]) await call('DELETE', `/api/sources?id=${encodeURIComponent(x)}`)
+    for (const x of [idA, idB, idFallback])
+        await call('DELETE', `/api/sources?id=${encodeURIComponent(x)}`)
     check(
         !((await getJson('/api/sources')).json?.sources ?? []).some(
-            (s) => String(s.id).includes('script-rule') || String(s.id).includes('script-count'),
+            (s) =>
+                String(s.id).includes('script-rule') ||
+                String(s.id).includes('script-count') ||
+                String(s.id).includes('script-fallback'),
         ),
         'script 目录的测试源已清理',
     )

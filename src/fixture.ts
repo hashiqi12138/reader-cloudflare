@@ -671,6 +671,62 @@ export function fixtureMapTocPage(bookId: string): string {
 }
 
 /**
+ * **按属性序号取值**的目录页，专供验证 `Element.attributes()`
+ *
+ * 抄的是 📂贝壳读书 的形状。它的 `chapterList` 是一段 `@js:`，里面有一个小函数：
+ *
+ *     function parse(html, ys, num) {
+ *         let a = org.jsoup.Jsoup.parse(html);
+ *         let b = Array.from(a.selectFirst(ys).attributes());
+ *         return b[num - 1]?.toString().match(/"(.+)"/)?.[1];   // key="value" 里抠出 value
+ *     }
+ *
+ * 也就是说它**不按属性名取值**，而是「第 n 个属性」—— 而第 n 个是谁，取决于标签里
+ * 那几个属性的**书写顺序**。它靠这个在两种页面版本之间切换：老版把书名放第 3 个属性、
+ * 新版的第 3 个属性是 base64 之后的地址（所以脚本里还有一段 `isBase64` 判哪一个是哪一个）。
+ *
+ * 这一段钉住两件事：
+ *   1. `attributes()` 得**存在**（以前桥里没这个 op，报的是 `attributes is not a function`，
+ *      报错行号指向规则那一行，看着像书源写错了）
+ *   2. `Attribute.toString()` 得是 jsoup 那个 `key="value"` 形状，且**顺序就是书写顺序**
+ *      （顺序错了，按序号取出来的就是另一个属性 —— 不报错，只是标题变成一串乱码）
+ *
+ * 页面里**一半条目走老版顺序、一半走新版顺序**，与真源那段 `isBase64` 分支对应。
+ */
+export function fixtureAttrTocPage(bookId: string): string {
+    const book = BOOKS.find((b) => b.id === bookId)
+    if (!book) return page('未找到', '<p class="empty">没有这本书</p>')
+
+    const items = book.chapters
+        .map((ch, index) => {
+            const href = `/fixture/chapter/${book.id}/${ch.id}`
+            // 前两个属性是**干扰项**：真源里那个位置放着与本次取值无关的东西
+            const head = `rel="ch" rev="${index + 1}"`
+            // 偶数条走「第 3 个是书名」，奇数条走「第 3 个是 base64 地址」——
+            // 与 📂贝壳读书 的 isBase64 分支一一对应。注意它那边**地址那一个总是 base64**
+            // （`href` 那一支永远过 `java.base64Decode`），所以两种顺序里
+            // 「书名 / base64 地址」各占第 3、第 4 位，只是先后不同。
+            const attrs =
+                index % 2 === 0
+                    ? `${head} title="${escapeHtml(ch.name)}" href="${base64Of(href)}"`
+                    : `${head} href="${base64Of(href)}" title="${escapeHtml(ch.name)}"`
+            return `<div class="ch-item">
+    <ul><li><a ${attrs}>点这里</a></li></ul>
+</div>`
+        })
+        .join('\n')
+
+    return page(`${book.name} 目录（按属性序号取值）`, `<div id="tocList">
+${items}
+</div>`)
+}
+
+/** 页面里要放一段 base64：用 btoa，与书源那边的 java.base64Decode 正好对上 */
+function base64Of(text: string): string {
+    return btoa(text)
+}
+
+/**
  * **分页正文**，专供验证 `nextContentUrl`
  *
  * 不少站点把一章切成好几页，每页结尾挂着「本章未完，请点击下一页继续阅读」。
@@ -1153,6 +1209,10 @@ export async function handleFixture(request: Request, url: URL): Promise<Respons
     // 脚本返回对象数组版的目录页（见 fixtureMapTocPage 的说明）
     const mapToc = /^\/fixture\/map-toc\/(\w+)$/.exec(pathname)
     if (mapToc) return html(fixtureMapTocPage(mapToc[1]!))
+
+    // 按属性序号取值版的目录页（见 fixtureAttrTocPage 的说明）
+    const attrToc = /^\/fixture\/attr-toc\/(\w+)$/.exec(pathname)
+    if (attrToc) return html(fixtureAttrTocPage(attrToc[1]!))
 
     // 末尾的 `/1/` 不能省：目录规则靠 `baseUrl.includes("/1/")` 判断「是不是第一页」
     const crossToc = /^\/fixture\/cross-toc\/(\w+)\/(\d+)\/?$/.exec(pathname)

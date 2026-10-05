@@ -350,6 +350,102 @@ export function fixtureSpinSource(origin: string): RegisteredSource {
 }
 
 /**
+ * 同一个测试站点，目录规则**按属性序号取值**（第七十六轮）
+ *
+ * 抄的是 📂贝壳读书 的形状（线上唯一一处用 `attributes()` 的源）。它的脚本里有个小函数：
+ *
+ *     let b = Array.from(a.selectFirst(ys).attributes());
+ *     return b[num - 1]?.toString().match(/"(.+)"/)?.[1];
+ *
+ * 不按属性名取值，而是**第 n 个属性** —— 于是两件事必须都对，缺一个就静默出错：
+ *   - `attributes()` 得存在（桥里没有这个 op 时，报的是 `attributes is not a function`，
+ *     报错指向规则里那一行，看着像书源写错了）
+ *   - `Attribute.toString()` 得是 jsoup 那形状 `key="value"`，且顺序就是书写顺序
+ *     （顺序错了取出来的是另一个属性 —— 不报错，只是标题变成一串 base64）
+ *
+ * 打的是 `fixtureAttrTocPage`（一半条目书名在第 3 位、一半在第 4 位，与真源的
+ * `isBase64` 分支对应）。
+ */
+export function fixtureAttrTocSource(origin: string): RegisteredSource {
+    const base = fixtureSource(origin)
+    return {
+        ...base,
+        id: 'builtin:fixture-attr-toc',
+        sortOrder: 18,
+        bookSourceName: '内置测试站点（按属性序号取值）',
+        bookSourceComment:
+            '目录脚本用 attributes() 按序号取属性并靠 Attribute.toString() 抠值',
+        ruleBookInfo: {
+            ...base.ruleBookInfo,
+            tocUrl: '@css:a.toc-link@href##/toc/##/attr-toc/##',
+        },
+        ruleToc: {
+            chapterList: `@js:
+function isBase64(t) {
+  return typeof t === "string" && t.length !== 0 && /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(t)
+}
+function pick(html, ys, num) {
+  var a = org.jsoup.Jsoup.parse(html);
+  var b = Array.from(a.selectFirst(ys).attributes());
+  return b[num - 1]?.toString().match(/"(.+)"/)?.[1];
+}
+var out = [];
+Array.from(java.getElements("class.ch-item")).map(function (c) {
+  var three = pick(c, "li>a", 3);
+  var four = pick(c, "li>a", 4);
+  out.push({
+    text: isBase64(three) === true ? four : three,
+    href: java.base64Decode(isBase64(three) === true ? three : four),
+  });
+});
+out`,
+            chapterName: 'text',
+            chapterUrl: 'href',
+        },
+    }
+}
+
+/**
+ * 同一个测试站点，**搜索里给每一条记一个变量、详情里读回来**（第七十六轮）
+ *
+ * 抄的是这一族写法（816 条源里 5 条真的能靠它修好）：
+ *
+ *   📂阿巴小说    ruleSearch.bookUrl      `$.bid <js> java.put('bid', result); '…/bid/'+result </js>`
+ *                 ruleBookInfo.init       `java.get('bid')`
+ *   ⚡📂飛天小說   同一位置 put `bid`，详情与正文都读它
+ *   🔒潇社音乐    ruleSearch.lastChapter  `java.put('json', JSON.stringify(result))`，目录读它
+ *   🏷七猫小说    同一位置 put `headers`，正文读它
+ *   📂乐乎文章    `bookUrl` 与 `lastChapter` 里各 put 一个
+ *
+ * 它们的共同点正是难点：**搜索这一趟没有「这本书」**，而 `java.put` 是在**每一条**
+ * 的字段规则里写的 —— 所以只能「先收、这一条算完再按它自己的 bookUrl 落」。
+ *
+ * 靶子让每一条写一个**互不相同**的值（书地址最后那一段），于是能钉住最关键的那件事：
+ * 落的是**各条各自的值**，不是「最后一条覆盖前面」。只落最后一次的话，
+ * 两本书的 `intro` 都会是 `bid=2`；完全不落则是 `bid=`。
+ */
+export function fixtureSearchVarSource(origin: string): RegisteredSource {
+    const base = fixtureSource(origin)
+    return {
+        ...base,
+        id: 'builtin:fixture-search-var',
+        sortOrder: 19,
+        bookSourceName: '内置测试站点（搜索里 put、详情里 get）',
+        bookSourceComment: '搜索逐条 java.put，详情 java.get —— 按每条各自的 bookUrl 落库',
+        ruleSearch: {
+            ...base.ruleSearch,
+            // 每一条把「自己是第几本」记进 bid，再把地址交回去
+            bookUrl: `h3.title a@href <js> java.put("bid", String(result).split("/").pop()); String(result) </js>`,
+        },
+        ruleBookInfo: {
+            ...base.ruleBookInfo,
+            // 详情那一趟读回来（写在**别的组**里，所以 bid 会进「跨请求键」）
+            intro: '@js: "bid=" + java.get("bid")',
+        },
+    }
+}
+
+/**
  * 同一个测试站点，改用 XPath 规则
  *
  * 存在的意义是**对照验证**：两套方言打同一个页面，提取结果必须完全一致。
@@ -908,6 +1004,8 @@ export function builtinSources(origin: string): RegisteredSource[] {
         fixtureCrossVarSource(origin),
         fixtureMapTocSource(origin),
         fixtureSpinSource(origin),
+        fixtureAttrTocSource(origin),
+        fixtureSearchVarSource(origin),
     ]
 }
 
