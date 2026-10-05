@@ -25,6 +25,11 @@ export interface ReleaseNote {
 
 export const CHANGELOG: ReleaseNote[] = [
     {
+        version: '0.60.0',
+        date: '2026-10-05',
+        note: '修好 jsoup 链式调用：补上 `data()` 与 `selectFirst()`，`Jsoup.parse(...).select(...)` 的结果现在能下标（线上 86 条源用这个写法，其中两条一直报 not a function / cannot read property of undefined）；顺带把沙箱里四份手抄的方法表合成一份并加了防漂移的扫描测试',
+    },
+    {
         version: '0.59.0',
         date: '2026-10-05',
         note: '正文里的 HTML 摊平成纯文本：`<br>` 与段落标签变成真正的换行，标签不再当字面文字显示（一半以上的书源用 @html 取值）；顺带不再把正文 div 里挂着的 <script> 读进来',
