@@ -25,6 +25,7 @@
 | 列表规则「CSS 式首段 + `@` 步骤」、首段末尾的下标后缀、`!` 排除下标                                 | 已实现（`.box@ul@li`、`.book-list@li`、`.book-dir.1@li`、`.chapter[1]@a`、`tag.tr!0`、`li!0:1:2`、`p!0:-1`；以前是「CSS 选择器无效」或静默 0 条，见「第三十七轮」）                                                                                                                                                                             |
 | 字段规则「CSS 式首段 + `@` 步骤」（与上一条同一套分派，但**末段永远是取值**）                       | 已实现（`.book-info@div@text`、`.xsm.0@a@text`、`.book_other@a@text`、`.author!0@a@text`；线上 746 处 / 221 个源，见「第三十八轮」）                                                                                                                                                                                                            |
 | 变量指令 `@put:{键:规则}` / `@get:{键}` 与 `ruleBookInfo.init`                                      | 已实现（与 `java.put` / `java.get(键)` **共用同一张会话变量表**；`init` 另有一半是**换掉求值的根**；**跨请求**那 8 处落「书的变量」，见「第三十九 / 四十 / 四十一轮」）                                                                                                                                                                         |
+| **搜索里写的跨请求变量**（`ruleSearch` 里 `java.put` → 详情/目录/正文 `java.get`）                  | 已实现（搜索没有「这本书」，所以按**每一条结果各自的 `bookUrl`** 分开落 —— 写的时候先收、这一条算完再落；816 条源里 7 条需要它、**5 条修好**，剩 2 条把 put 写在整个列表脚本里，见「第七十六轮」）                                                                                                                                               |
 | `{{key}}` / `{{page}}` 等 URL 模板                                                                  | 已实现                                                                                                                                                                                                                                                                                                                                          |
 | GBK / GB2312 等非 UTF-8 站点                                                                        | 已实现（自动嗅探 + 按站点声明解码）                                                                                                                                                                                                                                                                                                             |
 | 搜索 → 详情 → 目录 → 正文 四步链路                                                                  | 已实现                                                                                                                                                                                                                                                                                                                                          |
@@ -45,7 +46,7 @@
 | **书源登录界面**（`loginUi`：输入框 / 下拉 / 界面上的按钮）                                         | 已实现（35 条源写了它，六种控件、按钮动作 163 处是源自己的函数；书源页每行一个「登录」入口，见「第五十八轮」）                                                                                                                                                                                                                                  |
 | 书源自带的 `jsLib` 全局函数库                                                                       | 已实现（35 条源在用；作为沙箱前置脚本执行，失败不中断但会说明原因）                                                                                                                                                                                                                                                                             |
 | 沙箱里的 `book` / `chapter` 上下文与**书的变量**（`book.getVariable` / `putVariable`）              | 已实现（`book.name` 54 处 / 39 源、`chapter.title` 32 处 / 30 源；变量落 `book_variables`，见「第三十五轮」）                                                                                                                                                                                                                                   |
-| `org.jsoup.Jsoup` + Element/Elements API                                                            | 已实现（宿主桥 + cheerio 句柄；写操作是空操作，未实现的方法报出方法名；`<script>` / `<style>` 也是元素 —— 见「第四十九轮」；`data()` / `selectFirst()` 也有，`Jsoup.parse(...).select(...)` 的结果能下标与 `length` —— 见「第七十二轮」）                                                                                                       |
+| `org.jsoup.Jsoup` + Element/Elements API                                                            | 已实现（宿主桥 + cheerio 句柄；写操作是空操作，未实现的方法报出方法名；`<script>` / `<style>` 也是元素 —— 见「第四十九轮」；`data()` / `selectFirst()` 也有，`Jsoup.parse(...).select(...)` 的结果能下标与 `length` —— 见「第七十二轮」；`attributes()`（每项 `getKey` / `getValue` / `toString`）与**可迭代**（`Array.from` / `for...of` 都能用）—— 见「第七十六轮」）                                                                                                       |
 | `Packages.java.*`（Java 反射）                                                                      | 部分实现（`String.getBytes` / `MessageDigest` 仅 MD5 / `Base64` / `System`；其余报出类名）                                                                                                                                                                                                                                                      |
 | JS 写在 URL 字段里（`searchUrl` 的 `@js:` / `<js>`）                                                | 已实现（见「URL 字段里的 JS」；线上 `searchUrl` 带 JS 的有 85 条）                                                                                                                                                                                                                                                                              |
 | URL 里的 `<,...>` 可选段（「第一页不要页码」）                                                      | 已实现（`/latest/<,index_{{page}}.html>`；见「第九轮」）                                                                                                                                                                                                                                                                                        |
@@ -6587,14 +6588,146 @@ SMOKE_BASE=http://127.0.0.1:8790 node scripts/smoke.mjs
 把 `TODO.md` 第 1 条那个「一次求值的宿主工作量上限」接上（`engine/js.ts` 的 `busy.ms` 已经在了，
 但阈值要先在**不设 CPU 上限的宿主上**量几条能跑通的规则才能定 —— 这正好是这一轮新开出来的地方）。
 
+### 第七十六轮：四条待办 —— 其中两条**核实下来不是那个原因**
+
+这一轮把 `TODO.md` 里第 7 / 8 / 10 / 11 条一起做了。有意思的是其中两条
+（第 7 条的 `attributes()` 自身、第 10 条的连接符）**都不是当初以为的那个原因** ——
+第七十四轮那次「先量再改」的做法在这一轮又救了两回。
+
+**一、第 7 条：`Element.attributes()` —— 以及它旁边那个更要命的坑**
+
+线上唯一用它的源是 📂贝壳读书，它的目录脚本**不按属性名取值**，而是「第 n 个属性」：
+
+```js
+let b = Array.from(a.selectFirst(ys).attributes());
+return b[num - 1]?.toString().match(/"(.+)"/)?.[1];
+```
+
+于是两件事必须都对：`attributes()` 得存在；`Attribute.toString()` 得是 `key="value"`
+**且顺序就是书写顺序**（顺序错了取出来的是另一个属性 —— 不报错，只是标题变成一串 base64）。
+
+修法分两层，这是有意的：桥只交出「键值对、保持顺序」的**最小契约**（宿主不该知道脚本
+会拿属性当什么用），沙箱那侧把它包成 jsoup 的 `Attribute`（`getKey()` / `getValue()` /
+`toString()`），再补上 `Attributes` 那三个集合级成员（`size()` / `hasKey(k)` /
+`get(i 或 键名)`）—— `Array.from`、下标、`length` 数组本来就有。
+
+**但靶子做完之后，📂贝壳读书 的目录仍然是 0 章。** 真凶在外层那一句：
+
+```js
+x = Array.from(java.getElements("class.BCsectionTwo-top-chapter"))
+```
+
+沙箱里**根本没有 `Symbol.iterator`**，而 `Array.from` 对一个「既不可迭代、也没有 `length`」
+的对象**不报错**，安静地给一个空数组 —— `x` 是空的、目录 0 章、没有 warning、书源也不报错。
+补上 `JsoupElements.prototype[Symbol.iterator]` 之后，**同时**修好两条线上的源：
+
+| 源 | 规则 | 修之前 | 修之后 |
+| --- | --- | --- | --- |
+| 📂贝壳读书 | `Array.from(java.getElements(…))` | 0 章（静默） | 能拿到「一串章节元素」 |
+| 🎨51漫画 | `Array.from(java.getElement("script"))` | 落到兜底分支，只有**一章** | 从 script 里的 JSON 读出**真目录（两章）** |
+
+🎨51漫画 那一条原来是**半好的**：第四十九轮让它不抛错了，但一直走兜底分支 ——
+所以冒烟第 37 段当时写的断言就是「走兜底分支拿到那一章」。这一轮把断言改成
+**它本来要走的那一支**，另加一条只换过滤词的对照源守住兜底分支还在。
+
+靶子是 `/fixture/attr-toc/:id` + 内置源 `builtin:fixture-attr-toc`：页面里**一半条目把书名
+放第 3 个属性、一半放第 4 个**（与真源那段 `isBase64` 分支一一对应），冒烟 12g 三条断言。
+
+**二、第 11 条：桥的 `list` op —— 一次取回整串**
+
+`__listOf`（把集合变成「数组形态的 Elements」）原来对**每个元素**做
+`size` → `get(i)` → `outerHtml` 三次往返。现在桥里多了一个 `list` op，宿主侧**一次**
+把「每个元素的句柄 + 它自己的 `outerHTML`」算好交回去（开句柄是纯内存操作、取 HTML 是
+纯 cheerio 调用，都不需要过桥）—— 从 `1 + 2n` 变成 **1**。
+
+顺带修正了这条当初写的**受益面**：🎨漫画搬运 的目录并不在这条路上（它那个
+`Array.from(result)` 的 `result` 只有 **3 个** `.uk-switcher` 块；459 个章节条目是脚本
+自己逐条 `Jsoup.parse` 出来的）。真正的大 n 在「一次 `select` 出几百个节点」那种规则上。
+
+量法是一条新脚本 `scripts/probe-jsoup-trips.mjs`：临时导入一条源，`bookList` 是
+一次 `Jsoup.parse(整页).select('a')` + `map`，打内置测试站点的搜索页 `?n=600`，
+报节点数、耗时中位与两种实现的往返次数。同一份代码换成旧实现再跑一遍：
+
+| 实现 | 604 个节点上的耗时中位 | 往返次数 |
+| --- | --- | --- |
+| 旧（`size` + 每个元素 `get` + `outerHtml`） | **282ms**（256/269/282/298/452） | 1 + 2×604 = 1209 |
+| 新（`list` 一次） | **223ms**（202/213/223/236/308） | 1 |
+
+省掉 1208 次往返（总往返的一半），耗时降**约 21%**；剩下那两成半在「每个节点两次
+`text` / `attr`」上，记进了 `TODO.md` 第 13 条。
+
+**三、第 8 条：搜索里写的跨请求变量 —— 按每条各自的 `bookUrl` 落库**
+
+搜索与「详情 / 目录 / 正文」的根本区别是**它没有「这本书」**，而 `java.put` 是在
+**每一条**的字段规则里写的（📂阿巴小说 / ⚡📂飛天小說 / 🏷七猫小说 的 put 就写在
+`ruleSearch.bookUrl` 上，而那个 `bookUrl` 正是同一条规则算出来的）。所以只能
+「写的时候先收、这一条算完再按它自己的 bookUrl 落」：
+
+- `RuleContext.itemVarSink`：`push` 收、`flush(bookUrl)` 落；
+- `booksFromItems` 每算完一条调一次 `flush`（放在 `finally` 里 —— 这一条没算出来时，
+  缓冲里那几个变量属于**一本没有身份的书**，只能丢掉，留给下一条会把 A 书的 `bid` 挂到 B 书上）；
+- 走这条岔路时**不做**「一次请求只落一次」的去重（搜索里同一个键就是逐条写的，
+  去重会把第 2 条之后的全部丢掉）；
+- **一个源一个 sink** —— 搜索一页几十个源是并发的，共用一个缓冲会串源。
+
+816 条源里 `ruleSearch` 写了 `java.put` 的共 9 条，其中「键在别的组被读」的 7 条里有
+**5 条修好**（📂阿巴小说 / ⚡📂飛天小說 / 🔊潇社音乐 / 🏷七猫小说 / 📂乐乎文章）。
+剩下 2 条（⚡📂rezero / 🔞Linpx）的 put 写在**整个 `bookList` 脚本**里 —— 那一段脚本
+一次产出整页条目，写的时候无法归属到某一条，要修得让「列表脚本」也能按条目分段。
+靶子 `builtin:fixture-search-var` 让每条 put 一个**互不相同**的值，冒烟 12h 断言
+**每一本读到的都是它自己那条写下的值** —— 这一条能同时区分三种实现：按条落（本轮）、
+只落最后一次（两本都会是 `bid=2`）、完全不落（两本都是 `bid=`）。实测 `bid=1` / `bid=2`。
+
+**四、第 10 条：连接符 —— 核实下来跟那个卷标题没关系，引擎不改**
+
+第七十四轮推断「脚本只拿得到最后一段的结果，所以 🎨漫画搬运 的 `voList` 恒为空、
+卷标题退化成整块文本」。这一轮先写了扫描（`test/connectorJsTail.scan.test.ts`）：
+
+```
+书源 816 条 / 「连接符 + 最后一段带 JS」54 处
+  按连接符：|| 28 / && 26
+  列表规则（result 是一批节点）6 处 / 字段规则 48 处
+  脚本把 result 当**标量字符串**用 36 处 ← 改成合并必然出错的那一批
+  脚本按**元素集合**用 result 7 处 ← 只有这一批可能受益
+```
+
+36 处把 `result` 当标量用（`'更新时间：'+result`、`result.replace(/(.*)\s/,'$1 • ')`、
+`result+'字'`…）—— 它们全都指望 `result` 里**只有最后那一段**。受损面 36、受益面 7，
+而 54 处里 48 处是字段规则：**「把合并结果交给脚本」这个改法不成立。**
+
+再拿现成的 `fixtureMapTocPage` 跑 🎨漫画搬运 的脚本原文，只把诊断写进章节名，三组对照：
+
+| 规则 | 卷标题 |
+| --- | --- |
+| A `.map-block@js:…`（无连接符） | `vo=2 ul=2 同名=true \| title=[卷一 起风 / 第一章 起风了 / 第二章 雨落下来]` |
+| B `div && .map-block@js:…`（真源的形状） | 与 A **逐字相同** |
+| C `.map-block && .map-block@js:…`（模拟合并） | 与 A **逐字相同** |
+
+**真因是 `voList` 与 `ulList` 是同一批节点**（每个块里既有 `<h3>` 又有 `<ul>`，两个
+`filter` 命中的是同一批），于是 `voList[index]` 是**整块**，`java.getString("text", 整块)`
+自然连章节名一起取出来。这与连接符无关，也与本引擎无关 —— Legado 的
+`AnalyzeRule.getString("text", element)` 给的同样是那一块的 `text()`。
+**是书源自己取错了粒度**（该写 `h3@text`）。
+
+**五、验证。** 单测 1001 → **1008**（新增连接符扫描 1 条 + 桥的 `list` / `attributes`
+6 条；`jsoupSurface` 那条对账测试同时放宽了扫描面 —— 原先只认 `case '…'`，
+于是 `parse` / `clean` / `list` 那四个构造入口**完全在盲区里**，现在两种写法都扫）。
+冒烟新增 12g / 12h 两段、改写第 37 段，并加了两条内置靶子源
+（`builtin:fixture-attr-toc` / `builtin:fixture-search-var`）。
+
+**六、没做与留下的：** ⚡📂rezero / 🔞Linpx 那种「put 写在整个列表脚本里」的归属问题、
+发现页（`ruleExplore`）那一趟还没接 `itemVarSink`、逐节点的 `text` / `attr` 往返、
+以及「让沙箱在 vitest 里跑起来」（这样预置 JS 才有直接的断言）—— 都记进了 `TODO.md`
+第 8 / 13 / 14 条。
+
 ## 验证
 
 ```bash
 npm install
 npm run db:migrate   # 建本地 D1 表（首次、以及每次新增迁移后）
-npm test             # 单元测试（1001 项，Node 里毫秒级跑完；另有十八个默认跳过的全量扫描，见下）
+npm test             # 单元测试（1008 项，Node 里毫秒级跑完；另有十九个默认跳过的全量扫描，见下）
 npm run dev          # 起本地服务，浏览器打开首页即可用；另开一个终端跑下面这条
-npm run smoke        # 端到端：链路 + 书源管理（导入 / 启停 / 批量启停 / 内置源剔掉 / 空 ids 给 400）+ 正文里的 HTML 摊平（@html 取值与 @textNodes 逐字一致）+ jsoup 链式调用（`data()` / `select(...)[0]` / `remove()` 真删）+ 跨请求的会话变量（详情 `java.put` → 目录 `java.get` 拼上前缀）+ 目录脚本返回对象数组（按标记分卷 + `text`/`href`/`volume` 键）+ 脚本死循环仍然会被中断 + 静态资源 + 账号/书架/进度/书签 + 改显示名/改密码 + 导出导入备份 + 书签清单 + 替换净化同步 + 笔记 + 媒体 + 字段模板 + 选择器@js: + 空选择器取值 + 列表标记（+ / 顶格 <js>）+ 沙箱助手 + setContent/digestHex/UI 动作 + 节点级助手/加解密 + 连接式取网与 result.toArray() + 书源变量落库 + 书的上下文与书的变量 + JS 尾段列表规则保留节点 + 连接符切分 + 列表规则（末尾那个词 / CSS 首段的位置后缀 / `!` 排除下标）+ 字段规则（CSS 式多段 `@`）+ 变量指令（`@put:` / `@get:` 含**跨请求**那一半）+ `init`（铺变量与**换根**两种）+ `<js>` 段 + JSONPath 尾段（`$[*]` / `$[:n]`）+ 地址尾部的请求选项（`地址,{选项}` / 排成多行的那份选项块）+ URL 选项里 `body` 写对象（`application/json`）+ 展示用字段的容错与 `warnings` + 单斜杠 XPath（`/a/p[1]/text()` 相对当前条目）+ 防盗链封面走 `/api/media` 代取 + http 封面（混合内容）也代取 + `<script>` / `<style>` 也是元素（`java.getElement("script")` 那条路） + JSOUP 简写 `class.A B`（两个类都要有） + `source.getLoginInfoMap()` 的 Map 语义 + URL 字段 JS + 发现/首页 + cookie 罐（收 / 发 / 按源落库）+ 重定向自己跟（302 上的 `Set-Cookie` 与 `Location`）+ 目录里的 `isVip` / `isPay` / `isVolume` / `updateTime` + 登录态（跑一次 `loginUrl` → 落库 → 之后每趟请求都带上）+ 登录界面（读 `loginUi` → 渲染表单 → 界面上的按钮单独调得到）+ 沙箱里的取网跟着这次求值的预算走（列表规则里 / 搜索地址模板里，含「响应头回了、正文拖很久」那层兜底）+ 搜索 / 发现里的逐条字段走批量求值（批按 jsLib 分开，两源互不串味）+ PWA（`manifest.json` / 四张图标是真 PNG / `/sw.js` 的 JS 类型 / `/js/swPolicy.js` 可取 / head 里的 link）+ 书源列表的协商缓存（首次带 `ETag` / 同一个 `ETag` 回 304 且无正文 / 对不上的照旧回完整列表）+ 版本与更新记录（`/api/version` 带版本号 / 记录非空且最新一条与版本号一致）+ 媒体缓存（换过地址后仍命中 / 命中字节与上游一致 / 带 `Range` 不进缓存）
+npm run smoke        # 端到端：链路 + 书源管理（导入 / 启停 / 批量启停 / 内置源剔掉 / 空 ids 给 400）+ 正文里的 HTML 摊平（@html 取值与 @textNodes 逐字一致）+ jsoup 链式调用（`data()` / `select(...)[0]` / `remove()` 真删）+ 跨请求的会话变量（详情 `java.put` → 目录 `java.get` 拼上前缀）+ 目录脚本返回对象数组（按标记分卷 + `text`/`href`/`volume` 键）+ 脚本死循环仍然会被中断 + 静态资源 + 账号/书架/进度/书签 + 改显示名/改密码 + 导出导入备份 + 书签清单 + 替换净化同步 + 笔记 + 媒体 + 字段模板 + 选择器@js: + 空选择器取值 + 列表标记（+ / 顶格 <js>）+ 沙箱助手 + setContent/digestHex/UI 动作 + 节点级助手/加解密 + 连接式取网与 result.toArray() + 书源变量落库 + 书的上下文与书的变量 + JS 尾段列表规则保留节点 + 连接符切分 + 列表规则（末尾那个词 / CSS 首段的位置后缀 / `!` 排除下标）+ 字段规则（CSS 式多段 `@`）+ 变量指令（`@put:` / `@get:` 含**跨请求**那一半）+ `init`（铺变量与**换根**两种）+ `<js>` 段 + JSONPath 尾段（`$[*]` / `$[:n]`）+ 地址尾部的请求选项（`地址,{选项}` / 排成多行的那份选项块）+ URL 选项里 `body` 写对象（`application/json`）+ 展示用字段的容错与 `warnings` + 单斜杠 XPath（`/a/p[1]/text()` 相对当前条目）+ 防盗链封面走 `/api/media` 代取 + http 封面（混合内容）也代取 + `<script>` / `<style>` 也是元素（`java.getElement("script")` 那条路） + JSOUP 简写 `class.A B`（两个类都要有） + `source.getLoginInfoMap()` 的 Map 语义 + URL 字段 JS + 发现/首页 + cookie 罐（收 / 发 / 按源落库）+ 重定向自己跟（302 上的 `Set-Cookie` 与 `Location`）+ 目录里的 `isVip` / `isPay` / `isVolume` / `updateTime` + 登录态（跑一次 `loginUrl` → 落库 → 之后每趟请求都带上）+ 登录界面（读 `loginUi` → 渲染表单 → 界面上的按钮单独调得到）+ 沙箱里的取网跟着这次求值的预算走（列表规则里 / 搜索地址模板里，含「响应头回了、正文拖很久」那层兜底）+ 搜索 / 发现里的逐条字段走批量求值（批按 jsLib 分开，两源互不串味）+ PWA（`manifest.json` / 四张图标是真 PNG / `/sw.js` 的 JS 类型 / `/js/swPolicy.js` 可取 / head 里的 link）+ 书源列表的协商缓存（首次带 `ETag` / 同一个 `ETag` 回 304 且无正文 / 对不上的照旧回完整列表）+ 版本与更新记录（`/api/version` 带版本号 / 记录非空且最新一条与版本号一致）+ 媒体缓存（换过地址后仍命中 / 命中字节与上游一致 / 带 `Range` 不进缓存）+ 目录脚本按**属性序号**取值（`attributes()` + `Attribute.toString()`，一半条目的书名在第 3 位、一半在第 4 位）+ 搜索里 `java.put` / 详情里 `java.get`（**每一本读到的都是它自己那条写下的值**）
 ```
 
 同一条冒烟也用来验收**自建（Node）那份**：它只打 HTTP，所以换个地址就行。
@@ -6616,6 +6749,14 @@ SCAN_KEYWORD=剑来 SCAN_STEP=7 SCAN_LIMIT=100 npm run health   # 关键字、�
 SCAN_COVERS=0 npm run health                      # 关掉封面存活那一层（它每张一次请求）
 SCAN_CONTENT=0 npm run health                     # 关掉正文那一层（它每源再发三个请求，跑一轮会明显变慢）
 SCAN_CONTENT_MAX=40 npm run health                # 正文层多抽几个源
+```
+
+还有几条**量单一件事**的探针（都在 `scripts/probe-*.mjs`，都要一个跑着的本地服务）：
+
+```bash
+BASE=http://127.0.0.1:8787 N=600 RUNS=5 node scripts/probe-jsoup-trips.mjs  # 桥的宿主往返次数与耗时（第七十六轮）
+node scripts/probe-concurrency.mjs                # 沙箱失败是不是并发引起的
+node scripts/probe-cachekey.mjs                   # 媒体缓存键怎么算
 ```
 
 单元测试只覆盖**纯函数**（规则解析、规则文本切分、规则前缀的匹配、规则尾巴的先后与取值、
@@ -6640,7 +6781,8 @@ XPath 适配层与规则文本、**单斜杠 XPath 的相对语义**、`选择�
 
 - `test/jsoupBridge.test.ts` —— `org.jsoup` 桥的契约是「整数句柄 + op 名」，
   宿主侧实际的解析由 cheerio 完成，而 cheerio 在 Node 里能跑，
-  所以这层不必进 QuickJS 就能测
+  所以这层不必进 QuickJS 就能测（含第七十六轮那个 `list` op —— 它的判据是
+  「结果必须与逐个 `get` + `outerHtml` **完全一致**」，以及 `attributes()` 的**顺序**）
 - `test/globals.test.ts` —— 沙箱里 `source` / `infoMap` / `jsLib` 的**组装**是纯的，
   真正进沙箱的那一步不在这里
 - `test/replace.test.mjs` / `test/search.test.mjs` / `test/merge.test.mjs` /
@@ -6859,6 +7001,7 @@ B 导入 → B 的书架、阅读位置（含「停在第几页」）、书签�
 | `cookieJar.scan.test.ts`        | 只读 cookie（靠站点下发）的源有没有关掉 `enabledCookieJar`；开关与各方法的用量分布（第五十四轮）      |
 | `redirect.scan.test.ts`         | 谁在读响应头里的 `Location`、写在哪个字段、是不是「先取网、再读头」（第五十五轮）                     |
 | `ruleTocFields.scan.test.ts`    | 目录规则里的字段：每一个都被认领了吗（取了 / 明确不取并写明理由）；逐条字段要不要走沙箱（第五十六轮） |
+| `connectorJsTail.scan.test.ts`  | 连接符 + `@js:` 尾段：这个形状有多少处、脚本把 `result` 当**标量**用多少处（改成「合并」会坏的那一批）与当**集合**用多少处（第七十六轮） |
 
 ```bash
 # 导出一份书源（wrangler --json 的原样输出即可，也接受裸数组或探索结果的 json）
@@ -6870,7 +7013,7 @@ SOURCES_DUMP=sources.json npx vitest run test/ruleSplitting.scan.test.ts test/ru
   test/listExtract.scan.test.ts test/listCssHeadIndex.scan.test.ts test/bangIndex.scan.test.ts \
   test/fieldCssStops.scan.test.ts test/putGet.scan.test.ts test/javaSurface.scan.test.ts \
   test/sandboxObjects.scan.test.ts test/cookieJar.scan.test.ts test/redirect.scan.test.ts \
-  test/ruleTocFields.scan.test.ts
+  test/ruleTocFields.scan.test.ts test/connectorJsTail.scan.test.ts
 ```
 
 **默认整组跳过**，所以 CI 与日常 `npm test` 不受影响，书源也不会进仓库（dump 在 `.gitignore` 里）。
