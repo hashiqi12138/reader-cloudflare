@@ -25,6 +25,11 @@ export interface ReleaseNote {
 
 export const CHANGELOG: ReleaseNote[] = [
     {
+        version: '0.67.0',
+        date: '2026-10-05',
+        note: '多了容器这一份：`docker compose up -d --build` 就能把整套东西跑在自己的 Docker 里（不经过 Cloudflare，也就没有每请求 10 毫秒的 CPU 上限），数据落在命名卷里、重启不丢；用法与参数写在单独的 DOCKER.md',
+    },
+    {
         version: '0.66.0',
         date: '2026-10-05',
         note: 'jsoup 那几个「改了等于没改」的写操作变成真的了：`attr(k, v)` / `addClass` / `append` 之类以前一律静默无效，🎨笔趣漫画 那种「把真图地址塞回 `src`、再整批返回」的正文脚本因此一章都取不到 —— 现在能取到，而且「选出一批节点」的几种写法（`[i]` / `.length` / `forEach` / `size()`）统一成同一种形状；顺带把发现页的 `java.put` 跨请求变量接通（📂阿巴小说 / 📂乐乎文章 / 📂小米书城 这三条）',
