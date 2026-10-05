@@ -161,15 +161,39 @@ describe('org.jsoup 桥', () => {
         expect(reply.error).toContain('已失效')
     })
 
-    it('写操作是空操作：节点集在宿主侧共享，不能改', () => {
+    it('remove 真删：删完再取，同一份文档里那一块就没了（📂少年小说网 的目录规则靠它）', () => {
+        const bridge = new JsoupBridge()
+        const doc = handleOf(bridge)
+        const filters = handle(bridge, 'first', handle(bridge, 'select', doc, ['ul#filters']))
+        const titles = handle(bridge, 'select', doc, ['h3.sort-li-title'])
+        expect(value(bridge, 'size', titles)).toBe(2)
+        expect(String(value(bridge, 'html', filters))).toContain('sort-li-title')
+
+        expect(bridge.run('remove', titles, [])).toEqual({ ok: true, kind: 'value', value: null })
+
+        // 同一份文档里再查就没了 —— 书源正是「先 remove 掉藏起来的那几项，再取父节点 html」
+        expect(value(bridge, 'size', handle(bridge, 'select', doc, ['h3.sort-li-title']))).toBe(0)
+        expect(String(value(bridge, 'html', filters))).not.toContain('sort-li-title')
+        // 删的是这几项，**别的地方不受影响**
+        expect(value(bridge, 'size', handle(bridge, 'select', doc, ['a.btn-tag']))).toBe(3)
+        expect(value(bridge, 'size', handle(bridge, 'select', doc, ['div.book-desc']))).toBe(1)
+        expect(String(value(bridge, 'html', doc))).not.toContain('sort-li-title')
+    })
+
+    it('其余写操作仍是空操作（语料里只当顺手清理，没人依赖改完再读）', () => {
         const bridge = new JsoupBridge()
         const doc = handleOf(bridge)
         const first = handle(bridge, 'first', handle(bridge, 'select', doc, ['h3.sort-li-title']))
-        expect(bridge.run('remove', first, [])).toEqual({ ok: true, kind: 'value', value: null })
+        for (const op of ['attrSet', 'addClass', 'removeClass', 'append', 'prepend']) {
+            expect(bridge.run(op, first, ['class', 'x'])).toEqual({
+                ok: true,
+                kind: 'value',
+                value: null,
+            })
+        }
         // 关键是「改不动」：文档没被真的动过，后续取值仍与原来一致
         expect(value(bridge, 'text', first)).toBe('类型')
-        const titles = handle(bridge, 'select', doc, ['h3.sort-li-title'])
-        expect(value(bridge, 'size', titles)).toBe(2)
+        expect(value(bridge, 'size', handle(bridge, 'select', doc, ['h3.sort-li-title']))).toBe(2)
     })
 
     it('parseFragments：一串 outerHTML 变回 N 个并列元素（java.getElements 用）', () => {

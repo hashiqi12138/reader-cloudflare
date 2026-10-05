@@ -510,11 +510,15 @@ export function fixtureBrChapterPage(bookId: string, chapterId: string): string 
  *   - 🎨漫画搬运：`Jsoup.parse(k).select("a")[0].attr("href")` ——
  *     `select()` 的结果要能**下标**。以前 `Jsoup.parse()` 给的是裸 `JsoupElements`，
  *     `[0]` 恒为 undefined，接着 `.attr(...)` 就报在 undefined 上。
- *   - 两处都会 `select(...).remove()` —— 只读引擎里它是空操作，但必须存在。
+ *   - `select(...).remove()` —— 站点用它藏起来的那条要被**真删**（第七十三轮之前是空操作）。
  *
- * 页面按真实站点的写法搭：真正的列表容器**只在 `<style>` 里出现**
- * （`.tocBox{display:none}` —— 站点用这招躲爬虫，所以书源才要去读 `data()`）。
- * 拿不到 `data()` 的话选择器就是错的，章节会变成 0 条 —— 这就是可断言的地方。
+ * 页面按真实站点的写法搭：真正的列表容器是普通 class（`div.tocBox`），
+ * 而 `<style>` 藏起来的是列表**里面**的一条「最新章」—— 书源读 `data()` 拿到那个选择器、
+ * 把它删掉，剩下的才是这一页真正的章节。
+ *
+ * 两条判据都能数出来：
+ *   - `data()` 读不到 → 选择器是空的 → 那条藏起来的条目**删不掉** → 章节数多一条
+ *   - `remove()` 是空操作 → 同上（第七十三轮之前就是这个症状）
  */
 export function fixtureJsoupTocPage(bookId: string): string {
     const book = BOOKS.find((b) => b.id === bookId)
@@ -529,12 +533,94 @@ export function fixtureJsoupTocPage(bookId: string): string {
 
     return page(
         `${book.name} 目录（jsoup 链式）`,
-        `<style>.tocBox{display:none}</style>
+        // 整条 `<style>` 一行写完：书源会把 `{display:none}` 换成逗号、再去掉尾逗号当选择器
+        `<style>.chapter-list>li:nth-child(1){display:none}</style>
 <div class="tocBox">
     <ul class="chapter-list">
+        <li><a href="/fixture/chapter/${book.id}/hidden">第九十九章 藏起来的</a></li>
         ${items}
     </ul>
 </div>`,
+    )
+}
+
+/**
+ * **详情页**（跨请求变量版）：前几章藏在 `.book_list` 里，另给一个「全部目录」的链
+ *
+ * 抄的是 📂少年小说网 的详情页，它的 `ruleBookInfo.tocUrl` 是这么写的：
+ *
+ *   text.全部目录@href
+ *   @js:
+ *   java.put("html", java.getString("h2:contains(全部章节目录)+.book_list@html"))
+ *   result
+ *
+ * 也就是：**目录地址**取自「全部目录」那个链接，同时把详情页上那份「全部章节目录」
+ * 存进会话变量 `html`。目录那趟请求再 `java.get("html")` 把它拼到自己列表的前面 ——
+ * 而**详情与目录是两次请求**，会话变量只活一次请求，这一条只能靠「书的变量」穿过去。
+ *
+ * 断不出来这一层的话，症状是「目录能出、但开头几十章整段没了」：不报错，
+ * 书源也不会走到别的分支（详见 README 第七十三轮）。
+ */
+export function fixtureCrossVarBookPage(bookId: string): string {
+    const book = BOOKS.find((b) => b.id === bookId)
+    if (!book) return page('未找到', '<p class="empty">没有这本书</p>')
+
+    const head = book.chapters
+        .slice(0, 2)
+        .map(
+            (ch) =>
+                `<li><a href="/fixture/chapter/${book.id}/${ch.id}">${escapeHtml(ch.name)}</a></li>`,
+        )
+        .join('\n        ')
+
+    return page(
+        `${book.name} 详情（跨请求变量）`,
+        `<h1>${escapeHtml(book.name)}</h1>
+<h2 class="title">《${escapeHtml(book.name)}》全部章节目录</h2>
+<div class="book_list">
+    <ul class="row">
+        ${head}
+    </ul>
+</div>
+<a class="page-link" href="/fixture/cross-toc/${book.id}/1/">全部目录</a>`,
+    )
+}
+
+/**
+ * **目录页**（跨请求变量版）：真正的章节旁边混着一条「藏起来的」条目
+ *
+ * 与 `fixtureJsoupTocPage` 同一族的写法，但更贴近 📂少年小说网 的真实页面：
+ * 站点把「最新章」塞在同一个 `ul` 的开头，再用 `<style>` 里的 `{display:none}`
+ * 藏起来；书源的规则读 `data()` 拿到那些选择器、`remove()` 掉它们，
+ * 剩下的 `ul.row li a` 才是这一页真正的章节。
+ *
+ * 那条被藏起来的条目指向一个**不存在的章节**：`remove()` 还是空操作的话，
+ * 它就混进目录里，数得出来（多一章）。
+ *
+ * 地址末尾的 `/1/` 是必需的：📂少年小说网 的目录规则里有
+ * `w = result.includes("第1页") || !baseUrl.includes("/1/")`，非第一页才拼前缀 ——
+ * 少了这一段，规则会走「不拼」那条分支，跨请求变量就测不到了。
+ */
+export function fixtureCrossVarTocPage(bookId: string): string {
+    const book = BOOKS.find((b) => b.id === bookId)
+    if (!book) return page('未找到', '<p class="empty">没有这本书</p>')
+
+    const tail = book.chapters
+        .slice(2)
+        .map(
+            (ch) =>
+                `<li><a href="/fixture/chapter/${book.id}/${ch.id}">${escapeHtml(ch.name)}</a></li>`,
+        )
+        .join('\n        ')
+
+    return page(
+        `${book.name} 目录（跨请求变量）`,
+        // 整条 `<style>` 一行写完：书源会把 `{display:none}` 换成逗号、再去掉尾逗号当选择器
+        `<style>.section-list>li:nth-child(1){display:none}</style>
+<ul class="section-list row">
+    <li><a href="/fixture/chapter/${book.id}/hidden">第九十九章 藏起来的</a></li>
+        ${tail}
+</ul>`,
     )
 }
 
@@ -1013,6 +1099,14 @@ export async function handleFixture(request: Request, url: URL): Promise<Respons
     // jsoup 链式调用版的目录页（见 fixtureJsoupTocPage 的说明）
     const jsoupToc = /^\/fixture\/jsoup-toc\/(\w+)$/.exec(pathname)
     if (jsoupToc) return html(fixtureJsoupTocPage(jsoupToc[1]!))
+
+    // 跨请求变量版的详情页 / 目录页（见 fixtureCrossVarBookPage 的说明）
+    const crossBook = /^\/fixture\/cross-book\/(\w+)$/.exec(pathname)
+    if (crossBook) return html(fixtureCrossVarBookPage(crossBook[1]!))
+
+    // 末尾的 `/1/` 不能省：目录规则靠 `baseUrl.includes("/1/")` 判断「是不是第一页」
+    const crossToc = /^\/fixture\/cross-toc\/(\w+)\/(\d+)\/?$/.exec(pathname)
+    if (crossToc) return html(fixtureCrossVarTocPage(crossToc[1]!))
 
     const pagedToc = /^\/fixture\/paged-toc\/(\w+)\/(\d+)$/.exec(pathname)
     if (pagedToc) return html(fixturePagedTocPage(pagedToc[1]!, Number(pagedToc[2])))

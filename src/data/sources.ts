@@ -169,8 +169,8 @@ export function fixtureBrHtmlSource(origin: string): RegisteredSource {
  *     （既不能下标也没有 `length`），`[0]` 恒为 undefined，接着 `.attr(...)`
  *     就报在 undefined 上。
  *
- * 两处都会 `select(...).remove()` —— 只读引擎里它是空操作，但**必须存在**：
- * 以前它只在四份方法表里的一份上，`X.select(css).remove()` 只要 X 不是 `JsoupElements` 就炸。
+ * 两处都会 `select(...).remove()`。第七十三轮之前它是空操作，于是 `📂少年小说网`
+ * 的目录里混着一堆站点藏起来的最新章 —— **不报错**，只是顺序看着是倒的。
  *
  * 打的是 `fixtureJsoupTocPage`：列表容器**只在 `<style>` 里出现**
  * （`.tocBox{display:none}`），所以 `data()` 一读不到，选择器就是空的、目录就是 0 条 ——
@@ -195,7 +195,7 @@ export function fixtureJsoupChainSource(origin: string): RegisteredSource {
 a = org.jsoup.Jsoup.parse(result)
 sel = String(a.select("style").first().data()).replace(/{display:none}/g, ",").slice(0, -1)
 a.select(sel).remove()
-box = a.select(sel).html()
+box = a.select("div.tocBox").html()
 list = []
 items = org.jsoup.Jsoup.parse(box).select("ul.chapter-list li a")
 for (i = 0; i < items.size(); i++) {
@@ -206,6 +206,64 @@ list
 </js>`,
             chapterName: 'name',
             chapterUrl: 'url',
+        },
+    }
+}
+
+/**
+ * 同一个测试站点，考的是**跨请求的会话变量**：`ruleBookInfo` 里 `java.put`、`ruleToc` 里 `java.get`
+ *
+ * 抄的是 📂少年小说网（规则原文见 `fixtureCrossVarBookPage` 的说明）。这类写法在
+ * 816 条源里有 51 处跨组 put→get —— 写端与读端大多是 JS 的 `java.put` / `java.get`，
+ * 而引擎原先只认规则文本里的 `@put:` / `@get:`，于是这些全部断掉。
+ *
+ * 断掉的表现**特别安静**：目录照样出得来，只是开头那一段（详情页上「全部章节目录」
+ * 里预先给出的那几章）整块没了，而且**章节顺序看着是倒的** —— 因为该被 `remove()`
+ * 删掉的「最新章」还留在列表里。
+ *
+ * 所以这个源同时钉住两件事，缺一个断言就会红：
+ *   1. `java.put` 的值要能穿过「详情 → 目录」两次请求（借 `book_variables`）
+ *   2. `select(...).remove()` 要**真删**（否则那条藏起来的条目会多出一章）
+ */
+export function fixtureCrossVarSource(origin: string): RegisteredSource {
+    const base = fixtureSource(origin)
+    return {
+        ...base,
+        id: 'builtin:fixture-cross-var',
+        sortOrder: 15,
+        bookSourceName: '内置测试站点（跨请求变量）',
+        bookSourceComment:
+            '规则在详情页 java.put、到目录页 java.get：守住「跨请求的会话变量」与 remove() 真删',
+        ruleSearch: {
+            // 搜索页给的书籍地址指向**普通的**详情页，这里把它改到这一版的详情页上 ——
+            // 真实书源里 `ruleBookInfo.tocUrl` 要读的那个「全部目录」链接就在这一页
+            ...base.ruleSearch,
+            bookUrl: '@css:h3.title a@href##/fixture/book/##/fixture/cross-book/##',
+        },
+        ruleBookInfo: {
+            ...base.ruleBookInfo,
+            name: 'h1@text',
+            tocUrl: `text.全部目录@href
+@js:
+java.put("html", java.getString("h2:contains(全部章节目录)+.book_list@html"))
+
+result`,
+        },
+        ruleToc: {
+            // 与 📂少年小说网 的 chapterList 逐字同源，只把选择器换成这个测试站点的
+            chapterList: `<js>
+a = org.jsoup.Jsoup.parse(result)
+b = String(a.select("style").first().data()).replace(/{display:none}/g, ",").slice(0, -1)
+
+a.select(b).remove()
+
+w = result.includes("第1页") || !baseUrl.includes("/1/")
+
+if (w) a.html(); else java.get("html")+a.html();
+</js>
+ul.row li a`,
+            chapterName: 'text',
+            chapterUrl: 'href',
         },
     }
 }
@@ -766,6 +824,7 @@ export function builtinSources(origin: string): RegisteredSource[] {
         fixturePostFormSource(origin),
         fixtureBrHtmlSource(origin),
         fixtureJsoupChainSource(origin),
+        fixtureCrossVarSource(origin),
     ]
 }
 

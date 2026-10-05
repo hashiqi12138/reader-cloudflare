@@ -109,6 +109,29 @@ describe('sourceGlobals', () => {
         expect(JSON.parse(String(globals.__sourceVars))).toEqual({ a: '1' })
     })
 
+    it('书的变量垫在底下：`java.get(键)` 要读得到跨请求写进来的值（📂少年小说网 的 html）', () => {
+        const globals = sourceGlobals(ctx({ bookVars: { html: '<ul class="row">甲</ul>' } }))
+        expect(JSON.parse(String(globals.__sourceVars))).toEqual({
+            html: '<ul class="row">甲</ul>',
+        })
+    })
+
+    it('优先级与 readInfoVar 一致：`ctx.vars` > 会话 > 书的变量', () => {
+        // 只关心三张表怎么叠，会话的其余字段（module / queue / batches）不参与，故此处断言后强转
+        const session = {
+            module: Promise.resolve({}),
+            queue: Promise.resolve(),
+            vars: { k: '会话' },
+            bookVars: {},
+        } as unknown as RuleContext['sandbox']
+        const globals = sourceGlobals(
+            ctx({ bookVars: { k: '书' }, sandbox: session, vars: { k: '上下文' } }),
+        )
+        expect(JSON.parse(String(globals.__sourceVars)).k).toBe('上下文')
+        const onlyBookAndSession = sourceGlobals(ctx({ bookVars: { k: '书' }, sandbox: session }))
+        expect(JSON.parse(String(onlyBookAndSession.__sourceVars)).k).toBe('会话')
+    })
+
     it('没有书源时 __source 为 null，而不是缺这个键', () => {
         const globals = sourceGlobals({ baseUrl: 'https://a.com' })
         expect('__source' in globals).toBe(true)

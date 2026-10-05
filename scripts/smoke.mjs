@@ -265,8 +265,17 @@ console.log('\n=== 搜索分页（免费计划的 10 ms CPU 上限逼出来的�
  * 用户导入的真实源指向外部站点，国内很多连不上（规则也会随时失效），
  * 拿它们当断言对象只会让冒烟常年飘红 —— 冒烟要验的是引擎，不是外网站点。
  * 真实源能不能用，由搜索页的「健康度」记录，见 README「第二十七轮」。
+ *
+ * `builtin:fixture-cross-var` 单独排除：它的规则**故意横跨两个页面**
+ * （详情页 `java.put`、目录页 `java.get`），拿到的章节取决于「客户端有没有把同一个
+ * `bookUrl` 带下来」—— 而这条通用链路是按 `url` 参数当书地址的，两边不是同一本。
+ * 真实客户端会带（`public/js/reader.js` 两次请求都带 `bookUrl`），
+ * 所以它有自己的那一段（第 12d 节）按真实形状验。
  */
-const textSources = list.filter((source) => source.builtin && (source.type ?? 0) === 0)
+const COMPARE_EXCLUDED = new Set(['builtin:fixture-cross-var'])
+const textSources = list.filter(
+    (source) => source.builtin && (source.type ?? 0) === 0 && !COMPARE_EXCLUDED.has(source.id),
+)
 const results = {}
 for (const source of textSources) {
     console.log(`\n--- ${source.name} ---`)
@@ -2511,9 +2520,10 @@ console.log('\n=== 12c. jsoup 链式调用（data / select(...)[0] / remove） =
      *   - 🎨漫画搬运：`Jsoup.parse(k).select("a")[0].attr("href")`
      *     —— `select()` 的结果要能下标。以前报 `cannot read property 'attr' of undefined`。
      *
-     * 靶子是 `fixtureJsoupTocPage`：列表容器**只在 `<style>` 里出现**，
-     * 所以 `data()` 一读不到就是 0 章 —— 「数得出章节」本身就是判据。
-     * 这两条都实测过：把修复临时撤掉，报错与线上那两条**逐字相同**。
+     * 靶子是 `fixtureJsoupTocPage`：站点用 `<style>` 把列表里那条「最新章」藏起来，
+     * 书源读 `data()` 拿到选择器、`remove()` 掉它 —— 所以章节数**多一条少一条都是红**：
+     * `data()` 读不到或 `remove()` 是空操作，那条都会留在结果里。
+     * 前两条实测过：把修复临时撤掉，报错与线上那两条**逐字相同**。
      */
     const src = 'builtin:fixture-jsoup-chain'
     const hint = encodeURIComponent(JSON.stringify({ name: '测试小说', author: '测试作者' }))
@@ -2536,6 +2546,11 @@ console.log('\n=== 12c. jsoup 链式调用（data / select(...)[0] / remove） =
         '`Jsoup.parse(...).select("a")[0].attr("href")` 取到了章名与地址',
         JSON.stringify(chapters[0]),
     )
+    check(
+        !chapters.some((c) => String(c.name).includes('藏起来的')),
+        '站点用 <style> 藏起来的那条被 remove() 真删了（空操作的话会多出一章）',
+        JSON.stringify(chapters.map((c) => c.name)),
+    )
     if (chapters[0]) {
         const chCtx = encodeURIComponent(
             JSON.stringify({ title: chapters[0].name, index: 0, url: chapters[0].url }),
@@ -2550,6 +2565,70 @@ console.log('\n=== 12c. jsoup 链式调用（data / select(...)[0] / remove） =
             String(got.json?.content ?? '') === String(css.json?.content ?? '') &&
                 String(got.json?.content ?? '').length > 0,
             '这条链一路通到正文，与 CSS 源逐字一致',
+            got.json?.error ?? `len=${String(got.json?.content ?? '').length}`,
+        )
+    }
+}
+
+console.log('\n=== 12d. 跨请求的会话变量（详情 put → 目录 get）+ remove() 真删 ===')
+{
+    /**
+     * 816 条源里跨组「一个组 put、另一个组 get」共 51 处，而写端与读端大多是 JS 的
+     * `java.put` / `java.get` —— 引擎原先只认规则文本里的 `@put:` / `@get:`，
+     * 于是这 35 处全断。症状**特别安静**：目录照样出得来，只是开头一整段没了、
+     * 顺序还看着是倒的（📂少年小说网 少的是开头 100 章，见 README 第七十三轮）。
+     *
+     * 靶子是 `fixtureCrossVarSource`，规则与 📂少年小说网 逐字同源：
+     * 详情页的 `tocUrl` 规则把 `.book_list`（前两章）`java.put` 进 `html`，
+     * 目录页的 `<js>` 里 `java.get("html")` 把它拼到列表最前面；
+     * 目录页那条「站点用 `<style>` 藏起来的」条目要被 `remove()` 真删掉。
+     *
+     * 两个坑都在这里钉住：
+     *   - `bookUrl` 必须**两次请求一致**（书的变量是按它索引的）。真实流程里
+     *     客户端把搜索得到的 `bookUrl` 一路带下来，所以对得上；这里的 `book`
+     *     参数显式给 `bookUrl`，就是为了模拟这一点。
+     *   - 目录地址末尾带 `/1/`（规则靠 `baseUrl.includes("/1/")` 决定「要不要拼前缀」）。
+     */
+    const src = 'builtin:fixture-cross-var'
+    const bookUrl = `${BASE}/fixture/cross-book/1`
+    const hint = encodeURIComponent(
+        JSON.stringify({ name: '测试小说·甲', author: '作者甲', bookUrl }),
+    )
+    const info = await getJson(
+        `/api/book?sourceId=${encodeURIComponent(src)}&url=${encodeURIComponent(bookUrl)}&book=${hint}`,
+    )
+    check(
+        String(info.json?.tocUrl ?? '').endsWith('/fixture/cross-toc/1/1/'),
+        '详情页的 tocUrl 规则取到了「全部目录」的地址',
+        info.json?.error ?? String(info.json?.tocUrl ?? ''),
+    )
+
+    const toc = await getJson(
+        `/api/toc?sourceId=${encodeURIComponent(src)}&url=${encodeURIComponent(info.json?.tocUrl ?? '')}&book=${hint}`,
+    )
+    const chapters = toc.json?.chapters ?? []
+    const names = chapters.map((c) => c.name)
+    check(
+        JSON.stringify(names) ===
+            JSON.stringify(['第一章 起风了', '第二章 雨落下来', '第三章 天晴了']),
+        '目录三章、顺序正确：详情页那两章在前（跨请求 java.get 拼上了）',
+        toc.json?.error ?? JSON.stringify(names),
+    )
+    check(
+        !names.some((n) => String(n).includes('藏起来的')),
+        '站点用 <style> 藏起来的那条被 remove() 真删了（没删会多出一章）',
+        JSON.stringify(names),
+    )
+    if (chapters[2]) {
+        const chCtx = encodeURIComponent(
+            JSON.stringify({ title: chapters[2].name, index: 2, url: chapters[2].url }),
+        )
+        const got = await getJson(
+            `/api/content?sourceId=${encodeURIComponent(src)}&url=${encodeURIComponent(chapters[2].url)}&book=${hint}&chapter=${chCtx}`,
+        )
+        check(
+            String(got.json?.content ?? '').length > 0,
+            '这条链一路通到正文',
             got.json?.error ?? `len=${String(got.json?.content ?? '').length}`,
         )
     }

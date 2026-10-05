@@ -4,6 +4,7 @@ import {
     asGetSegment,
     crossRequestInfoKeys,
     findGetDirectives,
+    findJsGetKeys,
     readInfoVar,
     splitPutDirectives,
     writeInfoVar,
@@ -135,6 +136,38 @@ describe('跨请求的变量：书的变量那一路', () => {
         expect([
             ...crossRequestInfoKeys(source({ ruleContent: { content: '.c@html' } }), 'x'),
         ]).toEqual([])
+    })
+
+    it('`crossRequestInfoKeys`：`java.get("键")` 也算读端（📂少年小说网 的 html）', () => {
+        const src = source({
+            ruleBookInfo: {
+                tocUrl: '<js>\njava.put("html", java.getString("h2:contains(全部章节目录)+.book_list@html"))\nresult\n</js>',
+            },
+            ruleToc: {
+                chapterList:
+                    '<js>\nb = "x"\nif (w) a.html(); else java.get("html")+a.html();\n</js>\nul.row li a',
+            },
+        })
+        // 详情这次请求：别的组（目录）用 java.get("html") 读了它
+        expect([...crossRequestInfoKeys(src, 'ruleBookInfo')]).toEqual(['html'])
+        expect([...crossRequestInfoKeys(src, 'ruleToc')]).toEqual([])
+    })
+
+    it('两参的 `java.get(地址, 头)` 是取网，**不能**当成变量名收进来', () => {
+        expect(findJsGetKeys('java.get(baseUrl, headers)')).toEqual([])
+        expect(findJsGetKeys('java.get("bid")')).toEqual(['bid'])
+        // 单引号、空格、换行都照收；键是空串的那种不要
+        expect(findJsGetKeys("java.get( 'bid' )")).toEqual(['bid'])
+        expect(findJsGetKeys('java.get(\n  "bid"\n)')).toEqual(['bid'])
+        expect(findJsGetKeys('java.get("")')).toEqual([''])
+    })
+
+    it('`java.put` 写、`@get:` 读（跨写法）也要认出来', () => {
+        const src = source({
+            ruleBookInfo: { init: 'java.put("btype", "1")' },
+            ruleToc: { chapterUrl: 'https://x/?t=@get:{btype}' },
+        })
+        expect([...crossRequestInfoKeys(src, 'ruleBookInfo')]).toEqual(['btype'])
     })
 
     it('读：会话里没有时退到「书的变量」', () => {
