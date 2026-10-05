@@ -122,6 +122,39 @@ export function fixturePostFormSource(origin: string): RegisteredSource {
 }
 
 /**
+ * 同一个测试站点，正文改用 **`@html` 取值**（原样拿到 HTML）
+ *
+ * 存在的意义：正文取值方式里 `@html` 占**一半以上**（线上 816 条启用源里 440 条，54%），
+ * 而那一路取回来的是 HTML —— 阅读界面把正文当纯文本渲染，于是用户看到的是字面的
+ * `<p>` / `<br>`，段落还全糊在一起。这个源打的是 `<br>` 版的章节页
+ * （见 `fixtureBrChapterPage`），与 CSS 版**逐字同源**，所以冒烟能断言
+ * 「`@html` 摊平出来的正文 == `@textNodes` 取到的那份」。
+ *
+ * 目录那一趟照旧，只把章节地址改到 `<br>` 版页面上。正文规则的尾巴
+ * `##↑返回顶部↑` 也是照线上 `📂梦芳小说`（`id.rtext@html##↑返回顶部↑`）抄的：
+ * 它把那段文字删掉，却留下一具 `<a href="javascript:top()">` 的空壳 ——
+ * 摊平那一步要把它一起带走。
+ */
+export function fixtureBrHtmlSource(origin: string): RegisteredSource {
+    const base = fixtureSource(origin)
+    return {
+        ...base,
+        id: 'builtin:fixture-br-html',
+        sortOrder: 13,
+        bookSourceName: '内置测试站点（@html 正文 / <br> 分段）',
+        bookSourceComment:
+            '正文用 @html 取值（原样拿到 HTML）：守住「正文里的 <br> 与块级标签要摊平成换行、标签不能露出来」',
+        ruleToc: {
+            ...base.ruleToc,
+            chapterUrl: '@css:a@href##/chapter/##/br-chapter/##',
+        },
+        ruleContent: {
+            content: '@css:div#nr1@html##↑返回顶部↑',
+        },
+    }
+}
+
+/**
  * 同一个测试站点，改用 XPath 规则
  *
  * 存在的意义是**对照验证**：两套方言打同一个页面，提取结果必须完全一致。
@@ -675,6 +708,7 @@ export function builtinSources(origin: string): RegisteredSource[] {
         fixtureFileSource(origin),
         fixtureExploreSource(origin),
         fixturePostFormSource(origin),
+        fixtureBrHtmlSource(origin),
     ]
 }
 

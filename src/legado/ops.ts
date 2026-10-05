@@ -15,6 +15,7 @@ import {
 } from '../engine/analyze'
 import { ruleHasJs } from '../engine/directives'
 import { sourceLimits } from '../engine/globals'
+import { htmlToText, looksLikeHtml } from '../engine/htmlText'
 import { closeSandboxBatch, openSandboxBatch, type SandboxSession } from '../engine/js'
 import type { BookSource, Chapter, RuleContext, SearchBook } from '../engine/types'
 import { SEARCH_TIMEOUT_MS, UpstreamError, fetchText } from '../lib/http'
@@ -810,6 +811,8 @@ function applyReplaceRegex(replaceRegex: string | undefined, text: string): stri
  *
  * 带 `nextContentUrl` 时会把后续页也取回并接在正文后面 —— 顺序很重要，
  * 页与页之间不加分隔符以外的任何东西，否则段落会被拼错。
+ *
+ * 最后一步是**把还带着 HTML 的正文摊平成文本**（见下面 `toContentText`）。
  */
 export async function fetchContent(
     source: BookSource,
@@ -821,7 +824,31 @@ export async function fetchContent(
     // 净化正则作用于**整章**而不是单页：书源里那些跨段的规则（`[\s\S]*` 之类）
     // 只有拿到完整正文才成立
     const text = pages.map((p) => p.raw).join('\n')
-    return normalizeContent(applyReplaceRegex(source.ruleContent?.replaceRegex, text))
+    const cleaned = applyReplaceRegex(source.ruleContent?.replaceRegex, text)
+    return normalizeContent(toContentText(cleaned))
+}
+
+/**
+ * 正文最后一道：规则值里还带着 HTML 时，把它摊平成**带段落的纯文本**
+ *
+ * 为什么非做不可：正文取值方式里 `@html` 占一半以上（线上 816 条启用源里 440 条，54%），
+ * 那一路取回来的是原样的 HTML，而阅读界面是把正文当纯文本渲染的（按 `\n` 切段、
+ * 每段 textContent）—— 于是用户看到的是字面的 `<p>` / `</p>` / `<br>`，段落还全糊在一起。
+ * 细节与线上实测数据见 `src/engine/htmlText.ts` 的文件头。
+ *
+ * **放在净化正则之后**，两个理由：
+ *
+ * 1. 书源的 `replaceRegex` 是照着**取值方式的输出**写的。`@html` 那一族的正则里
+ *    有不少是冲标记去的（线上 35 条的 `replaceRegex` 里含 `<`），先摊平它们就失效了。
+ * 2. 顺序反过来还有个副作用：正则删掉文字后留下的**空标签**（线上那条
+ *    `id.rtext@html##↑返回顶部↑` 就会剩一个 `<a href="javascript:...">`）在摊平时
+ *    自然消失，不会把一段空壳留在正文里。
+ *
+ * 判据是「这段像不像 HTML」而不是「规则写了什么取值」：`@js:` 那 176 条（22%）里
+ * 也有一大半是脚本自己拼出来的 HTML，静态看不出取值方式，但**看得出来**是不是 HTML。
+ */
+function toContentText(text: string): string {
+    return looksLikeHtml(text) ? htmlToText(text) : text
 }
 
 /** 供上层复用：把一个已取回的页面变成规则求值上下文 */

@@ -463,6 +463,43 @@ export function fixtureChapterPage(bookId: string, chapterId: string): string {
 }
 
 /**
+ * **`<br>` 版的章节页** —— 模拟笔趣阁那一族「正文 div 里全是 `<br>`」的写法
+ *
+ * README 第二轮记过这个站点：`#nr1` 的 HTML 有 2821 字符却**一个换行都没有**，
+ * 全靠 100 个 `<br>` 分段。这一族的正文规则几乎都写成 `#nr1@html`，
+ * 于是取回来的是**原样的 HTML** —— 阅读界面把正文当纯文本渲染，
+ * 用户看到的就是字面的 `<p>` / `<br>`，段落还全糊在一起。
+ *
+ * 这个页面钉住四件事（冒烟里逐条断言）：
+ *
+ *   1. 标签不能在正文里露出来；
+ *   2. 段落数与写进去的一致（`<br>` 真的变成了换行）；
+ *   3. 不能有字面的 `<br>`；
+ *   4. 挂在 `div` 里的 `<script>` **不能**被读进正文。
+ *      （cheerio 的 `.text()` 会把 script 里的字也算进来，线上真有源的正文 div
+ *      里挂着 `<script>read_top()</script>`。）
+ *
+ * 「`↑返回顶部↑` + 净化正则 `##↑返回顶部↑##`」是照线上 `📂梦芳小说`
+ * （`id.rtext@html##↑返回顶部↑`）抄的：正则删掉了文字，却留下一具
+ * `<a href="javascript:...">` 的空壳 —— 摊平那一步要把它一起带走。
+ */
+export function fixtureBrChapterPage(bookId: string, chapterId: string): string {
+    const book = BOOKS.find((b) => b.id === bookId)
+    const chapter = book?.chapters.find((c) => c.id === chapterId)
+    if (!book || !chapter) return page('未找到', '<p class="empty">没有这一章</p>')
+
+    // 段落之间**只有 `<br>`**，整段 HTML 一行到底 —— 与线上那个站点一样
+    const body = chapterParagraphs(book.name, chapter.name).map(escapeHtml).join('<br>')
+
+    return page(
+        `${book.name} ${chapter.name}`,
+        `<div class="reader"><h1 class="chapter-title">${escapeHtml(chapter.name)}</h1>` +
+            `<div id="nr1"><script>read_top()</script>${body}<br><br>` +
+            `<a href="javascript:top()">↑返回顶部↑</a></div></div>`,
+    )
+}
+
+/**
  * **分页正文**，专供验证 `nextContentUrl`
  *
  * 不少站点把一章切成好几页，每页结尾挂着「本章未完，请点击下一页继续阅读」。
@@ -946,6 +983,10 @@ export async function handleFixture(request: Request, url: URL): Promise<Respons
 
     const chapter = /^\/fixture\/chapter\/(\w+)\/(\w+)$/.exec(pathname)
     if (chapter) return html(fixtureChapterPage(chapter[1]!, chapter[2]!))
+
+    // `<br>` 版的章节页（见 fixtureBrChapterPage 的说明）
+    const brChapter = /^\/fixture\/br-chapter\/(\w+)\/(\w+)$/.exec(pathname)
+    if (brChapter) return html(fixtureBrChapterPage(brChapter[1]!, brChapter[2]!))
 
     const imageChapter = /^\/fixture\/image-chapter\/(\w+)\/(\w+)\/(\d+)$/.exec(pathname)
     if (imageChapter) {
