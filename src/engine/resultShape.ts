@@ -160,16 +160,52 @@ export const ITEM_AS_JSOUP =
     /\bresult\s*\.\s*(?:map|forEach|filter|find|findIndex|some|every|flatMap|reduce)\s*\(\s*(?:function\s*)?\(?\s*([A-Za-z_$][\w$]*)\s*\)?\s*(?:=>)?[\s\S]{0,300}?\b\1\s*\.\s*(?:attr|select|text|html|outerHtml|ownText|tagName|hasClass|hasAttr|val|className|textNodes|eachText|matches|matchesOwn|children|first|last|get|eq|size|index|id)\s*\(/
 
 /**
- * 脚本里出现了「只有节点才有的方法」（**不看**是不是同时按字符串用）
+ * 脚本在**字符串里找标记**：`String(n).includes('<h3')`、`page.indexOf('<ul')`
+ *
+ * 这一条判的是「条目必须是标记」：脚本既然在一个字符串里找 `<h3` / `<ul` 这种**标签形状**，
+ * 那它拿到的东西就必须有标记 —— 给它文本的话这些判断**永远为 false**，
+ * 而且不报错，整个目录静默变成 0 条。
+ *
+ * 只看 `includes` / `indexOf` / `match` / `test` 这类**查找**调用的实参，
+ * 所以「脚本自己拼 HTML」的写法（`'<li>' + x + '</li>'`）不会被误判成需要标记 ——
+ * 那种写法要的恰恰是**文本**。线上 816 条源里命中 2 处（🎨漫画搬运、⚡📂全本小说网），
+ * 后者整条就是 `<js>`（`result` 本来就是页面原文），只有前者受影响。
+ */
+const MARKUP_LOOKUP =
+    /(?:includes|indexOf|lastIndexOf|search|match|matchAll|test)\s*\(\s*(['"`])\s*<\s*\/?[A-Za-z][\w:-]*/
+
+/**
+ * 把 `Array.from(result)` / `[...result]` 看成 `result` 本身
+ *
+ * Legado 那边列表规则的 `result` 是 `Elements`（一个 `List<Element>`），书源于是常常
+ * 先 `Array.from(result)` 再往下用。不先归一化的话，**「转成数组之后才动」的写法一条都认不出来**
+ * —— `Array.from(result).filter(n => n.attr('href'))` 既不是 `result.attr(`、也不是
+ * `result.filter(...)`。🎨漫画搬运 的目录规则正是这个形状：
+ *
+ *     voList = Array.from(result).filter(n => String(n).includes('<h3'))
+ */
+function normalizeResult(code: string): string {
+    return code
+        .replace(/Array\s*\.\s*from\s*\(\s*result\s*\)/g, 'result')
+        .replace(/\[\s*\.\.\.\s*result\s*\]/g, 'result')
+}
+
+/**
+ * 脚本里出现了「只有节点才有的东西」（**不看**是不是同时按字符串用）
  *
  * 与 `wantsJsoupResult` 的差别就是那一条「字符串优先」：两个函数服务两件事 ——
  * `wantsJsoupResult` 决定 `result` **绑成数组还是字符串**（两种都按字符串算时字符串能
  * 同时满足两种写法）；而这个决定**交给脚本的内容是 HTML 还是文本**：
- * 脚本既然调了 `attr` / `select` / `toArray`，那 `result` 里就必须有标记，
+ * 脚本既然调了 `attr` / `select` / `toArray`、或在字符串里找标签，那 `result` 里就必须有标记，
  * 只给文本的话这些方法拿不到任何东西（`toArray()` 会得到一个空数组，**不报错**）。
  */
 export function usesJsoupOnResult(code: string): boolean {
-    return RESULT_AS_JSOUP.test(code) || ITEM_AS_JSOUP.test(code)
+    const normalized = normalizeResult(code)
+    return (
+        RESULT_AS_JSOUP.test(normalized) ||
+        ITEM_AS_JSOUP.test(normalized) ||
+        MARKUP_LOOKUP.test(code)
+    )
 }
 
 /**
