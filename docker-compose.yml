@@ -1,0 +1,30 @@
+# `docker compose up -d` 就能起的一份默认配置（细节见 DOCKER.md）。
+#
+# 只做了三件事：把端口放出去、把数据库挂到命名卷上、失败了自己重启。
+# 两个值可以从环境变量覆盖 —— 用法见 DOCKER.md 的「两种起法」：
+#
+#   READER_PORT     宿主端口（默认 8787）。8787 被别人占了是很常见的（比如本项目的
+#                   `npm run dev` 自己就在用），所以留了个把手。
+#   ENABLE_FIXTURE  内置测试书源（默认 false）。只有想对容器跑一遍 `npm run smoke`
+#                   才需要打开。
+#
+# 没有它也能跑 —— `docker run` 那一条命令行等价。
+services:
+    reader:
+        build: .
+        image: reader-cloudflare:local
+        ports:
+            # 冒号左边是宿主机、右边是容器。容器里那个 8787 不用动（Dockerfile 里 EXPOSE 的）。
+            - '${READER_PORT:-8787}:8787'
+        environment:
+            # 内置测试书源（fixture）：默认关，与线上 wrangler.jsonc 那份一致
+            ENABLE_FIXTURE: '${ENABLE_FIXTURE:-false}'
+        volumes:
+            # 命名卷比 bind mount 省事：Windows / macOS 上不用操心目录权限。
+            # 数据全在里面 —— 书源、账号、书架、进度、书签、笔记、媒体缓存，
+            # 以及给代取地址签名用的那个密钥（存在库里，见 DOCKER.md「备份与迁移」）。
+            - reader-data:/data
+        restart: unless-stopped
+
+volumes:
+    reader-data:

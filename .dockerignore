@@ -1,0 +1,40 @@
+# 构建上下文里不需要的东西。
+#
+# 这份清单只做一件事：让 `docker build .` 送进去的东西**刚好够构建**。
+# 少了一样会在 COPY 那一步报「找不到文件」（看得见），多了一样只是慢一点 ——
+# 所以凡是拿不准的都不往里加。
+#
+# QuickJS 的 wasm **故意排除**：它由 `npm ci` 的 prepare 钩子从 node_modules 复制到
+# src/engine/（见 Dockerfile），镜像里那份因此与装上的 quickjs-emscripten 版本一致。
+# 带进来一份宿主上的旧文件反而会掩盖「依赖升了但 wasm 没跟着升」。
+src/engine/*.wasm
+
+# 版本控制与 CI
+.git
+.github
+
+# 依赖与构建产物（容器内重新装、重新打）
+node_modules
+dist
+dist-node
+
+# 本地状态与密钥
+.wrangler
+data
+.env
+.env.*
+!.env.example
+.dev.vars
+!.dev.vars.example
+
+# 日志、临时产物、编辑器
+*.log
+.tmp
+coverage
+*.tsbuildinfo
+.idea
+.vscode
+
+# 全量验证用的本地素材（几 MB 的第三方书源导出与探测报告，见 .gitignore）
+live-*-dump.json
+explore-report*.txt
