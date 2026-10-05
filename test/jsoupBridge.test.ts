@@ -180,20 +180,72 @@ describe('org.jsoup 桥', () => {
         expect(String(value(bridge, 'html', doc))).not.toContain('sort-li-title')
     })
 
-    it('其余写操作仍是空操作（语料里只当顺手清理，没人依赖改完再读）', () => {
+    /**
+     * 写操作：`remove()` 之外的那几个（第七十八轮起也真改）
+     *
+     * 语料里只有一个真实消费者 —— 🎨笔趣漫画 的正文规则把真图地址从 `data-original`
+     * 搬到 `src`，之后再抽正文图片。当成无操作的话 `src` 一直是懒加载占位图，
+     * **不报错**、只是每张图都错。
+     *
+     * 与 `remove()` 同一个取舍：改的是宿主侧共享的节点，会串到同一份文档的其它句柄上。
+     */
+    it('`attr(k, v)` 真改：紧接着读回来是**新值**（🎨笔趣漫画 那条正文规则）', () => {
         const bridge = new JsoupBridge()
         const doc = handleOf(bridge)
-        const first = handle(bridge, 'first', handle(bridge, 'select', doc, ['h3.sort-li-title']))
-        for (const op of ['attrSet', 'addClass', 'removeClass', 'append', 'prepend']) {
-            expect(bridge.run(op, first, ['class', 'x'])).toEqual({
-                ok: true,
-                kind: 'value',
-                value: null,
-            })
-        }
-        // 关键是「改不动」：文档没被真的动过，后续取值仍与原来一致
-        expect(value(bridge, 'text', first)).toBe('类型')
-        expect(value(bridge, 'size', handle(bridge, 'select', doc, ['h3.sort-li-title']))).toBe(2)
+        const a = handle(bridge, 'selectFirst', doc, ['a.btn-tag'])
+
+        expect(value(bridge, 'attr', a, ['data-filter-type'])).toBe('tagid')
+        // 两个参数 = 写（jsoup 的同名重载）；写的那一路**返回 null**，像 remove() 一样
+        expect(bridge.run('attr', a, ['data-filter-type', 'newtype'])).toEqual({
+            ok: true,
+            kind: 'value',
+            value: null,
+        })
+        expect(value(bridge, 'attr', a, ['data-filter-type'])).toBe('newtype')
+        expect(value(bridge, 'hasAttr', a, ['data-filter-type'])).toBe(true)
+        // 一个参数仍然是读，不受影响
+        expect(value(bridge, 'attr', a, ['class'])).toBe('btn-tag jsTag')
+
+        // 串到同一份文档的其它句柄上 —— 那正是书源要的效果（sibling 看到的是新值）
+        const again = handle(bridge, 'selectFirst', doc, ['a.btn-tag'])
+        expect(value(bridge, 'attr', again, ['data-filter-type'])).toBe('newtype')
+    })
+
+    it('`addClass` / `removeClass` 真改：`className()` 跟着变', () => {
+        const bridge = new JsoupBridge()
+        const b = handle(bridge, 'selectFirst', handleOf(bridge), ['div.book-desc b'])
+        expect(value(bridge, 'className', b)).toBe('')
+        expect(bridge.run('addClass', b, ['zz'])).toEqual({ ok: true, kind: 'value', value: null })
+        expect(value(bridge, 'className', b)).toBe('zz')
+        expect(value(bridge, 'hasClass', b, ['zz'])).toBe(true)
+        bridge.run('removeClass', b, ['zz'])
+        expect(value(bridge, 'className', b)).toBe('')
+    })
+
+    it('`append` / `prepend` / `html(串)` / `text(串)` 真改：内层 HTML 跟着变', () => {
+        const bridge = new JsoupBridge()
+        const d = handle(bridge, 'selectFirst', handleOf(bridge), ['div.book-desc'])
+        expect(String(value(bridge, 'html', d))).toBe('简介：<b>一本</b>书')
+
+        expect(bridge.run('append', d, ['<i>尾</i>'])).toEqual({
+            ok: true,
+            kind: 'value',
+            value: null,
+        })
+        expect(String(value(bridge, 'html', d))).toContain('<i>尾</i>')
+        bridge.run('prepend', d, ['<i>头</i>'])
+        expect(String(value(bridge, 'html', d))).toMatch(/^<i>头<\/i>/)
+
+        // 设值那一趟返回 null；不带参数仍然是读
+        expect(bridge.run('html', d, ['<u>换掉</u>'])).toEqual({
+            ok: true,
+            kind: 'value',
+            value: null,
+        })
+        expect(String(value(bridge, 'html', d))).toBe('<u>换掉</u>')
+        bridge.run('text', d, ['纯文本'])
+        expect(String(value(bridge, 'text', d))).toBe('纯文本')
+        expect(String(value(bridge, 'html', d))).toBe('纯文本')
     })
 
     it('parseFragments：一串 outerHTML 变回 N 个并列元素（java.getElements 用）', () => {

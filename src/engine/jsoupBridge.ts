@@ -324,25 +324,59 @@ export class JsoupBridge {
                         ? { $: handle.$, nodes: [handle.nodes[handle.nodes.length - 1]] }
                         : null,
                 )
-            case 'text':
+            /**
+             * `text`：**按参数个数**分派读与写（第七十八轮，与 `attr` 同一个理由）
+             *
+             * `text(String)` 是写（jsoup 的 `Element.text(String)`）。语料里**没人**这么写，
+             * 但既然 `attr` 那一路要按个数分，这里不分就会留下同一个坑：
+             * `x.text('新')` 静默返回旧文本。
+             */
+            case 'text': {
+                if (args.length > 0) {
+                    const node = this.one(handle)
+                    if (node) handle.$(node).text(String(args[0] ?? ''))
+                    return this.value(null)
+                }
                 return this.value(normalizeSpace(handle.$(handle.nodes).text()))
+            }
             case 'ownText':
                 return this.value(normalizeSpace(handle.nodes.map((n) => ownTextOf(n)).join('')))
             case 'textNodes':
                 return this.value(handle.nodes.flatMap((n) => textNodesOf(n)))
             case 'eachText':
                 return this.value(handle.nodes.map((n) => normalizeSpace(handle.$(n).text())))
-            case 'html':
-                return this.value(
-                    (this.one(handle) ? handle.$(this.one(handle) as Node).html() : '') ?? '',
-                )
+            /**
+             * `html`：同样按参数个数分派（`html()` 读内层 HTML、`html(串)` 是写）
+             */
+            case 'html': {
+                const node = this.one(handle)
+                if (args.length > 0) {
+                    if (node) handle.$(node).html(String(args[0] ?? ''))
+                    return this.value(null)
+                }
+                return this.value((node ? handle.$(node).html() : '') ?? '')
+            }
             case 'outerHtml':
             case 'toString':
                 return this.value(
                     handle.nodes.map((n) => handle.$(n).prop('outerHTML') ?? '').join('\n'),
                 )
+            /**
+             * `attr`：**按参数个数**分派「读」与「写」（第七十八轮）
+             *
+             * jsoup 里 `attr(String)` 与 `attr(String, String)` 是两个同名重载；
+             * 桥这边只有 `args` 一个线索，所以按 `args.length` 分。以前无论几个参数都走读，
+             * 于是 `attr("src", 新值)` **静默返回旧值** —— 🎨笔趣漫画 正好踩在这上面。
+             *
+             * 取**第一个**节点，与 `hasAttr` / `val` / `className` 一致。
+             */
             case 'attr': {
                 const node = this.one(handle)
+                if (args.length > 1) {
+                    if (!node) return this.value(null)
+                    handle.$(node).attr(str(0), String(args[1] ?? ''))
+                    return this.value(null)
+                }
                 if (!node) return this.value('')
                 return this.value(handle.$(node).attr(str(0)) ?? '')
             }
@@ -529,11 +563,38 @@ export class JsoupBridge {
             case 'remove':
                 handle.$(handle.nodes).remove()
                 return this.value(null)
-            case 'attrSet':
+            /**
+             * 其余写操作：第七十八轮起也**真改**（以前与 `remove` 一起当无操作）
+             *
+             * 语料里只有一个真实消费者 —— 🎨笔趣漫画 的正文规则：
+             *
+             *     imgs = java.getElements(".rd-article-wr img")
+             *     imgs.forEach(e => { e.attr("src", e.attr("data-original")) })
+             *     imgs
+             *
+             * 它把真图地址从 `data-original` 搬到 `src`，之后再抽正文里的图片。
+             * 当成无操作的话 `src` 一直是懒加载占位图 —— **不报错**，只是每一张图都错。
+             *
+             * `addClass` / `removeClass` / `append` / `prepend`（以及 `html(串)` / `text(串)`）
+             * 语料里**一处都没用**（第七十八轮把手上那份含发现页的导出 594 条全量扫过：
+             * 这四个方法各 0 处、`attr(k, v)` 只有 🎨笔趣漫画 一处）。实现它们不是为了修谁，
+             * 而是不再留「静默无操作」这个坑：谁哪天写了 `append(...)` 再取回来，
+             * 拿到的是**改过之后**的那一份，而不是一个不报错的旧值。
+             *
+             * 与 `remove()` 同一个取舍：改的是宿主侧共享的节点，会串到同一份文档的
+             * 其它句柄上 —— 那正是书源要的效果（见 `remove` 上面那段）。
+             */
             case 'addClass':
+                handle.$(handle.nodes).addClass(str(0))
+                return this.value(null)
             case 'removeClass':
+                handle.$(handle.nodes).removeClass(str(0))
+                return this.value(null)
             case 'append':
+                handle.$(handle.nodes).append(str(0))
+                return this.value(null)
             case 'prepend':
+                handle.$(handle.nodes).prepend(str(0))
                 return this.value(null)
             default:
                 throw new Error(`org.jsoup 还不支持的方法：${op}()`)

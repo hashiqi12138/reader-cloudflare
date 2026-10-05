@@ -36,7 +36,6 @@ import { describe, expect, it } from 'vitest'
  */
 const NOT_ON_SURFACE = new Set([
     'toString',
-    'attrSet',
     'parse',
     'parseBodyFragment',
     'parseFragments',

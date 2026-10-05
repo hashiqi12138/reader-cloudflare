@@ -668,6 +668,12 @@ var java = {
   // 把每个节点的 outerHTML 交回来，这边再解析成 Elements。
   // 线上 32 处 getElements + 9 处 getElement，写法横跨 CSS、JSOUP 简写与 XPath，
   // 都由规则求值层统一处理，这里不做方言判断。
+  //
+  // 给的是**数组形态**（第七十八轮改）：与 select() 的返回值、Jsoup.parse(...) 的返回值
+  // 同一种东西。以前这里给的是裸的 JsoupElements —— 既不能下标也没有 length，
+  // 于是书源里 java.getElements(...)[i-1].text()（🎬榴莲影视 的目录）、
+  // java.getElements(...).length、.forEach(...)（🎨笔趣漫画 的正文）全都落空：
+  // [i-1] 恒为 undefined、.forEach 直接 TypeError。
   getElements: function (rule, content) {
     var c = content === undefined || content === null ? java.__content : content
     var raw = __host.getElements(JSON.stringify([
@@ -677,11 +683,29 @@ var java = {
     var res = JSON.parse(raw)
     if (!res.ok) { throw new Error(res.error) }
     var reply = __jsoupCall('parseFragments', null, [res.value])
-    return reply.handle === null ? new JsoupElements(0) : new JsoupElements(reply.handle)
+    return reply.handle === null ? [] : __listOf(reply.handle)
   },
+  // 第一个命中节点；一个都没命中给 null（书源靠这个判「有没有」——如 🎨51漫画
+  // 的 java.getElement("script") === null，所以这里**不能**改成一并给数组）
   getElement: function (rule, content) {
     var all = java.getElements(rule, content)
-    return all.size() > 0 ? all.first() : null
+    if (all.length === 0) return null
+    /**
+     * 给的是**含一个元素的数组形态**（与 selectFirst 的返回值同一种东西）
+     *
+     * 不能给「裸的单元素包装」。第七十八轮删掉 JsoupElements 时试过 all[0]
+     * （盒装字符串），结果是 🎨51漫画 那条规则**静默走错分支**：
+     *
+     *     Array.from(java.getElement("script")).filter(...)
+     *
+     * 盒装字符串是 String 对象 —— Array.from 见到 length 就按**字符**摊开，
+     * 于是拿到一串单字，filter 一个都不命中，整条目录落到兜底那一支（只剩一章）。
+     * 不报错，只是目录变成一章。
+     *
+     * 数组形态则 Array.from / [0] / .size() / String(...) 全都成立，
+     * 与 select() / parse() 那几种「一批节点」形状一致。
+     */
+    return all.first()
   },
 
   // 时间格式化是纯计算，走同步桥 —— 实现放在宿主侧，好在 Node 里直接测
@@ -1477,30 +1501,35 @@ function __jsoupCall(op, handleId, args) {
   return reply
 }
 
-function JsoupElements(id) { this.__id = id }
-
 /**
  * 沙箱里 jsoup 对象的**方法面** —— 只有这一份清单
  *
- * 它要挂在四种包装上：
+ * 它要挂在三种包装上：
  *
- *   1. JsoupElements（java.getElements(规则) 与它自己的返回值）
- *   2. org.jsoup.Jsoup.parse(整页) 的返回值
- *   3. 「命中多个节点」时的**数组形态**（能下标、能 forEach / map）
- *   4. 单个元素的「盒装字符串」（脚本常常直接把它 return 回去，要能串化成文本）
+ *   1. 「一批节点」的**数组形态** —— java.getElements(规则)、org.jsoup.Jsoup.parse(整页)、
+ *      以及 select() / first() / get() 这些返回句柄的方法，**都是这一种**
+ *      （能下标、有 length、能 forEach / map / Array.from）
+ *   2. 单个元素的「盒装字符串」（脚本常常直接把它 return 回去，要能串化成文本）
+ *   3. result 被绑成整页 HTML 时的那个「字符串 + 方法」壳（见 __htmlApi）
  *
- * 以前这四份是**各写一遍的字面量数组**，于是漂了，而且是两种不同的漂：
+ * 以前这几种是**各写一遍的字面量数组**，于是漂了，而且是两种不同的漂：
  *
- *   - **桥里根本没有 data 这个 op**，四份清单也都没写它 ——
+ *   - **桥里根本没有 data 这个 op**，几份清单也都没写它 ——
  *     📂少年小说网 的目录规则（Jsoup.parse(result).select("style").first().data()）
  *     因此报 TypeError: not a function，报错行号还指向规则里那一行；
  *     既不是选择器错、也不是桥那句「还不支持的方法：xxx()」，无从下手。
- *   - **改文档的那几个**（remove / addClass / …）只在第 1 份里有，
- *     于是 X.select(css).remove() 只要 X 不是 JsoupElements（脚本里的 result、
+ *   - **改文档的那几个**（remove / addClass / …）当年只在「裸 JsoupElements」那一份里有，
+ *     于是 X.select(css).remove() 只要 X 不是那种包装（脚本里的 result、
  *     Jsoup.parse(...) 的返回值）就炸 —— 线上 8 处是这么写的。
  *
- * 现在只留这一份，四种包装各取所需（数组那两种要去掉与 Array.prototype 撞名的）。
+ * 现在只留这一份，几种包装各取所需（数组那一份要去掉与 Array.prototype 撞名的）。
  * 加方法时改一处；test/jsoupSurface.test.ts 盯着清单与桥的 op 一一对上。
+ *
+ * **第七十八轮删掉了「裸 JsoupElements」那一份**：它既不能下标也没有 length，
+ * 书源里 getElements(...)[i-1] / .length / .forEach(...) 全都落空
+ * （🎬榴莲影视 的目录靠 [i-1]、🎨笔趣漫画 的正文靠 .forEach）。让它与别的「一批节点」
+ * 一样给**数组形态**之后，那几种写法自然都有；Array.from 也不再需要第七十六轮补的
+ * Symbol.iterator（数组天然可迭代）。少一种形态、少一处漂移。
  */
 var JS_SURFACE = [
   'select', 'selectFirst', 'get', 'first', 'last', 'eq', 'children', 'child', 'childNodeSize',
@@ -1546,46 +1575,6 @@ var JS_LIST_SURFACE = (function () {
   }
   return out
 })()
-
-var JS_METHODS = JS_SURFACE
-for (var __i = 0; __i < JS_METHODS.length; __i++) {
-  (function (name) {
-    JsoupElements.prototype[name] = function () {
-      var reply = __jsoupCall(name, this.__id, Array.prototype.slice.call(arguments))
-      if (reply.kind === 'handle') return reply.handle === null ? null : new JsoupElements(reply.handle)
-      return __valueOf(name, reply)
-    }
-  })(JS_METHODS[__i])
-}
-JsoupElements.prototype.toString = function () {
-  return String(__jsoupCall('toString', this.__id, []).value)
-}
-JsoupElements.prototype.toArray = function () {
-  var out = []
-  for (var i = 0; i < this.size(); i++) out.push(this.get(i))
-  return out
-}
-/**
- * 让它**可迭代**，于是 Array.from(...) / for...of 都能用（第七十六轮）
- *
- * jsoup 的 Elements 本来就是个 List，所以书源里
- *
- *     x = Array.from(java.getElements("class.BCsectionTwo-top-chapter"))
- *     x.map(...)
- *
- * 是常规写法（📂贝壳读书 的整条目录就建立在这个 x 上）。而以前这里**没有
- * Symbol.iterator**：Array.from 对一个「既不可迭代、也没有 length」的对象
- * **不报错**，直接给一个空数组 —— 于是目录 0 章、没有 warning、书源也不报错，
- * 是最难查的那种静默故障。🎨51漫画 的 Array.from(java.getElement("script"))
- * 是同一个坑的另一个形状（第四十九轮修的是它返回 null 那一半）。
- *
- * 交给 toArray()：条目的形态与别处一致（每个元素的 String() 就是它自己的 outerHTML）。
- */
-JsoupElements.prototype[Symbol.iterator] = function () {
-  return this.toArray()[Symbol.iterator]()
-}
-// 书源里偶尔用 .eachText() 的返回值当数组迭代，这里保证它一定是数组
-JsoupElements.prototype.copy = function () { return this.clone() }
 
 /**
  * 把一段 HTML 包成「字符串 + jsoup 方法」
@@ -1669,14 +1658,16 @@ function __boxHtml(value) {
  * 线上三处正是这么写的（⚡📂八一中文网、🔞西瓜书屋、🔞紫云宫），
  * 而它们原来都会在多命中时报 result.size is not a function。
  *
- * 为什么元素也是「字符串 + 方法」而不是裸的 JsoupElements：脚本常常把整个
+ * 为什么元素也是「字符串 + 方法」而不是只带一个内部句柄号的对象：脚本常常把整个
  * result（或某个元素）直接 return 回去，而宿主侧拿到的值要能**串化**成文本。
  * 盒装字符串能，只带一个内部句柄号的对象不能 —— 那会串成 {"__id":5}。
  *
- * 集合级方法挂在**数组实例**上而不是 JsoupElements.prototype 上，是因为
- * 那样会改动所有 jsoup 调用的返回值形态（线上两千多处），
- * 而这一轮要动的只是「result 绑成什么」。挂的属性名都避开了
- * Array.prototype 上已有的那些（尤其 filter / map / forEach / join）。
+ * 集合级方法挂在**数组实例**上而不是某个自定义原型上，是因为那样会改动所有 jsoup
+ * 调用的返回值形态（线上两千多处），而这一轮要动的只是「result 绑成什么」。
+ * 挂的属性名都避开了 Array.prototype 上已有的那些（尤其 filter / map / forEach / join）。
+ *
+ * 第七十八轮起**所有「一批节点」都走这一条**（java.getElements 也改成了它），
+ * 于是 x[i] / x.length / x.forEach 与 x.size() / x.select() 同时可用。
  */
 function __attachList(handle, out) {
   var methods = JS_LIST_SURFACE
@@ -1715,44 +1706,89 @@ function __attachList(handle, out) {
  * 为什么这三个能预取：它们的成本本来就在**过桥**上，而值在宿主侧是现成的
  * （HTML 要串化一次、属性表解析时就有了、叶节点的文本就是几个文本子节点拼起来）。
  * 逐节点 attr('href') / text() 是书源码里最集中的一批写法。
+ *
+ * **写操作会把缓存清掉**（第七十八轮）。这一条是必须的，不然两层会打架：
+ * 桥那边 attr("src", 真图) 真改了节点，而这里 String(e) 还会吐出**改之前**的 HTML。
+ * 所以：任何写操作落地之后就把这一格缓存清空，之后的读一律过桥（读到的就是改过的那份）。
+ * 清的是**这个元素**的缓存；被 remove() 掉的子节点自己那份仍然有效（它本身没变）。
  */
 function __wrapElement(handle, html, attrs, text) {
-  var text0 = html === undefined || html === null
-    ? String(__jsoupCall('outerHtml', handle, []).value)
-    : String(html)
-  var boxed = new String(text0)
+  /**
+   * 缓存放在一个**可变的口袋**里，写操作把它清空（见上面那段）
+   *
+   * 判据是「是不是 null」：null = 这份没了、要过桥；空串是合法值（比如空文本）。
+   */
+  var own = {
+    html: html === undefined ? null : html,
+    attrs: attrs || null,
+    text: text === undefined ? null : text,
+  }
+  function invalidate() {
+    own.html = null
+    own.attrs = null
+    own.text = null
+  }
+
+  var boxed = new String(own.html === null ? String(__jsoupCall('outerHtml', handle, []).value) : String(own.html))
+  /** 每一轮写操作：过桥改真节点，然后把缓存清掉 */
+  function write(name, args) {
+    var reply = __jsoupCall(name, handle, args)
+    invalidate()
+    return __valueOf(name, reply)
+  }
+  /** 会改到这份缓存的方法（attr / html / text 在下面另按参数个数分派） */
+  var WRITE_OPS = { remove: 1, addClass: 1, removeClass: 1, append: 1, prepend: 1 }
+
   var methods = JS_LIST_SURFACE
   for (var i = 0; i < methods.length; i++) {
     (function (name) {
       boxed[name] = function () {
-        var reply = __jsoupCall(name, handle, Array.prototype.slice.call(arguments))
+        var args = Array.prototype.slice.call(arguments)
+        var reply = __jsoupCall(name, handle, args)
+        if (WRITE_OPS[name]) invalidate()
         if (reply.kind !== 'handle') return __valueOf(name, reply)
         if (reply.handle === null) return []
         return __listOf(reply.handle)
       }
     })(methods[i])
   }
-
   /**
-   * 预取过的属性：attr / hasAttr / className / id / val 不再过桥
+   * 串化：缓存还在就直接给，被清掉了就过桥重取
    *
-   * 与桥那份实现**逐字对齐**（宿主那边读的是 $(node).attr(名字) ?? 空串 那一句，
-   * 取不到就是空串、不是 null 也不是 undefined），所以这里也不需要在键不存在时回退过桥。
+   * 这里必须覆盖 toString（而不是只在建的时候定死那个字符串），
+   * 否则 e.attr("src", 新值) 之后把 e 拼进结果里，出来的还是改之前的 HTML ——
+   * 🎨笔趣漫画 那条正文规则正是「改完把 imgs 原样返回」。
    */
-  if (attrs) {
-    var pick = function (name) {
-      var v = attrs[name]
-      return v === undefined || v === null ? '' : String(v)
-    }
-    boxed.attr = function (name) { return pick(String(name)) }
-    boxed.hasAttr = function (name) { return attrs[String(name)] !== undefined }
-    boxed.className = function () { return pick('class') }
-    boxed.id = function () { return pick('id') }
-    boxed.val = function () { return pick('value') }
+  boxed.toString = function () {
+    if (own.html === null) own.html = String(__jsoupCall('outerHtml', handle, []).value)
+    return String(own.html)
   }
-  // 叶节点的文本：宿主要么给一个字符串、要么给 null（= 没预取，有元素子节点）
-  if (text !== undefined && text !== null) {
-    boxed.text = function () { return String(text) }
+
+  var pick = function (name) {
+    if (own.attrs === null) return String(__jsoupCall('attr', handle, [name]).value)
+    var v = own.attrs[name]
+    return v === undefined || v === null ? '' : String(v)
+  }
+  boxed.attr = function (name, value) {
+    // 两个参数是**写**（jsoup 的同名重载），与桥那边按参数个数分派同一套规矩
+    if (arguments.length > 1) return write('attr', [String(name), value])
+    return pick(String(name))
+  }
+  boxed.hasAttr = function (name) {
+    if (own.attrs === null) return __jsoupCall('hasAttr', handle, [name]).value === true
+    return own.attrs[String(name)] !== undefined
+  }
+  boxed.className = function () { return pick('class') }
+  boxed.id = function () { return pick('id') }
+  boxed.val = function () { return pick('value') }
+  boxed.text = function () {
+    if (arguments.length > 0) return write('text', [String(arguments[0])])
+    if (own.text === null) return String(__jsoupCall('text', handle, []).value)
+    return String(own.text)
+  }
+  boxed.html = function () {
+    if (arguments.length > 0) return write('html', [String(arguments[0])])
+    return String(__jsoupCall('html', handle, []).value)
   }
   return boxed
 }
@@ -1769,7 +1805,7 @@ function __listOf(handle) {
   var items = reply.items || []
   var out = []
   for (var i = 0; i < items.length; i++) {
-    // 句柄号直接来自宿主（不是 JsoupElements 包装对象），正是下面那层要的东西
+    // 句柄号直接来自宿主（不是别的包装对象），正是下面那层要的东西
     out.push(__wrapElement(items[i].handle, items[i].html, items[i].attrs, items[i].text))
   }
   return __attachList(handle, out)

@@ -840,6 +840,49 @@ ${next}`,
     )
 }
 
+/**
+ * 图片源正文：真地址**只能靠脚本写到 `src` 上**才算数（第七十八轮，TODO 第 12 条）
+ *
+ * 对应的真实书源是 🎨笔趣漫画，它的 `ruleContent.content` 是一段脚本：
+ *
+ *     imgs = java.getElements(".rd-article-wr img");
+ *     imgs.forEach(e => { e.attr("src", e.attr("data-original")) });
+ *     imgs
+ *
+ * 三件事必须同时成立这条规则才跑得通，缺哪一样都是「整章取不到」：
+ *   1. `java.getElements(...)` 给的东西要能 `.forEach(...)` —— 以前给的是裸
+ *      `JsoupElements`（没有 forEach），直接 TypeError: not a function
+ *   2. `e.attr("src", 新值)` 要**真的改**节点，不能静默返回旧值（桥当年无论几个参数都走读）
+ *   3. 改完之后把 `imgs` 原样返回，串出来的 HTML 必须是**改之后**的那一份 ——
+ *      预取过的 HTML 缓存必须失效，否则读到的还是占位图
+ *
+ * **真源的属性名是 `data-original`，这里故意换成一个通用提取器不认识的名字
+ * （`data-real-src`）**。原因是 `data-original` 在 `mediaLinks.ts` 的优先表里 ——
+ * 改不改 `src` 都能取到真地址，靶子就分辨不出「脚本到底改没改」。
+ * 换成表外的名字之后，「这一章取不到图」才**直接等价于**「写操作（或它的缓存失效）没生效」：
+ * 没改 → `src` 还是占位图、`data-real-src` 提取器不认识 → 0 张图；
+ * 改了但缓存没失效 → 串出来仍是改之前那份 HTML → 同样 0 张图。
+ */
+export function fixtureImgWriteChapterPage(bookId: string, chapterId: string): string {
+    const book = BOOKS.find((b) => b.id === bookId)
+    const chapter = book?.chapters.find((c) => c.id === chapterId)
+    if (!book || !chapter) return page('未找到', '<p class="empty">没有这一话</p>')
+
+    const imgs = [1, 2, 3]
+        .map(
+            (n) =>
+                `<img src="/fixture/media/placeholder.gif" data-real-src="/fixture/media/page-${n}.png" alt="第 ${n} 页">`,
+        )
+        .join('\n    ')
+
+    return page(
+        `${book.name} ${chapter.name}（脚本改 src）`,
+        `<div class="rd-article-wr">
+    ${imgs}
+</div>`,
+    )
+}
+
 /** 音频源正文：页面里挂一个 `<audio>`，规则取它的 src —— 旧版 `ruleBookContent: "$id.jp_audio_0@src"` 的等价写法 */
 export function fixtureAudioChapterPage(bookId: string, chapterId: string): string {
     const book = BOOKS.find((b) => b.id === bookId)
@@ -1244,6 +1287,10 @@ export async function handleFixture(request: Request, url: URL): Promise<Respons
             fixtureImageChapterPage(imageChapter[1]!, imageChapter[2]!, Number(imageChapter[3])),
         )
     }
+
+    // 正文靠脚本把真地址写到 src 上（见 fixtureImgWriteChapterPage）
+    const imgWrite = /^\/fixture\/img-write-chapter\/(\w+)\/(\w+)$/.exec(pathname)
+    if (imgWrite) return html(fixtureImgWriteChapterPage(imgWrite[1]!, imgWrite[2]!))
 
     const audioChapter = /^\/fixture\/audio-chapter\/(\w+)\/(\w+)$/.exec(pathname)
     if (audioChapter) return html(fixtureAudioChapterPage(audioChapter[1]!, audioChapter[2]!))

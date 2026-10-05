@@ -55,15 +55,18 @@ function pageOf(n: number): string {
 async function callsOf(
     code: string,
     html: string,
-    /** 给 `java.getElements(规则)` 用的替身：直接回这几段 HTML（规则求值那一层不在本文件范围） */
-    fragments: string[] = [],
+    /**
+     * 给 `java.getElements(规则)` 用的替身：直接回这几段 HTML（规则求值那一层不在本文件范围）。
+     * 传 `[]` 表示「这个替身在场，但一个都没命中」；不传就是「没有这个能力」。
+     */
+    fragments?: string[],
 ): Promise<{ calls: number; value: unknown }> {
     const session = createSandboxSession()
     const before = session.jsoupCalls
     const value = await runInSandbox(
         code,
         { result: html },
-        fragments.length > 0 ? { session, getElements: async () => fragments } : { session },
+        fragments ? { session, getElements: async () => fragments } : { session },
     )
     return { calls: session.jsoupCalls - before, value }
 }
@@ -157,6 +160,130 @@ describe('过桥次数：逐节点取字段也不再过桥（TODO 第 13 条）'
     })
 })
 
+/** 造一个有 n 张图的正文页（`src` 是占位图、真地址在 `data-real-src` 上） */
+function imgPageOf(n: number): string {
+    const imgs = imgFragmentsOf(n).join('')
+    return `<html><body><div class="rd-article-wr">${imgs}</div></body></html>`
+}
+
+/** 与 imgPageOf 配套：交给 `java.getElements(规则)` 的那 N 段 HTML */
+function imgFragmentsOf(n: number): string[] {
+    return Array.from(
+        { length: n },
+        (_, i) => `<img src="/ph.gif" data-real-src="/real/${i}.png" alt="${i}">`,
+    )
+}
+
+describe('jsoup 的写操作真改、且改完缓存失效（TODO 第 12 条）', () => {
+    /**
+     * 🎨笔趣漫画 那条正文规则：把懒加载属性抄到 `src` 上，再把整批节点**原样返回**。
+     * 这里用 `map(String)` 把每张图串出来，等价于「返回 imgs 之后被宿主串化」那一步。
+     */
+    const WRITE_SRC = `var imgs = java.getElements('img');
+imgs.forEach(function (e) { e.attr('src', e.attr('data-real-src')) });
+imgs.map(function (e) { return String(e) }).join('|')`
+
+    it('`attr(k, v)` 真改：紧接着从**同一个元素**上串出来的 HTML 是新值（缓存失效）', async () => {
+        const n = 3
+        const { value } = await callsOf(WRITE_SRC, imgPageOf(n), imgFragmentsOf(n))
+        const parts = String(value).split('|')
+        expect(parts).toHaveLength(n)
+        expect(String(value)).not.toContain('/ph.gif')
+        expect(parts[0]).toContain('src="/real/0.png"')
+        expect(parts[2]).toContain('src="/real/2.png"')
+        // 是「改写」不是「替换」：原来那个懒加载属性还在
+        expect(parts[1]).toContain('data-real-src="/real/1.png"')
+    })
+
+    it('一参仍然是**读**（同名重载按参数个数分派），写不会把读搞坏', async () => {
+        const { value } = await callsOf(
+            `var e = java.getElement('img');
+             var before = e.attr('src');
+             e.attr('src', '/real/0.png');
+             [before, e.attr('src'), e.hasAttr('src')].join(' / ')`,
+            '',
+            imgFragmentsOf(1),
+        )
+        expect(value).toBe('/ph.gif / /real/0.png / true')
+    })
+
+    it('`addClass` / `removeClass` 真改：串出来的 HTML 跟着变', async () => {
+        const { value } = await callsOf(
+            `var e = java.getElement('div');
+             e.addClass('hot');
+             var a = String(e);
+             e.removeClass('hot');
+             var b = String(e);
+             [a.indexOf('hot') >= 0, b.indexOf('hot') === -1].join('/')`,
+            '',
+            ['<div class="x">原来的</div>'],
+        )
+        expect(value).toBe('true/true')
+    })
+
+    it('`html(v)` / `text(v)` 真改：改完从同一个元素串出来是**新内容**（缓存失效）', async () => {
+        const { value } = await callsOf(
+            `var e = java.getElement('div');
+             e.html('<span>换过</span>');
+             var a = String(e).indexOf('<span>换过</span>') >= 0;
+             e.text('改过的');
+             var b = String(e).indexOf('改过的') >= 0;
+             var c = String(e).indexOf('<span>换过</span>') === -1;
+             [a, b, c].join('/')`,
+            '',
+            ['<div class="x">原来的</div>'],
+        )
+        expect(value).toBe('true/true/true')
+    })
+
+    it('`java.getElements(...)` 给的是**数组形态**：`[i]` / `.length` / `.forEach` / `.size()` 同时可用', async () => {
+        const n = 4
+        const { value } = await callsOf(
+            `var x = java.getElements('img');
+             [x.length, typeof x.forEach, typeof x.map, x.size(), String(x[2]).indexOf('data-real-src="/real/2.png"') >= 0].join(' / ')`,
+            '',
+            imgFragmentsOf(n),
+        )
+        expect(value).toBe('4 / function / function / 4 / true')
+    })
+
+    it('`java.getElement(...)` 给**含一个元素的数组形态**（与 `selectFirst` 同种东西）', async () => {
+        const { value } = await callsOf(
+            `var one = java.getElement('img');
+             [one.length, Array.isArray(one), one.attr('data-real-src'), one[0].attr('data-real-src')].join(' / ')`,
+            '',
+            imgFragmentsOf(2),
+        )
+        // 集合级 attr 取到的是第一个元素的属性，与 [0] 上取一致
+        expect(value).toBe('1 / true / /real/0.png / /real/0.png')
+    })
+
+    it('`Array.from(java.getElement("script"))` 拿到的是那**一个元素**，不是一串单字（🎨51漫画）', async () => {
+        const { value } = await callsOf(
+            `var s = Array.from(java.getElement('script')).filter(function (e) { return String(e).indexOf('目录') >= 0 });
+             [s.length, String(s[0]).indexOf('<script') >= 0].join(' / ')`,
+            '',
+            ['<script>{"目录":1}</script>'],
+        )
+        expect(value).toBe('1 / true')
+    })
+
+    it('取不到时给 null（书源拿 `java.getElement("script") === null` 判有没有）', async () => {
+        const empty = await callsOf(`java.getElement('img') === null`, '', [])
+        expect(empty.value).toBe(true)
+    })
+
+    it('`Array.from(java.getElements(...))` 拿得到全部（数组天然可迭代）', async () => {
+        const { value } = await callsOf(
+            `var x = Array.from(java.getElements('img'));
+             [x.length, x[0].attr('alt'), x[3].attr('alt')].join(' / ')`,
+            '',
+            imgFragmentsOf(4),
+        )
+        expect(value).toBe('4 / 0 / 3')
+    })
+})
+
 describe('jsoup 方法面里那两处补过的（TODO 第 7 条）', () => {
     it('`attributes()`：`Attribute.toString()` 是 `key="value"`，且**顺序就是书写顺序**', async () => {
         const { value } = await callsOf(
@@ -195,7 +322,7 @@ describe('jsoup 方法面里那两处补过的（TODO 第 7 条）', () => {
         expect(value).toBe('/c/0')
     })
 
-    it('`JsoupElements` 是**可迭代**的 —— `Array.from` 不再安静地给空数组', async () => {
+    it('`Array.from(java.getElements(...))` 拿得到全部（第七十八轮起它本身就是数组）', async () => {
         const { value } = await callsOf(
             `var x = Array.from(java.getElements('whatever'));
              [x.length, String(x[0]).indexOf('<a') >= 0, String(x[1]).indexOf('<a') >= 0].join('/')`,
