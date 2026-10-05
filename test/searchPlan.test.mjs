@@ -3,7 +3,6 @@ import {
     SEARCH_MIN_PAGE,
     SEARCH_PAGE_SIZE,
     isCpuLimitError,
-    matchSources,
     nextPageSize,
     normalizeSelection,
     searchableSources,
@@ -91,27 +90,13 @@ describe('searchableSources', () => {
     })
 })
 
-describe('matchSources', () => {
-    it('关键词为空就全给', () => {
-        expect(matchSources(SOURCES, '')).toHaveLength(4)
-        expect(matchSources(SOURCES, '   ')).toHaveLength(4)
-        expect(matchSources(SOURCES, undefined)).toHaveLength(4)
-    })
-
-    it('按名字匹配，去空白、不区分大小写', () => {
-        expect(matchSources(SOURCES, ' 乙 ').map((one) => one.id)).toEqual(['b'])
-        expect(matchSources([{ id: 'x', name: 'ABC' }], 'abc').map((one) => one.id)).toEqual(['x'])
-    })
-
-    it('分组也参与匹配', () => {
-        expect(matchSources(SOURCES, '有声').map((one) => one.id)).toEqual(['d'])
-        expect(matchSources(SOURCES, '玄幻').map((one) => one.id)).toEqual(['a', 'c'])
-    })
-
-    it('没匹配上给空数组', () => {
-        expect(matchSources(SOURCES, '不存在的名字')).toEqual([])
-    })
-})
+/**
+ * 「按名字 / 分组筛」那个纯函数搬去了 `sourceFilter.js`
+ *
+ * 这一轮把「按分组筛」也加了进来，而它与「按关键词筛」必须共用同一套判据，
+ * 否则同一个源在「书源」页搜得到、在搜索范围面板里搜不到。它的用例整体迁到了
+ * `sourceFilter.test.mjs` 的 `filterSources` 那一组，这里不再有 `matchSources`。
+ */
 
 describe('normalizeSelection', () => {
     it('丢掉已经不在清单里的 id —— 书源被删 / 停用 / 没了搜索规则', () => {

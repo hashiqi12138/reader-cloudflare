@@ -141,6 +141,10 @@ describe('el / append / setChildren 把空占位吃掉', () => {
  *
  * 只看**顶层**实参：`el('div', {}, [cond ? a : null])` 里的 null 在嵌套调用内部，
  * 会被 el 自己的 append 吃掉，是安全的（这条区别弄错的话，这个测试会变成一片假阳性）。
+ *
+ * 两个方向都要拦。`cond ? x : null` 是最常见的那一种，但 `cond ? null : x` 一样会
+ * 在那个分支上把 `"null"` 渲染出来 —— 早先只认 `: null`，于是后一种能悄悄溜过去
+ * （`viewSources` 里就写过一个 `sources.length === 0 ? null : toolbar`）。
  */
 function topLevelNullArg(args) {
     let depth = 0
@@ -158,7 +162,7 @@ function topLevelNullArg(args) {
         }
         if (ch === '(' || ch === '[' || ch === '{') depth += 1
         else if (ch === ')' || ch === ']' || ch === '}') depth -= 1
-        else if (depth === 0 && /^(:\s*(null|undefined))\b/.test(args.slice(i))) return true
+        else if (depth === 0 && /^[?:]\s*(null|undefined)\b/.test(args.slice(i))) return true
     }
     return false
 }

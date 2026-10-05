@@ -685,6 +685,63 @@ console.log('\n=== 5. 书源管理（D1） ===')
         `sourceCount=${afterDisable.sourceCount}`,
     )
 
+    /**
+     * 批量启用 / 停用（`{ ids, enabled }`）
+     *
+     * 「书源」页筛完一整组之后一次改一批，就是走的这一条。三个点要钉住：
+     * 批量本身有效、内置源被**剔除**而不是让整批报错、空数组给 400。
+     */
+    const bulkSecondId = `user:${BASE}/bulk-second`
+    await fetch(`${BASE}/api/sources?id=${encodeURIComponent(bulkSecondId)}`, { method: 'DELETE' })
+    const bulkImport = await call(
+        'POST',
+        '/api/sources',
+        JSON.stringify([
+            {
+                bookSourceName: '批量测试源乙',
+                bookSourceUrl: `${BASE}/bulk-second`,
+                bookSourceGroup: '导入测试',
+            },
+        ]),
+    )
+    check(bulkImport.status === 200 && bulkImport.json?.imported === 1, '导入第二条书源（批量用）')
+
+    const bulkOn = await call('PATCH', '/api/sources', {
+        ids: [importedId, bulkSecondId],
+        enabled: true,
+    })
+    check(
+        bulkOn.status === 200 && bulkOn.json?.changed === 2,
+        '批量启用两条',
+        JSON.stringify(bulkOn.json),
+    )
+
+    const bulked = (await getJson('/api/sources')).json?.sources ?? []
+    check(
+        [importedId, bulkSecondId].every((id) => bulked.find((s) => s.id === id)?.enabled === true),
+        '批量启用后两条都确实启用了',
+    )
+
+    // 内置测试源是只读的：混进来应当被**剔掉**，而不是把同批的另外两条一起拖下水
+    const bulkMixed = await call('PATCH', '/api/sources', {
+        ids: [importedId, bulkSecondId, 'builtin:fixture-css'],
+        enabled: false,
+    })
+    check(
+        bulkMixed.status === 200 && bulkMixed.json?.changed === 2,
+        '批量里混入内置源：内置的被剔掉，另外两条照改',
+        JSON.stringify(bulkMixed.json),
+    )
+
+    const bulkEmpty = await call('PATCH', '/api/sources', { ids: [], enabled: false })
+    check(
+        bulkEmpty.status === 400 && bulkEmpty.json?.error?.includes('ids'),
+        '空 ids 给 400（而不是静默成功）',
+        JSON.stringify(bulkEmpty.json),
+    )
+
+    await call('DELETE', `/api/sources?id=${encodeURIComponent(bulkSecondId)}`)
+
     const builtinDelete = await call(
         'DELETE',
         '/api/sources?id=' + encodeURIComponent('builtin:fixture-css'),
