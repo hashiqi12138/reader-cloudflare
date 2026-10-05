@@ -170,7 +170,7 @@ function parseSegment(seg: string): JsoupStep | null {
  *
  * 不全靠推断是有意的：`data` / `title` / `option` / `span` 这些**既是标签又可能是属性名**，
  * 所以只认这张表里明确写下的名字 —— 表外的一律维持「取值」语义。
- * （代价是 `mio-tile` 这类自定义元素覆盖不到，线上 1 处，已记进 README 的待办。）
+ * （代价是 `mio-tile` 这类自定义元素覆盖不到，线上 1 处，已记进 TODO.md。）
  */
 const HTML_TAG_NAMES = new Set([
     'a',

@@ -783,7 +783,7 @@ export function fixtureTemplateSource(origin: string): RegisteredSource {
 /**
  * `选择器@js:` 的源 —— 选择器**命中多个**，而脚本按**字符串**用 `result`
  *
- * 专钉「`result` 绑数组还是字符串」这件事（见 README「`选择器@js:` 里 `result` 绑什么」）：
+ * 专钉「`result` 绑数组还是字符串」这件事（见 EXPERIENCE.md「`选择器@js:` 里 `result` 绑什么」）：
  * `div#content p@text` 会命中 3 个段落，早先引擎按「命中多个 → 数组」绑定，
  * 于是 `result.split` 按数组调直接抛 `TypeError`（🎨🔞鸟鸟韩漫 的正文就是这么坏的）。
  * 按字符串绑定时，它的正文与其余各方言**逐字相同**。

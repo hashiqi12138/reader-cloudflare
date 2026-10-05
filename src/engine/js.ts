@@ -463,7 +463,7 @@ function __varsPut(key, value) {
  *
  * 以前这里是两个 IIFE：预置文本每求值一次就重新解析一遍，那 52KB 的解析占了
  * 一次求值 5.6ms 里的 5.3ms。现在预置在一个请求里只解析一次，每次求值改跑
- * 下面这些 __refresh*（见 PER_EVAL_PRELUDE 与 README 第五十九轮）。
+ * 下面这些 __refresh*（见 PER_EVAL_PRELUDE 与 EXPERIENCE.md 第五十九轮）。
  */
 function __refreshVars() {
   __varsOut = __tableOf(globalThis.__sourceVars)
@@ -1107,7 +1107,7 @@ function __toJavaMap(text) {
  *
  * 第五十九轮：从「每次求值都把整段预置重新解析一遍」改成「预置只解析一次、
  * 每次求值**重新造一个对象**」—— 方法体写在这个函数里，于是也只解析一次，
- * 而每次调用只是新建几个函数对象（0.01ms 量级，见 README 第五十九轮）。
+ * 而每次调用只是新建几个函数对象（0.01ms 量级，见 EXPERIENCE.md 第五十九轮）。
  *
  * 必须是「造」而不是「改」：宿主每次求值会把**裸数据**注入成全局 book，
  * 那个名字正好会盖掉这个对象 —— 所以只能等注入之后重新造一个，不能就地改。
@@ -2769,7 +2769,7 @@ async function executeInSandbox(
  * 顺带把**跨请求的那些键**落一次库（`__varsDirty` 里记的那几个）：会话表只活这次
  * 请求，而 `ruleBookInfo` 里 `java.put("html", …)`、`ruleToc` 里 `java.get("html")`
  * 是两次请求 —— 只靠会话，目录那趟读到的是空串，而书源**不会报错**，
- * 只是目录安静地少一截（📂少年小说网 少的是开头 100 章，见 README 第七十三轮）。
+ * 只是目录安静地少一截（📂少年小说网 少的是开头 100 章，见 EXPERIENCE.md 第七十三轮）。
  *
  * 只落 `__varsDirty` 里记过的键，而不是整张 `__varsOut`：那张表里垫着从
  * `book_variables` 读来的值，整张落等于每次翻页都把同样的东西重写一遍。

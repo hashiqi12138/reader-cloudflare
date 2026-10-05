@@ -465,7 +465,7 @@ export function fixtureChapterPage(bookId: string, chapterId: string): string {
 /**
  * **`<br>` 版的章节页** —— 模拟笔趣阁那一族「正文 div 里全是 `<br>`」的写法
  *
- * README 第二轮记过这个站点：`#nr1` 的 HTML 有 2821 字符却**一个换行都没有**，
+ * EXPERIENCE.md 的第二轮记过这个站点：`#nr1` 的 HTML 有 2821 字符却**一个换行都没有**，
  * 全靠 100 个 `<br>` 分段。这一族的正文规则几乎都写成 `#nr1@html`，
  * 于是取回来的是**原样的 HTML** —— 阅读界面把正文当纯文本渲染，
  * 用户看到的就是字面的 `<p>` / `<br>`，段落还全糊在一起。
@@ -559,7 +559,7 @@ export function fixtureJsoupTocPage(bookId: string): string {
  * 而**详情与目录是两次请求**，会话变量只活一次请求，这一条只能靠「书的变量」穿过去。
  *
  * 断不出来这一层的话，症状是「目录能出、但开头几十章整段没了」：不报错，
- * 书源也不会走到别的分支（详见 README 第七十三轮）。
+ * 书源也不会走到别的分支（详见 EXPERIENCE.md 第七十三轮）。
  */
 export function fixtureCrossVarBookPage(bookId: string): string {
     const book = BOOKS.find((b) => b.id === bookId)

@@ -71,7 +71,7 @@ export function loginInvocation(script: string): string {
  * JSON 写法（`{ "url": "null" }` / `{ "url": "" }`）。App 遇到它们就是**用 WebView
  * 打开那个页面**让人手动登录，不存在「跑一段脚本」这回事。
  *
- * 本平台没有 WebView（见 README 的「WebView 那一族」），所以这种源跑不了 ——
+ * 本平台没有 WebView（见 EXPERIENCE.md 的「WebView 那一族」），所以这种源跑不了 ——
  * 但**硬当 JS 求值只会报一句 `SyntaxError`**，把「我们打不开登录页」说成
  * 「书源的脚本写错了」，方向是错的。这里把它认出来，好让调用方给一句明白话。
  *

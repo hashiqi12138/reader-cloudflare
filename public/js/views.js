@@ -1330,7 +1330,7 @@ function rememberMerged(merged) {
  * 上一次搜索的**原始结果**（按源分组的那一份），供返回搜索页时复原
  *
  * 「搜到一本 → 点进去 → 读完一章 → 返回 → 点下一本」是搜索页最高频的用法，
- * 而搜索是**按页花 CPU 额度**的（免费计划每请求 10 ms，见 README「第二十六轮」）。
+ * 而搜索是**按页花 CPU 额度**的（免费计划每请求 10 ms，见 EXPERIENCE.md「第二十六轮」）。
  * 每次返回都重搜一遍，等于把额度花在重复劳动上，用户还得白等一次。
  *
  * 只留一份、只认关键词：搜索页同一时刻只显示一个关键词的结果，多存几份既看不出区别，
@@ -1579,7 +1579,7 @@ export async function viewSearch(host) {
      * 拉一页
      *
      * 一个请求只搜一页（`SEARCH_PAGE_SIZE` 个源）：免费计划每个请求只有 10 ms CPU，
-     * 一次把全部书源读出来再求值必然被掐（见 searchPlan.js 与 README「第二十六轮」）。
+     * 一次把全部书源读出来再求值必然被掐（见 searchPlan.js 与 EXPERIENCE.md「第二十六轮」）。
      * 被掐时**不换时刻重试** —— 线上实测额度恢复得很慢，紧接着再发照样被掐 ——
      * 而是把这一页**折半**再试，一路折到 1 个源。
      *
@@ -2248,7 +2248,7 @@ function typeLabel(type) {
  *   `button` 的 `action` 是空串 → 只当一块说明牌
  *
  * 主按钮「登录」走 `/api/sources/login`：书源写了 `login()` 的话由服务端补上那次调用
- * （见 README 第五十七轮）。**地址型 `loginUrl`**（App 里用 WebView 打开的那种）
+ * （见 EXPERIENCE.md 第五十七轮）。**地址型 `loginUrl`**（App 里用 WebView 打开的那种）
  * 会在这一步拿到一句明白话，直接显示出来 —— 不是静默失败。
  */
 async function renderLoginPanel(host, source, stateBadge) {

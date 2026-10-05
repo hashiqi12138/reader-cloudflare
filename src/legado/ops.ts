@@ -245,7 +245,7 @@ export interface FieldWarning {
  * 失败（`ok=false`）。用户连一本书都搜不到，尽管书名、作者、书籍地址、目录、正文全都好好的。
  *
  * 取舍与 `evalTemplate` 那条既有先例同源：**一个展示用的标签取不到，不该导致整本书打不开**
- * （见 README「字段规则里的 `{{...}}` 模板」）。这是第四十五轮对「字段出错就整个源失败」
+ * （见 EXPERIENCE.md 的「字段规则里的 `{{...}}` 模板」）。这是第四十五轮对「字段出错就整个源失败」
  * 那条老规矩的**收窄**，不是取消：
  *
  *   - `bookUrl` / `tocUrl` / `chapterUrl` / `nextTocUrl` / `nextContentUrl` 是链路的必经之处，

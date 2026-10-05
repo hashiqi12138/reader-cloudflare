@@ -439,7 +439,7 @@ export interface BookSource {
          *   author: @get:{a}
          *
          * 另有 42 处写的是选择器 / 路径（`$.data`、`data.book`），当「**换掉求值的根**」用 ——
-         * 那要求 JSONPath 与裸字段名都能相对某个子树求值，是另一件事（见 README 的待办）。
+         * 那要求 JSONPath 与裸字段名都能相对某个子树求值，是另一件事（见 TODO.md）。
          */
         init?: string
         name?: string

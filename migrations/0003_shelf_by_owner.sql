@@ -5,7 +5,7 @@
 --
 -- 升级前那批数据没有归属信息 —— 当时确实只有一个使用者，但也无法确定新身份该是谁。
 -- 直接丢掉不合适，于是归到 'legacy' 名下保留着；前端看不到它，
--- 需要认领时按 README 里的说明做一次 UPDATE 即可。宁可让它暂时「挂着」，
+-- 需要认领时把 shelf_by_owner.owner 从 'legacy' 改成你自己的 owner 即可（见 src/lib/identity.ts 的 LEGACY_OWNER）。宁可让它暂时「挂着」，
 -- 也不要因为一次迁移就静默删掉用户数据。
 
 CREATE TABLE shelf_by_owner (

@@ -68,7 +68,7 @@
 **连跑两遍全绿**（11 个书源的链路 + 书源管理 + 登录态 + 媒体缓存 + PWA……）。单测 993 → 1001。
 
 **跑起来才挖出来的两个缺陷**（这两个才是「抽了接口但没跑过第二个实现」的真正代价，
-它们都只在**别处跑**才露头，详见 README「第七十五轮」）：
+它们都只在**别处跑**才露头，详见 EXPERIENCE.md「第七十五轮」）：
 
 1. `NodeDb.batch()` 一律走 `all()`，而 `.all()` 只给行 —— 写语句的 `meta.changes` 恒为 0。
    可 `setSourceEnabled` / `setSourcesEnabled` / `deleteSource` / `revokeSession` 四处都拿它
@@ -158,7 +158,7 @@ R2 没开通就建不了 bucket；不能在 `wrangler.jsonc` 里声明绑定（�
 **做了什么**：桥补 `data` + `selectFirst`；`Jsoup.parse` 改成返回数组形态（与脚本里
 `result` 一致）；`test/jsoupSurface.test.ts` 做「沙箱方法面 ↔ 桥 op」的双向对账；
 靶子 `/fixture/jsoup-toc/1` + `builtin:fixture-jsoup-chain`；冒烟 12c。
-详见 README「第七十二轮」。
+详见 EXPERIENCE.md「第七十二轮」。
 
 ---
 
@@ -287,7 +287,7 @@ SRC={"text":"甲页","href":"/dbg-a"}
 
 🎨漫画搬运 的 0 章是**另一回事**：选择器那一段给的是**文本**、脚本却在找 `<h3` / `<ul`
 （`String(块).includes('<h3')` 恒为 false → 空数组 → 0 章、不报错）。已经在第七十四轮修掉
-（`usesJsoupOnResult` 补「在字符串里找标签」+ `Array.from(result)` 归一化，见 README 第七十四轮），
+（`usesJsoupOnResult` 补「在字符串里找标签」+ `Array.from(result)` 归一化，见 EXPERIENCE.md 第七十四轮），
 实测 **462 章**。**这一条到此结束**，下面两条是那一轮真挖出来的剩余项。
 
 ---

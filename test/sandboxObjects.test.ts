@@ -25,7 +25,7 @@ const PRELUDE = readFileSync(new URL('../src/engine/js.ts', import.meta.url), 'u
  *
  * 第五十九轮起这五个对象都改成了「工厂函数 + 一次调用」（`function __buildBook() {…}`
  * 紧跟 `var book = __buildBook()`）—— 这样预置文本在一个请求里只解析一次，
- * 每次求值只重新造一个对象（见 README 第五十九轮）。这里跟着换一种取法：
+ * 每次求值只重新造一个对象（见 EXPERIENCE.md 第五十九轮）。这里跟着换一种取法：
  * 以「工厂函数开头」到「紧跟其后的 `var <名字> = __build…()`」为界。
  */
 function blockOf(name: string): string {

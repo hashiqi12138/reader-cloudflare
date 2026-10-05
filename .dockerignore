@@ -35,6 +35,11 @@ coverage
 .idea
 .vscode
 
+# 文档。镜像只负责运行，不装文档 —— 顺带让「只改文档」不会让 `COPY . .` 那一层失效
+# 而重跑一次打包。构建链上没有任何一步读 md（`npm ci` 的 prepare 只碰 scripts/ 与
+# node_modules，打包只读 src/）。
+*.md
+
 # 全量验证用的本地素材（几 MB 的第三方书源导出与探测报告，见 .gitignore）
 live-*-dump.json
 explore-report*.txt

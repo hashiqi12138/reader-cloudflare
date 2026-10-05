@@ -448,7 +448,7 @@ async function evalTemplate(sel: Selection, inner: string, ctx: RuleContext): Pr
             // 模板里常用的 `java.timeFormat` / `java.getString` 这类助手我们还没实现。
             // 这里**只让这一小段变空**，而不是让整个字段报错 ——
             // 一个展示用的标签取不到，不该导致整本书的详情页打不开。
-            // 缺哪些助手记在 README 的「已知缺口」里。
+            // 缺哪些助手记在 EXPERIENCE.md 的「沙箱助手」里。
             return ''
         }
     }

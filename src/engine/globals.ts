@@ -96,7 +96,7 @@ export function sourceGlobals(ctx: RuleContext): Record<string, unknown> {
      * 读的是**同一张表**（见 `SandboxSession.vars` 的说明），既然 `@get:` 那条路会
      * 退到 `book_variables`，`java.get` 也必须退得到 —— 否则 `ruleBookInfo` 里
      * `java.put("html", …)`、`ruleToc` 里 `java.get("html")` 这种跨请求写法
-     * 在目录那趟读到空串（📂少年小说网 因此少了开头 100 章，见 README 第七十三轮）。
+     * 在目录那趟读到空串（📂少年小说网 因此少了开头 100 章，见 EXPERIENCE.md 第七十三轮）。
      */
     const variables = { ...bookVars(ctx), ...sessionVars(ctx), ...(ctx.vars ?? {}) }
     return {

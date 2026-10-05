@@ -76,7 +76,7 @@ function classify(seg: string): SegKind {
  *
  * 这些都不是标签、也不是本轮的形状，是**书源自己写残或另有所指**的东西：
  *  - `put:…` / `href"}`：`@put:{…}` 后缀留下的残留段（引擎没有实现 `@put:` / `@get:`，
- *    那是另一件事，见 README 的待办）
+ *    那是另一件事，见 TODO.md）
  *  - `get:{time}`：同上（`@get:`）
  *  - `text最新章节：`：规则后面直接跟了中文（书源写歪）
  *  - `小说`：同上，非 ASCII
