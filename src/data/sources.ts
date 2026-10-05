@@ -269,6 +269,87 @@ ul.row li a`,
 }
 
 /**
+ * 同一个测试站点，目录规则**按标记分卷、并返回对象数组**（第七十四轮）
+ *
+ * 抄的是 🎨漫画搬运 的 `chapterList` 形状，只把选择器与结构换成本地这一份：
+ * 一句选择器取到几「卷」，脚本用 `String(块).includes('<h3')` / `includes('<ul')`
+ * **按标记**分出卷标题与章节块，再 `list.push({href, text, volume})` 返回**对象数组**，
+ * 字段规则用 `text` / `href` / `volume` 三个键读。
+ *
+ * 这条链上两处都会静默变成 0 章，所以两边都钉住：
+ *   - 选择器那一段得给 **HTML**（给文本 → 两个 filter 恒为空 → 空数组，**不报错**）
+ *   - 返回的对象数组要能被 `text` / `href` / `volume` **当键读出来**
+ *
+ * 线上量过：这一形状（`push({…href/text…})`）在 816 条源里 33 处 / 29 个源。
+ * 打的是 `fixtureMapTocPage`（两卷、共三章）。
+ */
+export function fixtureMapTocSource(origin: string): RegisteredSource {
+    const base = fixtureSource(origin)
+    return {
+        ...base,
+        id: 'builtin:fixture-map-toc',
+        sortOrder: 16,
+        bookSourceName: '内置测试站点（脚本返回对象数组）',
+        bookSourceComment:
+            '目录脚本按标记分卷并返回对象数组：守住「选择器给 HTML」与「条目按键名读」',
+        ruleBookInfo: {
+            ...base.ruleBookInfo,
+            tocUrl: '@css:a.toc-link@href##/toc/##/map-toc/##',
+        },
+        ruleToc: {
+            chapterList: `.map-block
+@js:
+voList = Array.from(result).filter(n => String(n).includes('<h3'))
+ulList = Array.from(result).filter(n => String(n).includes('<ul'))
+list = []
+ulList.map((n, index) => {
+  // 卷标题在这一块里的 <h3> 上。🎨漫画搬运 原文写的是 java.getString("text", …)，
+  // 那是把**整块**的文本当标题（连章节名一起），取出来的是一坨 —— 那是它自己的写法问题，
+  // 这里不去复刻那坨垃圾，只保持「块 → 标题」这条链的形状
+  list.push({ href: "", text: java.getString("h3@text", voList[index]), volume: true })
+  dList = []
+  Array.from(org.jsoup.Jsoup.parse(n).select(".muludiv")).map(k => {
+    dList.push({
+      href: org.jsoup.Jsoup.parse(k).select("a")[0].attr("href"),
+      text: org.jsoup.Jsoup.parse(k).select("a")[0].text(),
+      volume: false,
+    })
+  })
+  list = list.concat(dList)
+})
+list`,
+            chapterName: 'text',
+            chapterUrl: 'href',
+            isVolume: 'volume',
+        },
+    }
+}
+
+/**
+ * 同一个测试站点，目录规则是一段**死循环脚本**（第七十四轮）
+ *
+ * 存在的唯一理由：守住「VM 里转太久会被中断」这条底线。第七十四轮把
+ * `deadline`（只卡 VM 内代码的那个时限）改成**减掉宿主函数耗时** —— 于是这条
+ * 底线必须有一条显式的断言盯着，否则「改成不卡了」也不会有人发现。
+ *
+ * 打的是普通目录页（脚本不看内容），冒烟断言那次请求报「规则脚本超时」。
+ */
+export function fixtureSpinSource(origin: string): RegisteredSource {
+    const base = fixtureSource(origin)
+    return {
+        ...base,
+        id: 'builtin:fixture-spin',
+        sortOrder: 17,
+        bookSourceName: '内置测试站点（脚本死循环）',
+        bookSourceComment: '目录规则是一段死循环：守住「脚本在 VM 里转太久会被中断」',
+        ruleToc: {
+            ...base.ruleToc,
+            chapterList: '<js>var i = 0; while (true) { i = i + 1 }</js>',
+        },
+    }
+}
+
+/**
  * 同一个测试站点，改用 XPath 规则
  *
  * 存在的意义是**对照验证**：两套方言打同一个页面，提取结果必须完全一致。
@@ -825,6 +906,8 @@ export function builtinSources(origin: string): RegisteredSource[] {
         fixtureBrHtmlSource(origin),
         fixtureJsoupChainSource(origin),
         fixtureCrossVarSource(origin),
+        fixtureMapTocSource(origin),
+        fixtureSpinSource(origin),
     ]
 }
 

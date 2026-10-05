@@ -271,8 +271,16 @@ console.log('\n=== 搜索分页（免费计划的 10 ms CPU 上限逼出来的�
  * `bookUrl` 带下来」—— 而这条通用链路是按 `url` 参数当书地址的，两边不是同一本。
  * 真实客户端会带（`public/js/reader.js` 两次请求都带 `bookUrl`），
  * 所以它有自己的那一段（第 12d 节）按真实形状验。
+ *
+ * `builtin:fixture-map-toc` / `builtin:fixture-spin` 也要排除，理由不同：
+ * 前者的目录是「脚本按标记分卷」的结果（有卷标题、不走 `ul.chapter-list`），
+ * 后者干脆是一段死循环 —— 拿它们比「逐字一致」必然不等。两者各有自己的那一段（12e / 12f）。
  */
-const COMPARE_EXCLUDED = new Set(['builtin:fixture-cross-var'])
+const COMPARE_EXCLUDED = new Set([
+    'builtin:fixture-cross-var',
+    'builtin:fixture-map-toc',
+    'builtin:fixture-spin',
+])
 const textSources = list.filter(
     (source) => source.builtin && (source.type ?? 0) === 0 && !COMPARE_EXCLUDED.has(source.id),
 )
@@ -2632,6 +2640,76 @@ console.log('\n=== 12d. 跨请求的会话变量（详情 put → 目录 get）+
             got.json?.error ?? `len=${String(got.json?.content ?? '').length}`,
         )
     }
+}
+
+console.log('\n=== 12e. 目录脚本返回对象数组（按标记分卷 + text/href/volume 三个键） ===')
+{
+    /**
+     * 线上 29 个源的目录脚本是这么写的：**返回对象数组**，字段规则写 `text` / `href`
+     * （🎨漫画搬运 还多一个 `volume` 认卷标题）。这条链上有两处都会**静默**变成 0 章：
+     *
+     *   - 选择器那一段给的是**文本**而不是 HTML → 脚本里的
+     *     `String(块).includes('<h3')` 恒为 false → 返回空数组（不报错）
+     *   - 对象数组的键读不出来 → 有条目但没名字、没地址，全被丢掉
+     *
+     * 靶子是 `builtin:fixture-map-toc`（`fixtureMapTocPage`：两卷共三章，脚本与
+     * 🎨漫画搬运 同形）。断言把卷标题、章名、章地址、卷标记都对上。
+     */
+    const src = 'builtin:fixture-map-toc'
+    const hint = encodeURIComponent(JSON.stringify({ name: '测试小说·甲', author: '作者甲' }))
+    const info = await getJson(
+        `/api/book?sourceId=${encodeURIComponent(src)}&url=${encodeURIComponent(`${BASE}/fixture/book/1`)}&book=${hint}`,
+    )
+    const toc = await getJson(
+        `/api/toc?sourceId=${encodeURIComponent(src)}&url=${encodeURIComponent(info.json?.tocUrl ?? '')}&book=${hint}`,
+    )
+    const chapters = toc.json?.chapters ?? []
+    check(
+        chapters.map((c) => c.name).join('|') ===
+            ['卷一 起风', '第一章 起风了', '第二章 雨落下来', '卷二 天晴', '第三章 天晴了'].join(
+                '|',
+            ),
+        '卷标题与章名都取到了（脚本按标记分卷、对象数组的键也读得出来）',
+        toc.json?.error ?? JSON.stringify(chapters.map((c) => c.name)),
+    )
+    check(
+        chapters[0]?.isVolume === true && chapters[1]?.isVolume !== true,
+        '卷标题带 isVolume（脚本回的是 volume: true），章节不带',
+        JSON.stringify(chapters.slice(0, 2).map((c) => [c.name, c.isVolume])),
+    )
+    check(
+        String(chapters[1]?.url ?? '').endsWith('/fixture/chapter/1/1') &&
+            String(chapters[4]?.url ?? '').endsWith('/fixture/chapter/1/3'),
+        '章节地址取的是各自的 href',
+        JSON.stringify(chapters.filter((c) => c.url).map((c) => c.url)),
+    )
+}
+
+console.log('\n=== 12f. 脚本死循环仍然会被中断（VM 时限那条底线） ===')
+{
+    /**
+     * 第七十四轮把「只卡 VM 内代码」的那个时限改成**减掉宿主函数耗时**
+     * （宿主里跑的 cheerio 解析不该算成脚本转了很久，见 engine/js.ts 的 busy）。
+     * 改完必须有一条断言盯着底线：**脚本自己转太久，照样要被中断** ——
+     * 否则「改成不卡了」也不会有人发现。
+     *
+     * 靶子是 `builtin:fixture-spin`，目录规则就是一段 `while (true) {}`。
+     */
+    const src = 'builtin:fixture-spin'
+    const toc = await getJson(
+        `/api/toc?sourceId=${encodeURIComponent(src)}&url=${encodeURIComponent(`${BASE}/fixture/toc/1`)}`,
+    )
+    const message = String(toc.json?.error ?? '')
+    check(
+        message.includes('规则脚本超时'),
+        '死循环脚本被中断，并且说的是「超时」（而不是把请求拖死）',
+        message || JSON.stringify(toc.json),
+    )
+    check(
+        (toc.json?.chapters ?? []).length === 0,
+        '被中断的那次求值不产出章节（也没有半截结果）',
+        JSON.stringify(toc.json?.chapters),
+    )
 }
 
 console.log('\n=== 13. 图片 / 音频 / 文件源 ===')

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { resultWantsArray } from '../src/engine/resultShape'
+import { resultWantsArray, usesJsoupOnResult } from '../src/engine/resultShape'
 
 /**
  * `选择器@js:` 里 `result` 绑数组还是字符串
@@ -131,5 +131,54 @@ describe('resultWantsArray：容易误判的边界', () => {
     it('`[result]` 没有判据，按字符串 —— 🎨🔞Cin漫 / Nhentai漫 的 chapterList', () => {
         // 选择器是 `img[1]`（只命中 1 个），绑字符串能原样放进数组里，条目数不受影响
         expect(resultWantsArray('[result]')).toBe(false)
+    })
+})
+
+/**
+ * `usesJsoupOnResult`：交给脚本的**内容**该是 HTML 还是文本
+ *
+ * 与上面那组是两件事：那一组判「绑数组还是字符串」，这一组判「内容里有没有标记」。
+ * 判错的表现是**条目静默变少**（`String(条目).includes('<ul')` 恒为 false 之类），
+ * 所以夹具同样取自真实书源，并且把「反向」（脚本自己拼 HTML）也钉住 ——
+ * 那种写法要的恰恰是文本，放宽判据会把它误伤。
+ */
+describe('usesJsoupOnResult：内容给 HTML 还是文本', () => {
+    it('在字符串里**找标签** —— 🎨漫画搬运 的 chapterList（找 <h3 分卷、找 <ul 取每卷的章节）', () => {
+        const code = ` list=[] voList = Array.from(result).filter(n=>String(n).includes('<h3')) ulList = Array.from(result).filter(n=>String(n).includes('<ul')) ulList.map((n,index)=>{ list.push({href:"", text:java.getString("text", voList[index]), volume:true}) }) list`
+        expect(usesJsoupOnResult(code)).toBe(true)
+    })
+
+    it('`Array.from(result)` 之后再动条目 —— 判据要透得过它（Legado 那边它们都是 Elements）', () => {
+        expect(usesJsoupOnResult(`Array.from(result).filter(e => e.attr('href'))`)).toBe(true)
+        expect(usesJsoupOnResult(`Array.from(result).map(e => e.text())`)).toBe(true)
+        expect(usesJsoupOnResult(`[...result].forEach(e => e.attr('data-id'))`)).toBe(true)
+        // 纯「转成数组再拼字符串」不要标记，别被顺手放宽
+        expect(usesJsoupOnResult(`Array.from(result).join('|')`)).toBe(false)
+    })
+
+    it('脚本**自己拼 HTML** 时不算 —— 那种写法要的恰恰是文本', () => {
+        expect(
+            usesJsoupOnResult(`result.split("\\n").map(x => '<img src="' + x + '">').join("\\n")`),
+        ).toBe(false)
+        expect(
+            usesJsoupOnResult(
+                `list.map(x => '<li><a href="/c/' + x + '">第' + x + '章</a></li>').join('')`,
+            ),
+        ).toBe(false)
+    })
+
+    it('直接调节点方法、或在迭代回调里调 —— 老判据照旧', () => {
+        expect(usesJsoupOnResult(`result.select("a")`)).toBe(true)
+        expect(usesJsoupOnResult(`result.toArray()`)).toBe(true)
+        expect(usesJsoupOnResult(`result.forEach(e => e.attr('href'))`)).toBe(true)
+        expect(usesJsoupOnResult(`String(result).replace(/<b>/g, '')`)).toBe(false)
+    })
+
+    it('**正则字面量**形式（`html.match(/<h1>/)`）刻意不算', () => {
+        // 语料里这一形式 25 处，绝大多数是在**整页字符串**上找标签（取页面里的某个块），
+        // 与「条目要不要标记」无关 —— 收进来会把影响面从 17 处推到 40+ 处。
+        expect(
+            usesJsoupOnResult(`var m = String(result).match(/<h1[^>]*>([^<]*)<\\/h1>/); m`),
+        ).toBe(false)
     })
 })

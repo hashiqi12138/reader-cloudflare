@@ -625,6 +625,52 @@ export function fixtureCrossVarTocPage(bookId: string): string {
 }
 
 /**
+ * **目录页：选择器取到几「卷」，脚本按标记分卷并返回对象数组**（第七十四轮）
+ *
+ * 抄的是 🎨漫画搬运 的形状：它的 `chapterList` 是一句选择器加一段 `@js:`，脚本
+ *
+ *   - `Array.from(result).filter(n => String(n).includes('<h3'))` 认卷标题
+ *   - `Array.from(result).filter(n => String(n).includes('<ul'))` 认每卷的章节块
+ *   - 逐个块 `Jsoup.parse(块).select(".muludiv")` 取章节，`list.push({href, text, volume})`
+ *
+ * 于是后续字段规则写的就是 `text` / `href` / `volume` 这三个**键名**。
+ *
+ * 这一段同时钉住两件事，缺一个就静默变空：
+ *   1. 选择器那一段必须给**HTML**。给它文本的话两个 `filter` 恒为空（`'<h3'` 在纯文本里
+ *      永远找不到），脚本于是返回空数组 —— 目录 **0 章且不报错**。
+ *   2. 脚本返回的对象数组要能被 `text` / `href` / `volume` 当键读出来
+ *      （引擎那边靠 `bareJsonField` 把裸词当 `$.键`）。
+ */
+export function fixtureMapTocPage(bookId: string): string {
+    const book = BOOKS.find((b) => b.id === bookId)
+    if (!book) return page('未找到', '<p class="empty">没有这本书</p>')
+
+    // 两卷：第一卷装前两章、第二卷装剩下那一章（BOOKS 里正好三章）
+    const blocks = [
+        { title: '卷一 起风', chapters: book.chapters.slice(0, 2) },
+        { title: '卷二 天晴', chapters: book.chapters.slice(2) },
+    ]
+
+    const body = blocks
+        .map(
+            (block) => `<div class="map-block">
+    <h3>${escapeHtml(block.title)}</h3>
+    <ul class="muludiv-list">
+        ${block.chapters
+            .map(
+                (ch) =>
+                    `<li class="muludiv"><a href="/fixture/chapter/${book.id}/${ch.id}">${escapeHtml(ch.name)}</a></li>`,
+            )
+            .join('\n        ')}
+    </ul>
+</div>`,
+        )
+        .join('\n')
+
+    return page(`${book.name} 目录（脚本返回对象数组）`, body)
+}
+
+/**
  * **分页正文**，专供验证 `nextContentUrl`
  *
  * 不少站点把一章切成好几页，每页结尾挂着「本章未完，请点击下一页继续阅读」。
@@ -1103,6 +1149,10 @@ export async function handleFixture(request: Request, url: URL): Promise<Respons
     // 跨请求变量版的详情页 / 目录页（见 fixtureCrossVarBookPage 的说明）
     const crossBook = /^\/fixture\/cross-book\/(\w+)$/.exec(pathname)
     if (crossBook) return html(fixtureCrossVarBookPage(crossBook[1]!))
+
+    // 脚本返回对象数组版的目录页（见 fixtureMapTocPage 的说明）
+    const mapToc = /^\/fixture\/map-toc\/(\w+)$/.exec(pathname)
+    if (mapToc) return html(fixtureMapTocPage(mapToc[1]!))
 
     // 末尾的 `/1/` 不能省：目录规则靠 `baseUrl.includes("/1/")` 判断「是不是第一页」
     const crossToc = /^\/fixture\/cross-toc\/(\w+)\/(\d+)\/?$/.exec(pathname)
