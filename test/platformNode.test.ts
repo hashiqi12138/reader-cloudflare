@@ -112,7 +112,9 @@ describe('Node 适配器：数据库', () => {
             .first<{ id: string; name: string }>()
         expect(row).toEqual({ id: 'a', name: '甲' })
 
-        const column = await env.DB.prepare('SELECT name FROM t WHERE id = ?').bind('a').first<string>('name')
+        const column = await env.DB.prepare('SELECT name FROM t WHERE id = ?')
+            .bind('a')
+            .first<string>('name')
         expect(column).toBe('甲')
 
         const none = await env.DB.prepare('SELECT name FROM t WHERE id = ?').bind('nope').first()

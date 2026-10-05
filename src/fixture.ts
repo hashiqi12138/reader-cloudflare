@@ -716,9 +716,12 @@ export function fixtureAttrTocPage(bookId: string): string {
         })
         .join('\n')
 
-    return page(`${book.name} 目录（按属性序号取值）`, `<div id="tocList">
+    return page(
+        `${book.name} 目录（按属性序号取值）`,
+        `<div id="tocList">
 ${items}
-</div>`)
+</div>`,
+    )
 }
 
 /** 页面里要放一段 base64：用 btoa，与书源那边的 java.base64Decode 正好对上 */

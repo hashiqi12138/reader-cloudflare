@@ -70,7 +70,8 @@ export function writeInfoVar(ctx: RuleContext, key: string, value: string): void
     }
 
     if (ctx.itemVarSink) {
-        if (value !== '' && (ctx.infoVarCrossKeys?.has(key) ?? false)) ctx.itemVarSink.push(key, value)
+        if (value !== '' && (ctx.infoVarCrossKeys?.has(key) ?? false))
+            ctx.itemVarSink.push(key, value)
         return
     }
 

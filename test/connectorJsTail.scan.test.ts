@@ -73,11 +73,15 @@ function hitOf(rule: string): Omit<Hit, 'source' | 'field'> | null {
         // 取最后一段里**最靠前**的 JS 区域：`result` 绑什么由它与前面那段选择器决定
         const region = regions.reduce((a, b) => (b.start < a.start ? b : a))
         const code = region.block
-            ? last.slice(region.start, region.end).replace(/^<js(?:\s[^>]*)?>/i, '').replace(/<\/js>\s*$/i, '')
+            ? last
+                  .slice(region.start, region.end)
+                  .replace(/^<js(?:\s[^>]*)?>/i, '')
+                  .replace(/<\/js>\s*$/i, '')
             : last.slice(region.start, region.end)
-        const headOfLast = (region.block
-            ? last.slice(0, region.start)
-            : last.slice(0, region.start - JS_MARKER.length)
+        const headOfLast = (
+            region.block
+                ? last.slice(0, region.start)
+                : last.slice(0, region.start - JS_MARKER.length)
         )
             .replace(/@$/, '')
             .trim()
@@ -101,7 +105,8 @@ function collectHits(dump: string): Hit[] {
         const name = String(source.bookSourceName ?? '?')
         for (const { path, value } of ruleFieldsOf(source)) {
             const found = hitOf(value)
-            if (found) hits.push({ ...found, source: name, field: path, list: LIST_FIELDS.has(path) })
+            if (found)
+                hits.push({ ...found, source: name, field: path, list: LIST_FIELDS.has(path) })
         }
     }
     return hits
@@ -120,15 +125,26 @@ describe.skipIf(DUMP === '')('真实书源全量扫描：连接符 + @js: 尾段
         const byJoiner = new Map<string, number>()
         for (const hit of hits) byJoiner.set(hit.joiner, (byJoiner.get(hit.joiner) ?? 0) + 1)
 
-        console.log(`书源 ${String(loadSourceDump(DUMP).length)} 条 / 「连接符 + 最后一段带 JS」${hits.length} 处`)
+        console.log(
+            `书源 ${String(loadSourceDump(DUMP).length)} 条 / 「连接符 + 最后一段带 JS」${hits.length} 处`,
+        )
         console.log(
             `  按连接符：${[...byJoiner].map(([j, n]) => `${j} ${n}`).join(' / ') || '（无）'}`,
         )
         console.log(
-            `  按字段：${[...byField].sort((a, b) => b[1] - a[1]).map(([f, n]) => `${f} ${n}`).join(' / ') || '（无）'}`,
+            `  按字段：${
+                [...byField]
+                    .sort((a, b) => b[1] - a[1])
+                    .map(([f, n]) => `${f} ${n}`)
+                    .join(' / ') || '（无）'
+            }`,
         )
-        console.log(`  列表规则（result 是一批节点）${list.length} 处 / 字段规则 ${field.length} 处`)
-        console.log(`  脚本把 result 当**标量字符串**用 ${scalar.length} 处 ← 改成合并必然出错的那一批`)
+        console.log(
+            `  列表规则（result 是一批节点）${list.length} 处 / 字段规则 ${field.length} 处`,
+        )
+        console.log(
+            `  脚本把 result 当**标量字符串**用 ${scalar.length} 处 ← 改成合并必然出错的那一批`,
+        )
         console.log(`  脚本按**元素集合**用 result ${elements.length} 处 ← 只有这一批可能受益`)
         for (const hit of hits) {
             const kind = hit.scalar ? '标量' : hit.elements ? '集合' : '其它'

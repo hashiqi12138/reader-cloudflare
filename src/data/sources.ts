@@ -373,8 +373,7 @@ export function fixtureAttrTocSource(origin: string): RegisteredSource {
         id: 'builtin:fixture-attr-toc',
         sortOrder: 18,
         bookSourceName: '内置测试站点（按属性序号取值）',
-        bookSourceComment:
-            '目录脚本用 attributes() 按序号取属性并靠 Attribute.toString() 抠值',
+        bookSourceComment: '目录脚本用 attributes() 按序号取属性并靠 Attribute.toString() 抠值',
         ruleBookInfo: {
             ...base.ruleBookInfo,
             tocUrl: '@css:a.toc-link@href##/toc/##/attr-toc/##',

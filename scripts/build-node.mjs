@@ -48,7 +48,9 @@ await build({
 
 const wasm = join(root, 'src', 'engine', 'RELEASE_ASYNC.wasm')
 if (!existsSync(wasm)) {
-    throw new Error('缺少 src/engine/RELEASE_ASYNC.wasm —— 先跑 `npm run wasm`（npm install 会自动跑）')
+    throw new Error(
+        '缺少 src/engine/RELEASE_ASYNC.wasm —— 先跑 `npm run wasm`（npm install 会自动跑）',
+    )
 }
 copyFileSync(wasm, join(out, 'quickjs.wasm'))
 cpSync(join(root, 'migrations'), join(out, 'migrations'), { recursive: true })

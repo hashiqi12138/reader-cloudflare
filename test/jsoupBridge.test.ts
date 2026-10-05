@@ -314,9 +314,7 @@ describe('org.jsoup 桥：list 一次取回整串（第 7 / 11 条）', () => {
         for (let i = 0; i < reply.items.length; i += 1) {
             const item = reply.items[i]!
             const single = handle(bridge, 'get', chapters, [i])
-            expect(item.html, `第 ${i} 条的 HTML`).toBe(
-                String(value(bridge, 'outerHtml', single)),
-            )
+            expect(item.html, `第 ${i} 条的 HTML`).toBe(String(value(bridge, 'outerHtml', single)))
             // 句柄是**可用**的（不是只给了个 HTML 字符串）
             expect(value(bridge, 'text', item.handle), `第 ${i} 条的 text`).toBe(
                 String(value(bridge, 'text', single)),

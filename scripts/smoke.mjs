@@ -2747,7 +2747,8 @@ console.log('\n=== 12g. 按属性序号取值（attributes() + Attribute.toStrin
     )
     const chapters = toc.json?.chapters ?? []
     check(
-        chapters.map((c) => c.name).join('|') === ['第一章 起风了', '第二章 雨落下来', '第三章 天晴了'].join('|'),
+        chapters.map((c) => c.name).join('|') ===
+            ['第一章 起风了', '第二章 雨落下来', '第三章 天晴了'].join('|'),
         '两种属性顺序下，章名都按**序号**取对了（书名在第 3 位、在第 4 位各一半）',
         toc.json?.error ?? JSON.stringify(chapters.map((c) => c.name)),
     )
@@ -6043,7 +6044,8 @@ console.log('\n=== 37. `<script>` / `<style>` 也是元素（`getElement("script
     const idA = `user:${BASE}/script-rule`
     const idB = `user:${BASE}/script-count`
     const idFallback = `user:${BASE}/script-fallback`
-    for (const x of [idA, idB, idFallback]) await call('DELETE', `/api/sources?id=${encodeURIComponent(x)}`)
+    for (const x of [idA, idB, idFallback])
+        await call('DELETE', `/api/sources?id=${encodeURIComponent(x)}`)
     /** 🎨51漫画 ruleToc.chapterList 的形状；把过滤词换掉就落到兜底那一支 */
     const comicRule = (needle) =>
         `<js>\nconst scripts = Array.from(java.getElement("script")).filter(e => String(e).includes('${needle}'));\n` +

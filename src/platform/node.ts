@@ -95,8 +95,7 @@ class NodeStatement implements PlatformStatement {
 
     async first<T = unknown>(colName?: string): Promise<T | null> {
         const row = this.prepared().get(...(this.params as never[])) as
-            | Record<string, unknown>
-            | undefined
+            Record<string, unknown> | undefined
         if (row === undefined) return null
         // D1 的 `first(colName)`：取第一行里那一列的值
         return (colName === undefined ? row : (row[colName] ?? null)) as T

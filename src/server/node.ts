@@ -88,7 +88,9 @@ async function migrate(env: NodeAppEnv, dir: string): Promise<void> {
             applied += 1
         } catch (err) {
             env.exec('ROLLBACK')
-            throw new Error(`迁移 ${file} 失败：${err instanceof Error ? err.message : String(err)}`)
+            throw new Error(
+                `迁移 ${file} 失败：${err instanceof Error ? err.message : String(err)}`,
+            )
         }
     }
     console.log(`迁移：${files.length} 个文件，本次新跑 ${applied} 个`)
@@ -142,7 +144,11 @@ async function writeWebResponse(res: ServerResponse, response: Response): Promis
 function versionOf(): string {
     if (process.env.ENGINE_VERSION) return process.env.ENGINE_VERSION
     const here = dirname(fileURLToPath(import.meta.url))
-    for (const one of [join(here, 'package.json'), join(here, '..', 'package.json'), 'package.json']) {
+    for (const one of [
+        join(here, 'package.json'),
+        join(here, '..', 'package.json'),
+        'package.json',
+    ]) {
         try {
             // 去掉 BOM：本仓库的 package.json 带 BOM，直接 JSON.parse 会抛错
             const text = readFileSync(one, 'utf8').replace(/^\uFEFF/, '')
@@ -187,7 +193,9 @@ async function main(): Promise<void> {
                     // 找不到就回退 index.html —— 与 wrangler.jsonc 的
                     // `not_found_handling: single-page-application` 同一条策略
                     if (response.status === 404) {
-                        response = await env.ASSETS.fetch(new Request(new URL('/index.html', origin)))
+                        response = await env.ASSETS.fetch(
+                            new Request(new URL('/index.html', origin)),
+                        )
                     }
                 }
                 await Promise.all(pending)
@@ -204,8 +212,12 @@ async function main(): Promise<void> {
 
     server.listen(PORT, () => {
         console.log(`reader-cloudflare 自建模式：http://127.0.0.1:${PORT}`)
-        console.log(`  数据库 ${DB_PATH} · 静态资源 ${publicRoot} · 版本 ${env.ENGINE_VERSION ?? '?'}`)
-        console.log(`  内置测试站点 ${env.ENABLE_FIXTURE === 'true' ? '开' : '关'}（ENABLE_FIXTURE 控制）`)
+        console.log(
+            `  数据库 ${DB_PATH} · 静态资源 ${publicRoot} · 版本 ${env.ENGINE_VERSION ?? '?'}`,
+        )
+        console.log(
+            `  内置测试站点 ${env.ENABLE_FIXTURE === 'true' ? '开' : '关'}（ENABLE_FIXTURE 控制）`,
+        )
     })
 
     const shutdown = () => {
