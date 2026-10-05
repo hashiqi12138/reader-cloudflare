@@ -3,7 +3,7 @@
 按「现在就能动手」排序。每条都写清四件事：**为什么**、**已经到哪一步**、**下一步做什么**、
 **怎么算做完**（能验的都要能验）。做完就删掉，别留在这里当装饰。
 
-最后更新：2026-10-05（v0.62.0，第七十四轮之后）
+最后更新：2026-10-05（v0.63.0，第七十五轮之后）
 
 ---
 
@@ -26,7 +26,10 @@
 
 1. **升 Workers 付费计划**（CPU 默认 30 s、上限 5 min）—— 改 `wrangler.jsonc` 里那行
    `limits.cpu_ms` 即可（免费版写它会**部署直接失败**，code 100328）；要花钱。
-2. **自建部署**（Node / Docker）—— 没有 10 ms 上限，等于把这个问题整个绕开。就是下面第 2 条。
+2. **自建部署（Node / Docker）** —— 没有 10 ms 上限，等于把这个问题整个绕开。
+   **第七十五轮已经把这一条做实了**：`npm run start:node` 起得来、冒烟对着它全绿，
+   库换成本机的 SQLite（见 `## 2` 那条已完成记录）。**现在就能用，不再是「计划」。**
+   Docker 镜像还没做（给 `src/server/node.ts` 加个 `Dockerfile` 就行，没验证过的东西不写进文档）。
 
 **还没量的**：`/api/home` 的 `refresh=1`、以及 `/api/toc` / `/api/content` 的 `cpuTime`
 （都只处理一个源，大概率没事，但没量过就别假设）。
@@ -47,33 +50,44 @@
 吓人的错误页；以及超预算请求会**污染运行时**（第六十八轮：一串之后连单源都会 503），
 早点自己收手能少踩那个状态。要定的是阈值（得先在线上量几条能跑通的规则的宿主耗时）。
 
+**第七十五轮起，阈值可以量了**：自建那侧（`npm run start:node`）**不设 CPU 上限**，
+而那条源在免费计划下必被掐 —— 所以「同一条规则在自建上跑，宿主耗时是多少」正是要的那个数，
+在那边量出来的数字才是阈值该取的量级。量完两条再回线上看有没有落进 10 ms 那个窗口。
+
 ---
 
-## 2. 第二个平台适配器（Node / Docker）
+## 2. ~~第二个平台适配器（Node / Docker）~~ —— 第七十五轮已做（除 Docker）
 
-**为什么**：v0.55.0 把「跑在哪」收敛成了一层（`src/platform/`），但**只抽了接口、
-没落第二个适配器** —— 「能换平台」目前是个**结构上的承诺**，没被验证过。
-真跑起来才会知道接口里还缺什么（`meta.last_row_id`、以及第六十七轮新增的
-`PlatformCache` 都是这么冒出来的）。**而且它就是上面第 1 条的第二条出路。**
+**做完了**（v0.63.0）。落地的东西：`src/platform/node.ts`（`node:sqlite` / `fs` / 内存 Map）、
+`src/platform/wasm.node.ts`（`readFile` + `new WebAssembly.Module`）、`src/server/node.ts`
+（入口：建库 / 跑迁移 / http ↔ Request·Response / SPA 回退）、`scripts/build-node.mjs`
+（esbuild + 把 `platform/wasm` 换成 `wasm.node.ts` 的替换插件）、`test/platformNode.test.ts`（8 条）。
+`engine/js.ts` 那句 import 一个字没改。
 
-**已经到哪一步**：接口与那条缝都在了 —— `src/platform/types.ts`
-（`PlatformDb` / `PlatformStatement` / `PlatformResult` / `PlatformAssets` /
-`PlatformCache` / `AppEnv`）、`src/platform/cloudflare.ts`（`cloudflareEnv(env)`）、
-`src/platform/wasm.ts`（WASM 从哪来）。业务代码已经不认 D1 与 Cache API，
-`test/platformBoundary.test.ts` 四条断言盯着不许漏回去。
+**验收标准达到了**：`npm run start:node` 起得来，`SMOKE_BASE=http://127.0.0.1:8790 node scripts/smoke.mjs`
+**连跑两遍全绿**（11 个书源的链路 + 书源管理 + 登录态 + 媒体缓存 + PWA……）。单测 993 → 1001。
 
-**下一步**：
+**跑起来才挖出来的两个缺陷**（这两个才是「抽了接口但没跑过第二个实现」的真正代价，
+它们都只在**别处跑**才露头，详见 README「第七十五轮」）：
 
-1. `src/platform/node.ts`：用 `node:sqlite`（Node 22 起内置）实现 `PlatformDb`；
-   静态资源走 `fs` + 扩展名映射（或 `@hono/node-server/serve-static`）；
-   缓存走内存 Map（实现 `PlatformCache` 那两件事）；WASM 走 `readFile` + `WebAssembly.compile`。
-2. `src/server/node.ts`：入口，`app.fetch(request, nodeEnv)`。
-3. **集成测试**：这个仓库刻意不写「假 D1」（那样测的其实是那个假实现），所以适配器得配
-   自己的集成测试 —— 真建一个临时库、跑一遍迁移、走几条读 / 写 / `batch`。
+1. `NodeDb.batch()` 一律走 `all()`，而 `.all()` 只给行 —— 写语句的 `meta.changes` 恒为 0。
+   可 `setSourceEnabled` / `setSourcesEnabled` / `deleteSource` / `revokeSession` 四处都拿它
+   判「到底改到没有」，于是冒烟一次红五条（数据改了、接口却说「找不到书源」）。
+   D1 的 `batch()` 是**统一的按语句结果**，`node:sqlite` 是 `all()` / `run()` **两套 API** ——
+   接口抽象没把这层差异暴露出来，所以只有真跑才碰得到。
+2. `PlatformCache` 的 `put` 照字面实现成 `store.set(url, response.clone())`，等于把一根**活的流**
+   留在缓存里；第二趟 `match` 去 clone 一根已被读过的分支，运行时抛
+   `Response.clone: Body has already been consumed.` —— 表现是「第一张图正常、之后同一张图一律 500」。
+   Cache API 的真实语义是**收完体存字节**。这条**连跑第二遍冒烟**才复现。
 
-**怎么算做完**：`node src/server/node.ts` 起得来，`npm run smoke` 对着它跑通
-（冒烟只打 HTTP，`SMOKE_BASE` 指过去就行）——**搜索那一串应该全绿**，
-那正是第 1 条要的结果。
+顺带被逼出来的两处（改的是已有的那份代码）：`cloudflare.ts` 的 `defaultCache` 从模块顶层常量
+挪进函数（Node 上没有 `caches` 全局，顶层求值 = 自建入口 import 阶段就崩）；
+`platformBoundary.test.ts` 那条「`.wasm` 只有一处」改成「**业务代码里一个都不许有**」。
+
+**还没做的**：Docker 镜像（给 `src/server/node.ts` 加个 `Dockerfile`，但要真验证过才写进文档）。
+
+**顺带记下这条余量**：`build:node` 目前只打服务端 —— 前端仍是 `public/` 原样复制，
+没有构建步骤（这一直是本项目的选择，不是欠账）。
 
 ---
 

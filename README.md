@@ -75,6 +75,7 @@
 | **版本号与更新记录**（`/api/version` + 页脚 + `#/about`）                                           | 已实现（版本号只从部署的 `ENGINE_VERSION` 出、前端不另存一份，三处漂了由测试拦下；记录来自发布提交，见「第六十五轮」）                                                                                                                                                                                                                          |
 | **搜索指定书源**（只搜挑好的那几个）                                                                | 已实现（搜索页的「搜索范围」；面板内联、可按名字与分组筛；范围存本地并自动收敛掉已删 / 停用的源，见「第六十八轮」）                                                                                                                                                                                                                             |
 | **装到桌面 + 断网还能开**（PWA：`manifest.json` / 图标 / Service Worker）                           | 已实现（缓存**界面**与**正在读的那本书**：`/api/book` + `/api/toc` + `/api/content`；网络优先 + 缓存兜底，键按「书的身份」（`sourceId` + `url`）算 —— 上下文那两段 JSON 不进键，见「第六十三轮」）                                                                                                                                              |
+| **两种跑法**：Cloudflare Workers / 自建 Node（`npm run start:node`）                                | 已实现（第六十六轮抽了 `src/platform/` 那层接口，第七十五轮落下第二份实现并**跑通冒烟** —— 自建那侧没有每请求 10 毫秒的 CPU 上限，库是本机 SQLite；见「第七十五轮」与「部署」）                                                                                                                                                                  |
 
 尚未实现的部分一律**显式抛错**而不是静默返回空 —— 后者会让书源表现成「搜不到书」，排查成本极高。
 唯一的例外是**模板里那一小段 JS 表达式**：它取的是展示用的标签，缺个助手只让这一小段变空，
@@ -178,13 +179,17 @@ public/                   前端（无构建步骤，直接作为静态资源发
     ├── swPolicy.js       Service Worker 的路由与缓存键：哪条请求进哪张表、键怎么算（纯函数，可单测）
     └── zoom.js           字号手势：夹取、捏合比例、滚轮单位与累积（纯函数，可单测）
 src/
-├── index.ts              Worker 入口与 API 路由
+├── index.ts              Worker 入口与 API 路由（`handleRequest` 是两个平台共用的那一层）
 ├── changelog.ts          更新记录（版本 → 一句话；`/api/version` 与前端「关于」页读它）
 ├── fixture.ts            内置测试站点（ENABLE_FIXTURE=true 时才挂载）
+├── server/
+│   └── node.ts           自建入口（第七十五轮）：建库 / 跑迁移 / http ↔ Request·Response / SPA 回退
 ├── platform/             与「跑在哪」有关的那三样，全收敛在这一层（第六十六轮）
-│   ├── types.ts          平台接口：PlatformDb / PlatformStatement / PlatformResult / PlatformAssets / AppEnv
+│   ├── types.ts          平台接口：PlatformDb / PlatformStatement / PlatformResult / PlatformAssets / PlatformCache / AppEnv
 │   ├── cloudflare.ts     Cloudflare 侧的绑定：把 Worker 的 env 变成 AppEnv（唯一出现原始 Env 的地方）
-│   └── wasm.ts           QuickJS 那个 WASM 从哪来（唯一 `import '*.wasm'` 的地方）
+│   ├── node.ts           自建侧的实现：node:sqlite / fs / 内存 Map（第七十五轮）
+│   ├── wasm.ts           QuickJS 那个 WASM 从哪来（Workers：打包器把 .wasm 编好交进来）
+│   └── wasm.node.ts      同一位置的自建实现（readFile + WebAssembly.Module，打包时顶替上面那份）
 ├── data/
 │   ├── types.ts          书源身份、书架主键、数据层错误
 │   ├── db.ts             D1 读写与导入校验（书源）
@@ -6489,14 +6494,118 @@ script 与 style 不进正文 / 实体 / 空壳标签 / **纯文本逐字返回*
   时限误伤，但真要让它更快得把 `__listOf` 那串「size → get(i) → outerHtml」合成一次往返，
   记进 `TODO.md`。
 
+### 第七十五轮：第二条腿 —— 自建（Node）适配器，以及「换个地方跑」才露头的两个缺陷
+
+**为什么是这一轮做它。** 第六十六轮把「跑在哪」收敛成了 `src/platform/` 一层，但**只抽了接口**：
+「能换平台」一直是个**结构上的承诺**，没被跑过。而它同时是 `TODO.md` 第 1 条那个
+「免费计划每请求 10 毫秒、重规则必然 503」的第二条出路（第一条是升付费计划，要花钱）。
+所以这一轮把第二个适配器真的落下来 —— 顺便验证那个承诺，和把两个「只有在别处跑才会露头」的
+缺陷挖出来。
+
+**新增的东西（业务代码一行没改）：**
+
+| 文件                        | 做什么                                                                       |
+| --------------------------- | ---------------------------------------------------------------------------- |
+| `src/platform/node.ts`      | `node:sqlite` 实现 `PlatformDb`；`fs` 实现 `PlatformAssets`；内存 Map 实现 `PlatformCache` |
+| `src/platform/wasm.node.ts` | QuickJS 的 WASM：`readFileSync` + `new WebAssembly.Module`（Workers 那份认不了） |
+| `src/server/node.ts`        | 入口：建库 / 跑迁移 / `http` 请求 ↔ Web `Request`/`Response` / 路由与 SPA 回退 |
+| `scripts/build-node.mjs`    | esbuild 打包，外加一个把 `platform/wasm` 换成 `wasm.node.ts` 的替换插件       |
+| `test/platformNode.test.ts` | 适配器自己的集成测试（真临时库、真 SQL、真文件系统）                          |
+
+`engine/js.ts` 里那句 `import { quickJsWasmModule } from '../platform/wasm'` **一个字都不用动** ——
+打包时由 `scripts/build-node.mjs` 的插件把 `wasm.ts` 换成 `wasm.node.ts`。
+这是「把平台差异关进 `platform/`」这笔账第一次真的还上：适配器可以**独立于沙箱**单测。
+
+**跑起来才发现的第一个缺陷：`batch()` 里写语句的 `meta.changes` 恒为 0。**
+
+第一版 `NodeDb.batch()` 把每个语句都走 `.all()`。D1 的 `batch()` 给的是**统一的按语句结果**
+（查询给 `results`、写入给 `meta.changes`），而 `node:sqlite` 是**两套 API**（`all()` 只给行、
+`run()` 只给 `this.changes`）—— 于是写语句的 `changes` 全是 0。命中四处调用方：
+
+```ts
+// src/data/db.ts
+if ((result?.meta.changes ?? 0) === 0) throw new DataError(`找不到书源：${id}`, 404, 'source_not_found')
+```
+
+`setSourceEnabled` / `setSourcesEnabled` / `deleteSource` / `revokeSession` 都拿它判「到底改到没有」，
+所以冒烟里**一次红了五条**：停用、批量启用、批里混内置源、删除、改密码踢会话 ——
+数据其实改了，接口却报「找不到书源」/`revoked=0`。修法是按语句类型分派（`select|with|pragma|explain`
+或含 `returning` 走 `all()`，其余走 `run()`），与 D1 那边统一。
+
+**第二个缺陷：缓存里存了 `Response`（一根活的流），于是第二趟请求 500。**
+
+`PlatformCache` 的 `put/match` 看着像「存一份响应、取一份响应」，但 Cache API 的实际语义是
+**`put` 把响应体收完存字节、每次 `match` 给一份新的**。第一版照字面实现成
+`store.set(url, response.clone())` —— 而媒体代取交给 `put` 的本来就不是自足响应，
+是「上游响应一次 `clone()` 出来的分支」（`index.ts` 的 `/api/media`）。结果：
+
+```
+第一趟取图：200
+之后同一张图：500  {"error":"Response.clone: Body has already been consumed."}
+```
+
+`match` 去 `clone()` 那根已经被读过的分支，运行时直接抛。这条**只有跨请求才复现** ——
+同一张图第一次取永远是对的，所以单测和「刚重启服务器跑一遍冒烟」都是绿的，
+是**连跑第二遍冒烟**才钉出来的（第二遍才命中第一遍写下的那个条目）。改成收成字节存，
+并把这条时序写进了回归测试（存一次、`match` 三次、源响应已被读走）。
+
+**顺带被逼出来的两处（改的是已有的那份代码）：**
+
+1. `platform/cloudflare.ts` 里 `defaultCache` 原本是**模块顶层常量** —— 而 Node 上没有 `caches`
+   这个全局，顶层求值等于**自建入口在 import 阶段就崩**，连入口都跑不到。挪进函数。
+2. `test/platformBoundary.test.ts` 那条「`import '*.wasm'` 只有一处」不再成立（接缝现在是同名的
+   两份）。断言改成表达**真正的不变量**：**业务代码里一个静态 `.wasm` import 都不许有**，
+   外加正面那半条「Workers 那份接缝得还在」。比原来钉「一处」更结实 —— 它不会再因为
+   平台实现多了一份而误报。
+
+**怎么跑：**
+
+```bash
+npm run start:node          # 打包 + 起服务（默认 127.0.0.1:8787，库在 data/reader.sqlite）
+# 或者分开：
+npm run build:node && node dist-node/server.mjs
+# 开发时也可以直接跑源码（Node 22 起能 strip types）：
+node src/server/node.ts
+```
+
+环境变量：`PORT` / `DB_PATH` / `PUBLIC_ROOT` / `MIGRATIONS_DIR` / `ENGINE_VERSION` / `ENABLE_FIXTURE`。
+`ENGINE_VERSION` 不给就从 `package.json` 读（界面「关于」页与 `/api/version` 拿它当版本号，
+随手写个假的会在冒烟「更新记录最新一条与版本号一致」那条上红）。
+
+**验证。** 单测 993 → **1001**（适配器的 8 条：`run` 的 changes / `batch` 里写语句的 changes /
+batch 原子性 / 布尔折 1-0 / `first` 三种形态 / `bind` 互不影响 / 静态资源与 `..` 防护 /
+缓存那条跨请求时序）。冒烟原来只打 HTTP，所以**指过去就行**：
+
+```bash
+SMOKE_BASE=http://127.0.0.1:8790 node scripts/smoke.mjs
+```
+
+**连跑两遍全绿**（第二遍正是原来会红的那一遍）：搜索 → 详情 → 目录 → 正文四步、
+11 个书源结果一致、书源管理与登录态/媒体那一串全过。
+
+**没做：** Docker 镜像（就是给这个入口加个 `Dockerfile`，但没验证过的东西不写进来）；
+把 `TODO.md` 第 1 条那个「一次求值的宿主工作量上限」接上（`engine/js.ts` 的 `busy.ms` 已经在了，
+但阈值要先在**不设 CPU 上限的宿主上**量几条能跑通的规则才能定 —— 这正好是这一轮新开出来的地方）。
+
 ## 验证
 
 ```bash
 npm install
 npm run db:migrate   # 建本地 D1 表（首次、以及每次新增迁移后）
-npm test             # 单元测试（993 项，Node 里毫秒级跑完；另有十八个默认跳过的全量扫描，见下）
+npm test             # 单元测试（1001 项，Node 里毫秒级跑完；另有十八个默认跳过的全量扫描，见下）
 npm run dev          # 起本地服务，浏览器打开首页即可用；另开一个终端跑下面这条
 npm run smoke        # 端到端：链路 + 书源管理（导入 / 启停 / 批量启停 / 内置源剔掉 / 空 ids 给 400）+ 正文里的 HTML 摊平（@html 取值与 @textNodes 逐字一致）+ jsoup 链式调用（`data()` / `select(...)[0]` / `remove()` 真删）+ 跨请求的会话变量（详情 `java.put` → 目录 `java.get` 拼上前缀）+ 目录脚本返回对象数组（按标记分卷 + `text`/`href`/`volume` 键）+ 脚本死循环仍然会被中断 + 静态资源 + 账号/书架/进度/书签 + 改显示名/改密码 + 导出导入备份 + 书签清单 + 替换净化同步 + 笔记 + 媒体 + 字段模板 + 选择器@js: + 空选择器取值 + 列表标记（+ / 顶格 <js>）+ 沙箱助手 + setContent/digestHex/UI 动作 + 节点级助手/加解密 + 连接式取网与 result.toArray() + 书源变量落库 + 书的上下文与书的变量 + JS 尾段列表规则保留节点 + 连接符切分 + 列表规则（末尾那个词 / CSS 首段的位置后缀 / `!` 排除下标）+ 字段规则（CSS 式多段 `@`）+ 变量指令（`@put:` / `@get:` 含**跨请求**那一半）+ `init`（铺变量与**换根**两种）+ `<js>` 段 + JSONPath 尾段（`$[*]` / `$[:n]`）+ 地址尾部的请求选项（`地址,{选项}` / 排成多行的那份选项块）+ URL 选项里 `body` 写对象（`application/json`）+ 展示用字段的容错与 `warnings` + 单斜杠 XPath（`/a/p[1]/text()` 相对当前条目）+ 防盗链封面走 `/api/media` 代取 + http 封面（混合内容）也代取 + `<script>` / `<style>` 也是元素（`java.getElement("script")` 那条路） + JSOUP 简写 `class.A B`（两个类都要有） + `source.getLoginInfoMap()` 的 Map 语义 + URL 字段 JS + 发现/首页 + cookie 罐（收 / 发 / 按源落库）+ 重定向自己跟（302 上的 `Set-Cookie` 与 `Location`）+ 目录里的 `isVip` / `isPay` / `isVolume` / `updateTime` + 登录态（跑一次 `loginUrl` → 落库 → 之后每趟请求都带上）+ 登录界面（读 `loginUi` → 渲染表单 → 界面上的按钮单独调得到）+ 沙箱里的取网跟着这次求值的预算走（列表规则里 / 搜索地址模板里，含「响应头回了、正文拖很久」那层兜底）+ 搜索 / 发现里的逐条字段走批量求值（批按 jsLib 分开，两源互不串味）+ PWA（`manifest.json` / 四张图标是真 PNG / `/sw.js` 的 JS 类型 / `/js/swPolicy.js` 可取 / head 里的 link）+ 书源列表的协商缓存（首次带 `ETag` / 同一个 `ETag` 回 304 且无正文 / 对不上的照旧回完整列表）+ 版本与更新记录（`/api/version` 带版本号 / 记录非空且最新一条与版本号一致）+ 媒体缓存（换过地址后仍命中 / 命中字节与上游一致 / 带 `Range` 不进缓存）
+```
+
+同一条冒烟也用来验收**自建（Node）那份**：它只打 HTTP，所以换个地址就行。
+注意**要连跑两遍** —— 第一遍写下的缓存条目正是第二遍才去读的那一份，
+「跨请求」那类缺陷只有第二遍会露头（第七十五轮就是这么钉出一条 500 的）。
+
+```bash
+npm run build:node
+$env:PORT='8790'; $env:ENABLE_FIXTURE='true'; $env:DB_PATH='data/node-test.sqlite'; node dist-node/server.mjs
+# 另开一个终端：
+$env:SMOKE_BASE='http://127.0.0.1:8790'; node scripts/smoke.mjs
 ```
 
 另外还有一条**不进 CI 的**体检命令（它要打真实站点，默认打线上那台）：
@@ -7017,6 +7126,35 @@ curl.exe -sS -o NUL -w "%{http_code}" https://www.digitalocean.com/
    `http://<本机局域网 IP>:8787` —— 公网一时打不通时最快能继续用的办法。
    一个坑：网络被 Windows 识别成「公用」时，程序级入站规则里的 Block 会盖过 Allow
    （`Get-NetFirewallRule` 里的 `action=Block` 那两条），表现是电脑自己能开、手机连不上
+
+### 自建：跑在自己的一台机器上（不用 Cloudflare）
+
+第七十五轮起还有一条路：整套东西跑在本机 Node 上，**没有每请求 10 毫秒的 CPU 上限**，
+也不需要 Cloudflare 账号。前提只有一个 —— **Node 22 以上**（`node:sqlite` 是内置的）。
+
+```bash
+npm install
+npm run start:node          # 打包 + 起服务，默认 http://127.0.0.1:8787
+```
+
+不用先建库、也不用单独跑迁移：**启动时会自己把 `migrations/*.sql` 跑一遍**
+（用一个自己的 `_migrations` 表记住跑过哪些，每个文件包一个事务）。
+数据落在 `data/reader.sqlite`（走 WAL），静态资源直接由进程发，不经过 Cloudflare。
+
+```bash
+PORT=8790 DB_PATH=data/other.sqlite npm run start:node   # 换个端口 / 换个库
+npm run build:node && node dist-node/server.mjs          # 打完包再跑（产物在 dist-node/）
+node src/server/node.ts                                  # 开发时也可以直接跑源码
+```
+
+两处与线上**有意不同**的地方：
+
+- `waitUntil` 在这边是**发响应之前等它落地**（Workers 那边是响应之后接着跑）。本机跑没有
+  「请求结束就掐掉 Promise」的问题，而且等它落地让「缓存写好了」对紧接着的下一个请求是确定的。
+- 缓存是**进程内的内存 Map**，不是按机房分布的 Cache API —— 重启就没了，单机够用。
+  它有总量上限（64 MB，按插入顺序丢最老的），因为这个进程是长驻的。
+
+没做的是 Docker 镜像：给这个入口加个 `Dockerfile` 就行，但**没验证过的东西不写进文档**。
 
 ### 刚部署完是「空的」，这是对的
 
