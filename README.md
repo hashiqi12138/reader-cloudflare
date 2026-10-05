@@ -157,6 +157,9 @@ XML 严格解析必然报错。所以仍然用 cheerio（htmlparser2）解析 HT
 ## 目录结构
 
 ```
+Dockerfile                自建模式的容器镜像（两个阶段；用法与参数见 DOCKER.md）
+docker-compose.yml        `docker compose up -d` 的默认配置（宿主端口 / 命名卷 / 重启策略）
+DOCKER.md                 容器部署那一份单独文档（第七十九轮）
 migrations/               D1 迁移（按序号递增，不可回改已应用的）
 public/                   前端（无构建步骤，直接作为静态资源发布）
 ├── index.html            外壳
@@ -5865,7 +5868,7 @@ ETag 还没变」的窗口，那期间浏览器拿到的 304 是过期的。自�
 绑定类型 `Env` 只出现在入口与适配层。
 
 **还没做的**：第二个适配器（Node / Docker 那条路）。上面三样各写一份、入口包一层就完事，
-但那是下一轮的事。
+但那是下一轮的事。（后来做了：Node 那份在第七十五轮，容器那份在第七十九轮。）
 
 ### 第六十七轮：搜索 503 的结论（免费计划跑不动），以及媒体缓存改走 Cache API
 
@@ -6585,7 +6588,8 @@ SMOKE_BASE=http://127.0.0.1:8790 node scripts/smoke.mjs
 **连跑两遍全绿**（第二遍正是原来会红的那一遍）：搜索 → 详情 → 目录 → 正文四步、
 11 个书源结果一致、书源管理与登录态/媒体那一串全过。
 
-**没做：** Docker 镜像（就是给这个入口加个 `Dockerfile`，但没验证过的东西不写进来）；
+**没做：** Docker 镜像（就是给这个入口加个 `Dockerfile`，但没验证过的东西不写进来 ——
+第七十九轮把它补上了）；
 把 `TODO.md` 第 1 条那个「一次求值的宿主工作量上限」接上（`engine/js.ts` 的 `busy.ms` 已经在了，
 但阈值要先在**不设 CPU 上限的宿主上**量几条能跑通的规则才能定 —— 这正好是这一轮新开出来的地方）。
 
@@ -6912,12 +6916,68 @@ Array.from(java.getElement('script')).filter((e) => String(e).includes('目录')
 留在 `TODO.md` 里。另外 `test/connectorJsTail.scan.test.ts` 那批扫描里还有几处「写操作」
 形状的写法，本轮没再动（第 10 条已经核实过它们与连接符无关）。
 
+### 第七十九轮：容器镜像 —— 顺手把它做成「首次构建 80 秒」而不是十分钟
+
+这一轮做 `TODO.md` 第 2 条的余量：给自建入口加 `Dockerfile`，在真机上跑通，再写一份
+单独的 [DOCKER.md](./DOCKER.md)。交付物是 `Dockerfile` + `docker-compose.yml` + `.dockerignore`。
+
+**一、两个阶段，但构建阶段不装 devDependencies**
+
+第一版老老实实 `npm ci`（含 dev），结果卡在装依赖上超过十分钟还没完 —— 因为
+`wrangler` 会拖一个约 100 MB 的 `workerd` 运行时下来，而容器里一行都用不到。
+改完之后：构建阶段 `npm ci --omit=dev`（43 秒），打包器 esbuild 单独装。
+
+esbuild 是 devDependency，`--omit=dev` 那一步装不到它，所以单独按 **package.json 里钉的版本**
+装进一个临时目录、再把那两个包（esbuild 本体 + 它的平台二进制，共约 10 MB）放进 `node_modules`。
+版本从 `package.json` 读而不是在 Dockerfile 里写死 —— 写死就会与仓库漂开，而且 `npm ci` 不会发现。
+
+数字：**冷构建（`--no-cache`）134 秒，改代码后的重建 80 秒，镜像 249 MB**（基础镜像
+`node:22-slim` 占大头）。第一版那条路光是装依赖就超过十分钟。
+
+**二、`.dockerignore` 里故意排除 QuickJS 的 wasm**
+
+那份二进制不进仓库（见 `.gitignore`），由 `npm ci` 的 prepare 钩子从 `node_modules` 复制到
+`src/engine/`。构建上下文里*可能*有宿主上那一份（本地开发留下的），带上它反而会掩盖
+「依赖升了但 wasm 没跟着升」—— 排除掉之后，镜像里那份一定是与装上的 `quickjs-emscripten`
+配套的。
+
+**三、几个不写下来就会踩的点**
+
+| 点                            | 做法与理由                                                                                                                         |
+| ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| 不用 root 跑                  | 用基础镜像自带的 `node`（uid 1000）；`/data` 在**建镜像时**就 `chown` 给它 —— 命名卷第一次创建时复制的是那一刻的属主，之后再改没用 |
+| `CMD` 用 exec 形式            | node 是 PID 1，`src/server/node.ts` 那对 SIGTERM/SIGINT 处理器才收得到。实测 `docker stop` **0.33 秒**（不是等 10 秒被 KILL）      |
+| 健康检查打 `/api/version`     | 它不碰库也不碰网，进程起来了就一定答得上。打 `/` 或 `/api/sources` 会把静态资源与库的状态掺进「活没活」                            |
+| 数据只放在 `/data` 这一个卷里 | 连**签名密钥**也在库里。不挂卷 = 每次重建都是一台空实例，而且之前发出去的代取地址（含浏览器缓存的封面）全变 403                    |
+
+**四、实测（Windows + Docker Desktop，Docker 29.7.2）**
+
+- 自建那份冒烟指到容器：**连跑两遍全绿**（11 个书源对照 + 书源管理 + 登录态 + 媒体缓存与签名 + PWA）
+- 运行身份 `uid=1000(node)`，`/data` 属主也是它
+- 重启容器后，同一串**签名代取地址仍然 200** —— 密钥确实落在卷里
+- 备份（`tar` 整卷）→ 恢复到一个新卷 → 启动日志「本次新跑 0 个」，`/api/version` 200
+
+**踩到一个不是 Docker 的坑，记下来省下一次排查**：一开始用 `-p 8787:8787`，容器起来、也 healthy，
+但从宿主机 `127.0.0.1:8787` 打过去是「**连得上、不回应**」。查下来是上一轮跑冒烟时
+`npm run dev` 留下的 `workerd` 还占着 IPv4 loopback，把容器的端口转发挡在后面。
+DOCKER.md 的「换个宿主机端口」那一节写了这个症状与查法。
+
+**五、顺手加的防漂移测试**
+
+容器这条路上的错都不会当场报错，所以 `test/docker.test.ts`（11 条）把三件事钉住：
+`.dockerignore` 必须排除构建产物与依赖（否则镜像里会跑上一次的旧产物）、
+`DB_PATH` 必须在 compose 挂的那个卷里、以及**代码里读到的每个环境变量都得在 Dockerfile
+或 DOCKER.md 里出现过**（以后再加开关却忘了写进容器，这条会红）。
+
+**六、没做：** alpine 变体（`node:sqlite` 是 Node 自带的，musl 理论上没问题，但没跑过就不写）；
+多架构（本机 x86_64，要跑 arm64 得在目标机器上 build 或用 `buildx`）；反向代理与 HTTPS。
+
 ## 验证
 
 ```bash
 npm install
 npm run db:migrate   # 建本地 D1 表（首次、以及每次新增迁移后）
-npm test             # 单元测试（1030 项，Node 里秒级跑完；另有十九个默认跳过的全量扫描，见下）
+npm test             # 单元测试（1041 项，Node 里秒级跑完；另有十九个默认跳过的全量扫描，见下）
 npm run dev          # 起本地服务，浏览器打开首页即可用；另开一个终端跑下面这条
 npm run smoke        # 端到端：链路 + 书源管理（导入 / 启停 / 批量启停 / 内置源剔掉 / 空 ids 给 400）+ 正文里的 HTML 摊平（@html 取值与 @textNodes 逐字一致）+ jsoup 链式调用（`data()` / `select(...)[0]` / `remove()` 真删）+ 跨请求的会话变量（详情 `java.put` → 目录 `java.get` 拼上前缀）+ 目录脚本返回对象数组（按标记分卷 + `text`/`href`/`volume` 键）+ 脚本死循环仍然会被中断 + 静态资源 + 账号/书架/进度/书签 + 改显示名/改密码 + 导出导入备份 + 书签清单 + 替换净化同步 + 笔记 + 媒体 + 字段模板 + 选择器@js: + 空选择器取值 + 列表标记（+ / 顶格 <js>）+ 沙箱助手 + setContent/digestHex/UI 动作 + 节点级助手/加解密 + 连接式取网与 result.toArray() + 书源变量落库 + 书的上下文与书的变量 + JS 尾段列表规则保留节点 + 连接符切分 + 列表规则（末尾那个词 / CSS 首段的位置后缀 / `!` 排除下标）+ 字段规则（CSS 式多段 `@`）+ 变量指令（`@put:` / `@get:` 含**跨请求**那一半）+ `init`（铺变量与**换根**两种）+ `<js>` 段 + JSONPath 尾段（`$[*]` / `$[:n]`）+ 地址尾部的请求选项（`地址,{选项}` / 排成多行的那份选项块）+ URL 选项里 `body` 写对象（`application/json`）+ 展示用字段的容错与 `warnings` + 单斜杠 XPath（`/a/p[1]/text()` 相对当前条目）+ 防盗链封面走 `/api/media` 代取 + http 封面（混合内容）也代取 + `<script>` / `<style>` 也是元素（`java.getElement("script")` 那条路） + JSOUP 简写 `class.A B`（两个类都要有） + `source.getLoginInfoMap()` 的 Map 语义 + URL 字段 JS + 发现/首页 + cookie 罐（收 / 发 / 按源落库）+ 重定向自己跟（302 上的 `Set-Cookie` 与 `Location`）+ 目录里的 `isVip` / `isPay` / `isVolume` / `updateTime` + 登录态（跑一次 `loginUrl` → 落库 → 之后每趟请求都带上）+ 登录界面（读 `loginUi` → 渲染表单 → 界面上的按钮单独调得到）+ 沙箱里的取网跟着这次求值的预算走（列表规则里 / 搜索地址模板里，含「响应头回了、正文拖很久」那层兜底）+ 搜索 / 发现里的逐条字段走批量求值（批按 jsLib 分开，两源互不串味）+ PWA（`manifest.json` / 四张图标是真 PNG / `/sw.js` 的 JS 类型 / `/js/swPolicy.js` 可取 / head 里的 link）+ 书源列表的协商缓存（首次带 `ETag` / 同一个 `ETag` 回 304 且无正文 / 对不上的照旧回完整列表）+ 版本与更新记录（`/api/version` 带版本号 / 记录非空且最新一条与版本号一致）+ 媒体缓存（换过地址后仍命中 / 命中字节与上游一致 / 带 `Range` 不进缓存）+ 目录脚本按**属性序号**取值（`attributes()` + `Attribute.toString()`，一半条目的书名在第 3 位、一半在第 4 位）+ 搜索里 `java.put` / 详情里 `java.get`（**每一本读到的都是它自己那条写下的值**）+ 正文脚本把真地址**写到 `src` 上**再整批返回（`java.getElements(...).forEach(e => e.attr("src", …))` 那一条）+ 发现里 `java.put` / 详情里 `java.get`（发现那一趟也接了落库通道）
 ```
@@ -6931,6 +6991,14 @@ npm run build:node
 $env:PORT='8790'; $env:ENABLE_FIXTURE='true'; $env:DB_PATH='data/node-test.sqlite'; node dist-node/server.mjs
 # 另开一个终端：
 $env:SMOKE_BASE='http://127.0.0.1:8790'; node scripts/smoke.mjs
+```
+
+**容器那一份**用同样的办法验收（细节见 [DOCKER.md](./DOCKER.md)）。注意宿主端口要与容器内
+那个一致 —— fixture 书源指向的是**请求来源**，而容器里的 `127.0.0.1` 是容器自己：
+
+```bash
+docker compose up -d --build          # 先在 compose 文件里把 ENABLE_FIXTURE 打开（或用环境变量）
+$env:SMOKE_BASE='http://127.0.0.1:8787'; node scripts/smoke.mjs
 ```
 
 另外还有一条**不进 CI 的**体检命令（它要打真实站点，默认打线上那台）：
@@ -6973,7 +7041,7 @@ XPath 适配层与规则文本、**单斜杠 XPath 的相对语义**、`选择�
 见「第七十七轮」）—— 但它只在**一个**文件里跑（`test/sandboxRun.test.ts`），
 其余涉及沙箱的用例照旧打桩（打桩快得多，而它们要验的本来也不是沙箱）。
 
-七个例外值得说明，它们都不是纯函数却仍然被单测覆盖：
+八个例外值得说明，它们都不是纯函数却仍然被单测覆盖：
 
 - `test/jsoupBridge.test.ts` —— `org.jsoup` 桥的契约是「整数句柄 + op 名」，
   宿主侧实际的解析由 cheerio 完成，而 cheerio 在 Node 里能跑，
@@ -6984,6 +7052,10 @@ XPath 适配层与规则文本、**单斜杠 XPath 的相对语义**、`选择�
   **过桥次数不随节点数增长**，外加一条「拿宿主桥对拍」的等价性断言
 - `test/globals.test.ts` —— 沙箱里 `source` / `infoMap` / `jsLib` 的**组装**是纯的，
   真正进沙箱的那一步不在这里
+- `test/docker.test.ts` —— 读的是仓库里那几份**真文件**（`Dockerfile` / `docker-compose.yml` /
+  `.dockerignore` / `DOCKER.md`），钉住容器那条路上三件不会当场报错的事：
+  构建产物与依赖必须被 `.dockerignore` 排除、`DB_PATH` 必须在 compose 挂的那个卷里、
+  以及代码里读到的每个环境变量都得在那两份文件里出现过（第七十九轮）
 - `test/replace.test.mjs` / `test/search.test.mjs` / `test/merge.test.mjs` /
   `test/replaceSync.test.mjs` / `test/zoom.test.mjs` / `test/pagination.test.mjs` /
   `test/searchPlan.test.mjs` / `test/sourceFilter.test.mjs` / `test/swPolicy.test.mjs` ——
@@ -7496,7 +7568,9 @@ node src/server/node.ts                                  # 开发时也可以直
 - 缓存是**进程内的内存 Map**，不是按机房分布的 Cache API —— 重启就没了，单机够用。
   它有总量上限（64 MB，按插入顺序丢最老的），因为这个进程是长驻的。
 
-没做的是 Docker 镜像：给这个入口加个 `Dockerfile` 就行，但**没验证过的东西不写进文档**。
+**还有容器那一份**（第七十九轮）：`Dockerfile` + `docker-compose.yml` 都在仓库根目录，
+`docker compose up -d --build` 就能起。部署、数据与备份、参数、与 Cloudflare 那份的差异
+都写在单独的 [DOCKER.md](./DOCKER.md) 里。
 
 ### 刚部署完是「空的」，这是对的
 

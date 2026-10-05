@@ -3,7 +3,7 @@
 按「现在就能动手」排序。每条都写清四件事：**为什么**、**已经到哪一步**、**下一步做什么**、
 **怎么算做完**（能验的都要能验）。做完就删掉，别留在这里当装饰。
 
-最后更新：2026-10-05（v0.66.0，第七十八轮之后）
+最后更新：2026-10-05（v0.67.0，第七十九轮之后）
 
 ---
 
@@ -56,7 +56,7 @@
 
 ---
 
-## 2. ~~第二个平台适配器（Node / Docker）~~ —— 第七十五轮已做（除 Docker）
+## 2. ~~第二个平台适配器（Node / Docker）~~ —— 第七十五轮已做，第七十九轮补上容器
 
 **做完了**（v0.63.0）。落地的东西：`src/platform/node.ts`（`node:sqlite` / `fs` / 内存 Map）、
 `src/platform/wasm.node.ts`（`readFile` + `new WebAssembly.Module`）、`src/server/node.ts`
@@ -84,7 +84,18 @@
 挪进函数（Node 上没有 `caches` 全局，顶层求值 = 自建入口 import 阶段就崩）；
 `platformBoundary.test.ts` 那条「`.wasm` 只有一处」改成「**业务代码里一个都不许有**」。
 
-**还没做的**：Docker 镜像（给 `src/server/node.ts` 加个 `Dockerfile`，但要真验证过才写进文档）。
+**容器那一份在第七十九轮补上了**（v0.67.0）。落地的东西：`Dockerfile`（两个阶段，
+构建阶段只装运行期依赖 + 单独装 esbuild —— 第一版把 `wrangler` 那约 100 MB 的 `workerd`
+也拖了进来，首次构建十分钟没完）、`docker-compose.yml`（命名卷 + 可选 `READER_PORT` /
+`ENABLE_FIXTURE`）、`.dockerignore`、以及单独的 `DOCKER.md`。
+
+**验收标准达到了**：`docker compose up -d --build` 起得来、healthy，
+自建那份冒烟指到容器**连跑两遍全绿**。冷构建 134 s / 重建 80 s / 镜像 249 MB；
+非 root（uid 1000）；`docker stop` 0.33 s；重启容器后同一串签名代取地址仍然 200；
+`tar` 整卷备份 → 恢复新卷 → 启动日志「本次新跑 0 个」。单测 1030 → 1041
+（`test/docker.test.ts` 11 条防漂移断言）。
+
+**没做的**：alpine 变体（没跑过就不写）、多架构（本机 x86_64）、反向代理与 HTTPS。
 
 **顺带记下这条余量**：`build:node` 目前只打服务端 —— 前端仍是 `public/` 原样复制，
 没有构建步骤（这一直是本项目的选择，不是欠账）。
