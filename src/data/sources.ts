@@ -445,6 +445,81 @@ export function fixtureSearchVarSource(origin: string): RegisteredSource {
 }
 
 /**
+ * 发现页里给每条记一个变量、详情里读回来（第七十八轮，TODO 第 8 条余量）
+ *
+ * 与 `fixtureSearchVarSource` 是**同一套写法换一个规则组**：那边 put 在
+ * `ruleSearch.bookUrl`，这边 put 在 `ruleExplore.bookUrl`。
+ *
+ * 为什么值得单独做一条靶子：语料里 `ruleExplore` 写 `java.put` 的有 4 条源
+ * （📂阿巴小说 / 🏷七猫小说 / 📂乐乎文章 / 📂小米书城），而发现这一趟原先**没接**
+ * 落库通道 —— 于是同一套写法「搜索能用、发现不能用」，且两边都不报错。
+ *
+ * 读端放在 `ruleBookInfo.intro`（**别的组**），于是 `bid` 会被算进「跨请求键」，
+ * 也只有在真的落库之后详情那趟才读得到。
+ */
+export function fixtureExploreVarSource(origin: string): RegisteredSource {
+    const base = fixtureExploreSource(origin)
+    return {
+        ...base,
+        id: 'builtin:fixture-explore-var',
+        sortOrder: 21,
+        bookSourceName: '内置测试站点（发现里 put、详情里 get）',
+        bookSourceComment: '发现页逐条 java.put，详情 java.get —— 与搜索那条路同一机制',
+        // 只留一个分类（用的是 `hot`：一页两本），避免与 fixture-explore 的分页断言纠缠
+        exploreUrl: `${origin}/fixture/explore/hot?p={{page}}`,
+        ruleExplore: {
+            ...base.ruleExplore,
+            // 每一条把「自己是第几本」记进 bid，再把地址交回去
+            bookUrl: `h3.title a@href <js> java.put("bid", String(result).split("/").pop()); String(result) </js>`,
+        },
+        ruleBookInfo: {
+            ...base.ruleBookInfo,
+            intro: '@js: "bid=" + java.get("bid")',
+        },
+    }
+}
+
+/**
+ * 图片源：正文真地址只能靠脚本写到 `src` 上（第七十八轮，TODO 第 12 条）
+ *
+ * 抄的是 🎨笔趣漫画 的 `ruleContent.content`：
+ *
+ *     imgs = java.getElements(".rd-article-wr img");
+ *     imgs.forEach(e => { e.attr("src", e.attr("data-original")) });
+ *     imgs
+ *
+ * 这条规则同时踩中三处：`getElements` 的返回值要能 `forEach`、`attr(k, v)` 要真改、
+ * 改完返回的 HTML 要是改之后的那一份。属性名换成 `data-real-src` 的理由见
+ * `fixtureImgWriteChapterPage` 的说明（`data-original` 在提取器优先表里，分辨不出改没改）。
+ */
+export function fixtureImgWriteSource(origin: string): RegisteredSource {
+    const base = fixtureSource(origin)
+    return {
+        ...base,
+        id: 'builtin:fixture-img-write',
+        sortOrder: 22,
+        bookSourceName: '内置测试站点（图片源·脚本改 src）',
+        bookSourceComment:
+            '正文脚本用 java.getElements(...).forEach(e => e.attr("src", e.attr("data-real-src"))) 把真地址写到 src 上',
+        bookSourceType: 2,
+        ruleToc: {
+            ...base.ruleToc,
+            // 目录指向脚本专用的正文页（与图片源那条路同一手法）
+            chapterUrl: "@js:result.replace('/fixture/chapter/', '/fixture/img-write-chapter/')",
+        },
+        ruleContent: {
+            // 注意选择器是**带点**的 CSS 写法 `".rd-article-wr img"`：JSOUP 简写的
+            // `class.a b` 在这个引擎里是「两个类都要有」（见冒烟第 38 段），
+            // 不是后代选择器 —— 写成 `class.rd-article-wr img` 会一枚都不命中。
+            content: `@js:
+var imgs = java.getElements(".rd-article-wr img");
+imgs.forEach(function (e) { e.attr("src", e.attr("data-real-src")) });
+imgs`,
+        },
+    }
+}
+
+/**
  * 同一个测试站点，改用 XPath 规则
  *
  * 存在的意义是**对照验证**：两套方言打同一个页面，提取结果必须完全一致。
@@ -1005,6 +1080,8 @@ export function builtinSources(origin: string): RegisteredSource[] {
         fixtureSpinSource(origin),
         fixtureAttrTocSource(origin),
         fixtureSearchVarSource(origin),
+        fixtureExploreVarSource(origin),
+        fixtureImgWriteSource(origin),
     ]
 }
 

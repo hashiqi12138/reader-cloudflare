@@ -284,6 +284,8 @@ const COMPARE_EXCLUDED = new Set([
     'builtin:fixture-attr-toc',
     // 这一条的 `intro` 故意不是那一坨 CSS 取值（要显示搜索里 put 的变量），逐字对照必然不等
     'builtin:fixture-search-var',
+    // 同上：这条的 `intro` 显示的是发现里 put 的变量（见 12j）
+    'builtin:fixture-explore-var',
 ])
 const textSources = list.filter(
     (source) => source.builtin && (source.type ?? 0) === 0 && !COMPARE_EXCLUDED.has(source.id),
@@ -2801,6 +2803,86 @@ console.log('\n=== 12h. 搜索里 put、详情里 get（按每条各自的 bookU
     check(
         infos.every((x) => x.got === x.mine),
         '每一本的详情读到的都是**它自己**那条搜索结果写下的值（不是最后一条、也不是空）',
+        JSON.stringify(infos),
+    )
+}
+
+console.log('\n=== 12i. 正文脚本把真地址写到 src 上（getElements + forEach + attr(k,v)） ===')
+{
+    /**
+     * 线上唯一真依赖 `attr(k, v)` 写的那条是 🎨笔趣漫画：
+     *
+     *     imgs = java.getElements(".rd-article-wr img");
+     *     imgs.forEach(e => { e.attr("src", e.attr("data-original")) });
+     *     imgs
+     *
+     * 三件事必须同时成立，缺哪一样整章都取不到，而且都不报「写操作没生效」：
+     *   1. `java.getElements(...)` 的返回值得能 `.forEach(...)`（以前给裸 `JsoupElements`，直接 TypeError）
+     *   2. `e.attr("src", 新值)` 得**真的改**节点（桥当年无论几个参数都走读，静默返回旧值）
+     *   3. 改完把 `imgs` 原样返回，串出来的 HTML 得是**改之后**那份（预取的 HTML 缓存要失效）
+     *
+     * 靶子 `builtin:fixture-img-write` 的真地址放在 `data-real-src`（提取器优先表里**没有**
+     * 这个名字），于是「这一章取不到图」直接等价于「写操作或其缓存失效没生效」——
+     * 用真源的 `data-original` 是分辨不出来的（提取器会自己去取它）。
+     */
+    const src = 'builtin:fixture-img-write'
+    const url = `${BASE}/fixture/img-write-chapter/img1/1`
+    const res = await getJson(
+        `/api/content?sourceId=${encodeURIComponent(src)}&url=${encodeURIComponent(url)}`,
+    )
+    const images = res.json?.images ?? []
+    check(res.json?.kind === 'images', '正文按图片源返回（kind=images）', res.json?.error ?? '')
+    check(
+        images.map((i) => String(i.url).replace(/^.*\/media\//, '')).join('|') ===
+            'page-1.png|page-2.png|page-3.png',
+        '三张图取到的是**脚本写进 src 的真地址**，顺序还是页序',
+        JSON.stringify(images.map((i) => i.url)),
+    )
+    check(
+        !images.some((i) => String(i.url).includes('placeholder')),
+        '占位图没被当成图片（写操作真的落地了）',
+        JSON.stringify(images.map((i) => i.url)),
+    )
+}
+
+console.log('\n=== 12j. 发现里 put、详情里 get（发现那一趟也接上了落库） ===')
+{
+    /**
+     * 与 12h 是同一套写法换一个规则组：12h 的 put 在 `ruleSearch.bookUrl`，
+     * 这里的 put 在 `ruleExplore.bookUrl`。语料里 `ruleExplore` 写 `java.put` 的有 4 条源
+     * （📂阿巴小说 / 🏷七猫小说 / 📂乐乎文章 / 📂小米书城）。
+     *
+     * 发现这一趟原先**没接**落库通道，于是同一套写法「搜索能用、发现不能用」，
+     * 而且两边都不报错 —— 只看得出「从首页/发现点进去的书信息是空的」。
+     * 靶子 `builtin:fixture-explore-var` 每条写一个**互不相同**的值，于是能区分
+     * 「按条落」/「只落最后一次」/「完全不落」三种实现。
+     */
+    const src = 'builtin:fixture-explore-var'
+    const cats = await getJson(`/api/explore?sourceId=${encodeURIComponent(src)}`)
+    const cat = (cats.json?.categories ?? [])[0]
+    check(!!cat, '先读到一个发现分类', cats.json?.error ?? JSON.stringify(cats.json))
+
+    const listed = await getJson(
+        `/api/explore/books?sourceId=${encodeURIComponent(src)}&url=${encodeURIComponent(cat?.url ?? '')}`,
+    )
+    const books = listed.json?.books ?? []
+    check(
+        books.length === 2,
+        '发现页拿到两条书目（每一条都会写自己的 bid）',
+        listed.json?.error ?? `count=${books.length}`,
+    )
+
+    const infos = []
+    for (const book of books) {
+        const info = await getJson(
+            `/api/book?sourceId=${encodeURIComponent(src)}&url=${encodeURIComponent(book.bookUrl)}`,
+        )
+        const tail = String(book.bookUrl).split('/').pop()
+        infos.push({ url: book.bookUrl, mine: `bid=${tail}`, got: String(info.json?.intro ?? '') })
+    }
+    check(
+        infos.every((x) => x.got === x.mine),
+        '每一本的详情读到的都是**它自己**那条发现结果写下的值（不是最后一条、也不是空）',
         JSON.stringify(infos),
     )
 }
