@@ -25,6 +25,11 @@ export interface ReleaseNote {
 
 export const CHANGELOG: ReleaseNote[] = [
     {
+        version: '0.58.0',
+        date: '2026-10-05',
+        note: '书源可以按分组浏览与筛选（名字 / 分组 / 状态 / 能力），还能一次改一批的启用状态；选择书源的地方也都能按分组找；顺带修好了「启用 / 停用」开关（它一直点不动）',
+    },
+    {
         version: '0.57.0',
         date: '2026-10-05',
         note: '搜索可以指定书源（只搜挑好的那几个）；并更正上一轮「指定源也没用」的结论',
