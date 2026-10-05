@@ -57,12 +57,21 @@ export function readInfoVar(ctx: RuleContext, key: string): string {
  *   - **只落「别的请求会读」的键**（由调用方算好）：全量落会把目录那种逐章求值的
  *     写法变成几百次 D1 写
  *   - **每个键一次请求只落一次**（取第一个值）：把上一条再兜一层
+ *
+ * 第七十六轮起，**搜索那一趟**走的是 `ctx.itemVarSink` 那条岔路：它没有「这本书」，
+ * 但每一条搜索结果算完之后就有一本了（见 `ItemVarSink` 与 `booksFromItems`）。
+ * 走岔路时上面第 1、3 条都不适用 —— 搜索里的键就是**按条目**各落一次的。
  */
 export function writeInfoVar(ctx: RuleContext, key: string, value: string): void {
     if (ctx.sandbox) {
         ;(ctx.sandbox.vars ??= {})[key] = value
     } else {
         ;(ctx.vars ??= {})[key] = value
+    }
+
+    if (ctx.itemVarSink) {
+        if (value !== '' && (ctx.infoVarCrossKeys?.has(key) ?? false)) ctx.itemVarSink.push(key, value)
+        return
     }
 
     if (!ctx.persistBookVariable || !ctx.infoVarCrossKeys) return

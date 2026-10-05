@@ -380,34 +380,57 @@ export async function booksFromItems(
 ): Promise<SearchBook[]> {
     const books: SearchBook[] = []
     for (const item of items) {
-        const name = await analyzeString(item, rule.name ?? 'text', ctx)
-        if (!name) continue
+        /**
+         * 这一条算完之后，把它写过的那几个「跨请求变量」落到**它自己这本书**上
+         * （第七十六轮，TODO 第 8 条）
+         *
+         * 关键词是**每一条**：📂阿巴小说 / ⚡📂飛天小說 在 `bookUrl` 规则里
+         * `java.put('bid', …)`、🏷七猫小说 在同一个位置 put `headers`、📂乐乎文章
+         * 在 `bookUrl` 与 `lastChapter` 里各 put 一个 —— 而同一个键**每一本都不一样**，
+         * 所以必须按条分开落，不能落「最后一次」。
+         *
+         * 放在 `finally` 里：这一条没算出来（书名空、走了 continue）时，缓冲里那几个
+         * 变量属于**一本没有身份的书**，只能丢掉 —— 留给下一条会把 A 书的 bid 挂到 B 书上。
+         */
+        const flush = async (bookUrl: string): Promise<void> => {
+            const sink = ctx.itemVarSink
+            if (sink) await sink.flush(bookUrl)
+        }
 
-        const bookUrlRaw = await analyzeAddress(item, rule.bookUrl ?? 'tag.a@href', ctx)
-        const optional = (field: string, rule_: string) =>
-            tolerantField(field, () => analyzeString(item, rule_, ctx), warnings)
-        books.push({
-            name,
-            // 展示用字段一律走 tolerantField：一个坏规则不该让整条搜索失败（见该函数说明）
-            author: await optional('author', rule.author ?? ''),
-            kind: (await optional('kind', rule.kind ?? '')) || undefined,
-            lastChapter: (await optional('lastChapter', rule.lastChapter ?? '')) || undefined,
-            intro: (await optional('intro', rule.intro ?? '')) || undefined,
-            coverUrl:
-                (await tolerantField(
-                    'coverUrl',
-                    async () =>
-                        resolveCoverAddress(
-                            await analyzeAddress(item, rule.coverUrl ?? '', ctx),
-                            base,
-                        ),
-                    warnings,
-                )) || undefined,
-            wordCount: (await optional('wordCount', rule.wordCount ?? '')) || undefined,
-            bookUrl: resolveAddress(bookUrlRaw, base),
-            sourceName: source.bookSourceName,
-            sourceUrl: source.bookSourceUrl,
-        })
+        let resolved = ''
+        try {
+            const name = await analyzeString(item, rule.name ?? 'text', ctx)
+            if (!name) continue
+
+            const bookUrlRaw = await analyzeAddress(item, rule.bookUrl ?? 'tag.a@href', ctx)
+            resolved = resolveAddress(bookUrlRaw, base)
+            const optional = (field: string, rule_: string) =>
+                tolerantField(field, () => analyzeString(item, rule_, ctx), warnings)
+            books.push({
+                name,
+                // 展示用字段一律走 tolerantField：一个坏规则不该让整条搜索失败（见该函数说明）
+                author: await optional('author', rule.author ?? ''),
+                kind: (await optional('kind', rule.kind ?? '')) || undefined,
+                lastChapter: (await optional('lastChapter', rule.lastChapter ?? '')) || undefined,
+                intro: (await optional('intro', rule.intro ?? '')) || undefined,
+                coverUrl:
+                    (await tolerantField(
+                        'coverUrl',
+                        async () =>
+                            resolveCoverAddress(
+                                await analyzeAddress(item, rule.coverUrl ?? '', ctx),
+                                base,
+                            ),
+                        warnings,
+                    )) || undefined,
+                wordCount: (await optional('wordCount', rule.wordCount ?? '')) || undefined,
+                bookUrl: resolved,
+                sourceName: source.bookSourceName,
+                sourceUrl: source.bookSourceUrl,
+            })
+        } finally {
+            await flush(resolved)
+        }
     }
     return books
 }

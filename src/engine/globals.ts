@@ -201,6 +201,8 @@ export function sourceLimits(ctx: RuleContext): SandboxLimits {
         ...(ctx.persistBookVariable ? { persistBookVariable: ctx.persistBookVariable } : {}),
         // 跨请求的会话变量键：JS 的 `java.put` 只对这几个额外落一次库（见 collectSourceVars）
         ...(ctx.infoVarCrossKeys ? { crossRequestInfoKeys: ctx.infoVarCrossKeys } : {}),
+        // 搜索那一趟的岔路：逐条落（每条各是一本书），见 RuleContext.itemVarSink
+        ...(ctx.itemVarSink ? { itemVarSink: ctx.itemVarSink } : {}),
         // cookie 罐：书源没开 enabledCookieJar 时它压根不存在，沙箱那侧就退回老行为
         ...(ctx.source?.cookieJar ? { cookieJar: ctx.source.cookieJar } : {}),
         ...(ctx.source?.persistCookies ? { persistCookies: ctx.source.persistCookies } : {}),

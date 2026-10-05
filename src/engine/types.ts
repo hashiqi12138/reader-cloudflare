@@ -126,6 +126,25 @@ export interface RuleContext {
     infoVarSaved?: Set<string>
 
     /**
+     * **搜索里**逐条落「跨请求变量」的通道（第七十六轮，见 TODO 第 8 条）
+     *
+     * 搜索与「详情 / 目录 / 正文」有一个根本区别：**搜索这一趟没有「这本书」**。
+     * 而书源的写法是「搜索时 `java.put('bid', …)`，详情时 `java.get('bid')`」——
+     * 落库得有个键，键就是**那一条搜索结果自己的 bookUrl**。而 bookUrl 恰恰是这一条的
+     * 字段规则算出来的（📂阿巴小说 / ⚡📂飛天小說 / 🏷七猫小说 / 📂乐乎文章 的 `put`
+     * 就写在 `ruleSearch.bookUrl` 里），所以「收」只能即时收、「落」要等这一条算完。
+     *
+     * 于是把两件事交给一个对象：`persistBookVariable` 指向 `sink.push`（即时收），
+     * 列表那一层（`legato/ops.ts` 的 `booksFromItems`）每算完一条调一次 `sink.flush(bookUrl)`。
+     *
+     * 给了它就不再走「一次请求只落一次」那条去重 —— 同一个键在**不同条目**上本来就要
+     * 各落一次（那是不同的书），去重会把第 2 条之后的全部丢掉。
+     *
+     * 不注入时行为与以前完全一样（搜索里的跨请求 put 不落库）。
+     */
+    itemVarSink?: ItemVarSink
+
+    /**
      * 当前这本书。`@js:` 规则里以 `book` 暴露（`book.name` / `book.author` / …）
      *
      * 线上用得很多：`book.name` 54 处 / 39 源、`book.author` 27 处 / 18 源、
@@ -223,6 +242,20 @@ export interface RuleContext {
      * 由路由层在每个请求入口创建一次，见 `engine/js.ts` 的 `SandboxSession`。
      */
     sandbox?: SandboxSession
+}
+
+/**
+ * 搜索里「逐条落跨请求变量」的通道（`RuleContext.itemVarSink`）
+ *
+ * 分两步是**必须**的，不是设计上的洁癖：写出变量的那一刻还不知道它属于哪本书
+ * （📂阿巴小说 的 `java.put('bid', result)` 就写在 `ruleSearch.bookUrl` 里，
+ * 那时 bookUrl 正在算），所以只能先收、等这一条算完再落。
+ */
+export interface ItemVarSink {
+    /** 收：这次求值写过的跨请求键（值已经在会话表里，这里只管往哪个书记） */
+    push(name: string, value: string): void
+    /** 落：这一条的 bookUrl 算出来了，把它挂到这本书上。空 bookUrl = 丢弃 */
+    flush(bookUrl: string): Promise<void>
 }
 
 /** 沙箱可用的取网能力 */

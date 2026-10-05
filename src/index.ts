@@ -63,6 +63,7 @@ import {
     SOURCE_TYPE,
     type BookContext,
     type ChapterContext,
+    type ItemVarSink,
     type MediaLink,
     type RuleContext,
 } from './engine/types'
@@ -284,6 +285,38 @@ async function bookEvalContext(
         ...(chapter ? { chapter } : {}),
         bookVars,
         persistBookVariable: (name, value) => saveBookVariable(c.env.DB, key, name, value),
+    }
+}
+
+/**
+ * 搜索里的「逐条落跨请求变量」通道（第七十六轮，TODO 第 8 条）
+ *
+ * 搜索与取书链路（详情 / 目录 / 正文）的根本区别是**它没有「这本书」**：
+ * `bookEvalContext` 能直接算出 `book_key` 是因为请求的 `url` 参数就是书地址，
+ * 而搜索这一趟要等**每一条结果各自的 `bookUrl`** 算出来才知道往哪本书上挂。
+ *
+ * 而那个 `bookUrl` 恰恰是这一条的字段规则算出来的 —— 📂阿巴小说 / ⚡📂飛天小說 /
+ * 🏷七猫小说 / 📂乐乎文章 的 `java.put` 就写在 `ruleSearch.bookUrl` 里。所以只能
+ * 「写的时候收起来、这一条算完再落」：`persistBookVariable` 指向 `push`，
+ * `booksFromItems` 每算完一条调一次 `flush(bookUrl)`（见 `ItemVarSink`）。
+ *
+ * **一个源一个**：搜索一页几十个源是并发的（`Promise.all`），共用一个缓冲会把
+ * A 源那条书的 `bid` 落给 B 源的某一本。沙箱求值是串行的，但宿主侧的 await 会交错。
+ */
+function searchItemVarSink(db: PlatformDb, source: RegisteredSource): ItemVarSink {
+    let pending: Array<{ name: string; value: string }> = []
+    return {
+        push: (name, value) => {
+            pending.push({ name, value })
+        },
+        flush: async (bookUrl) => {
+            // 先取走再判空：这一条不管落不落，缓冲都要清干净
+            const rows = pending
+            pending = []
+            if (bookUrl === '' || rows.length === 0) return
+            const key = bookKey(source.id, bookUrl)
+            for (const row of rows) await saveBookVariable(db, key, row.name, row.value)
+        },
     }
 }
 
@@ -1621,12 +1654,18 @@ app.post('/api/search', async (c) => {
             try {
                 // 展示用字段的容错原因（封面 / 简介 / 作者……）——见 ops.ts 的 tolerantField
                 const warnings: FieldWarning[] = []
+                // 一个源一个：`push` 收、`flush` 落，见 searchItemVarSink
+                const sink = searchItemVarSink(c.env.DB, source)
                 const books = await searchBooks(
                     source,
                     keyword,
                     {
                         ...evalContext(c.env.DB, source, session),
                         key: keyword,
+                        // 搜索那一趟没有「这本书」（`java.put` 写在每一条的字段规则里），
+                        // 所以落库走「先收、这一条算完再落」那条岔路
+                        itemVarSink: sink,
+                        persistBookVariable: (name, value) => sink.push(name, value),
                     },
                     warnings,
                 )
