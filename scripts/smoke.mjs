@@ -2499,6 +2499,62 @@ console.log('\n=== 12b. 正文里的 HTML 摊平（@html 取值 / <br> 分段）
     }
 }
 
+console.log('\n=== 12c. jsoup 链式调用（data / select(...)[0] / remove） ===')
+{
+    /**
+     * 线上 86 条源（10.5%）的规则用 `org.jsoup.Jsoup.parse(...)` 链式取节点。
+     * 这一节把两条真源的形状钉死：
+     *
+     *   - 📂少年小说网：`Jsoup.parse(result).select("style").first().data()`
+     *     —— 读 `<style>` 里的隐藏规则当选择器。以前**桥里没有 `data` 这个 op**，
+     *     报的是 `TypeError: not a function（脚本第 3 行）`。
+     *   - 🎨漫画搬运：`Jsoup.parse(k).select("a")[0].attr("href")`
+     *     —— `select()` 的结果要能下标。以前报 `cannot read property 'attr' of undefined`。
+     *
+     * 靶子是 `fixtureJsoupTocPage`：列表容器**只在 `<style>` 里出现**，
+     * 所以 `data()` 一读不到就是 0 章 —— 「数得出章节」本身就是判据。
+     * 这两条都实测过：把修复临时撤掉，报错与线上那两条**逐字相同**。
+     */
+    const src = 'builtin:fixture-jsoup-chain'
+    const hint = encodeURIComponent(JSON.stringify({ name: '测试小说', author: '测试作者' }))
+    const info = await getJson(
+        `/api/book?sourceId=${encodeURIComponent(src)}&url=${encodeURIComponent(`${BASE}/fixture/book/1`)}&book=${hint}`,
+    )
+    const toc = await getJson(
+        `/api/toc?sourceId=${encodeURIComponent(src)}&url=${encodeURIComponent(info.json?.tocUrl ?? '')}&book=${hint}`,
+    )
+    const chapters = toc.json?.chapters ?? []
+
+    check(
+        chapters.length === 3,
+        '用 <style> 里的选择器数出了 3 章（`data()` 读到了内容）',
+        toc.json?.error ?? `chapters=${chapters.length}`,
+    )
+    check(
+        chapters[0]?.name === '第一章 起风了' &&
+            String(chapters[0]?.url ?? '').endsWith('/fixture/chapter/1/1'),
+        '`Jsoup.parse(...).select("a")[0].attr("href")` 取到了章名与地址',
+        JSON.stringify(chapters[0]),
+    )
+    if (chapters[0]) {
+        const chCtx = encodeURIComponent(
+            JSON.stringify({ title: chapters[0].name, index: 0, url: chapters[0].url }),
+        )
+        const got = await getJson(
+            `/api/content?sourceId=${encodeURIComponent(src)}&url=${encodeURIComponent(chapters[0].url)}&book=${hint}&chapter=${chCtx}`,
+        )
+        const css = await getJson(
+            `/api/content?sourceId=builtin:fixture-css&url=${encodeURIComponent(`${BASE}/fixture/chapter/1/1`)}`,
+        )
+        check(
+            String(got.json?.content ?? '') === String(css.json?.content ?? '') &&
+                String(got.json?.content ?? '').length > 0,
+            '这条链一路通到正文，与 CSS 源逐字一致',
+            got.json?.error ?? `len=${String(got.json?.content ?? '').length}`,
+        )
+    }
+}
+
 console.log('\n=== 13. 图片 / 音频 / 文件源 ===')
 {
     /**

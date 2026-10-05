@@ -155,6 +155,62 @@ export function fixtureBrHtmlSource(origin: string): RegisteredSource {
 }
 
 /**
+ * 同一个测试站点，目录改用 **jsoup 链式调用**（`org.jsoup.Jsoup.parse`）
+ *
+ * 线上 86 条源（10.5%）用它，这里的形状抄自两条真源：
+ *
+ *   - 📂少年小说网：`Jsoup.parse(result).select("style").first().data()` ——
+ *     把 `<style>` 里的隐藏规则读出来当选择器（站点用这招躲爬虫）。
+ *     以前**桥里根本没有 `data` 这个 op**，调用在沙箱那一侧就炸成
+ *     `TypeError: not a function`，报错行号还指向规则里那一行 ——
+ *     既不像选择器错，也不像「明确不支持」，无从下手。
+ *   - 🎨漫画搬运：`Jsoup.parse(k).select("a")[0].attr("href")` ——
+ *     `select()` 的结果要能**下标**。以前 `Jsoup.parse()` 给的是裸 `JsoupElements`
+ *     （既不能下标也没有 `length`），`[0]` 恒为 undefined，接着 `.attr(...)`
+ *     就报在 undefined 上。
+ *
+ * 两处都会 `select(...).remove()` —— 只读引擎里它是空操作，但**必须存在**：
+ * 以前它只在四份方法表里的一份上，`X.select(css).remove()` 只要 X 不是 `JsoupElements` 就炸。
+ *
+ * 打的是 `fixtureJsoupTocPage`：列表容器**只在 `<style>` 里出现**
+ * （`.tocBox{display:none}`），所以 `data()` 一读不到，选择器就是空的、目录就是 0 条 ——
+ * 「数得出章节」本身就是这条链通不通的判据。
+ */
+export function fixtureJsoupChainSource(origin: string): RegisteredSource {
+    const base = fixtureSource(origin)
+    return {
+        ...base,
+        id: 'builtin:fixture-jsoup-chain',
+        sortOrder: 14,
+        bookSourceName: '内置测试站点（jsoup 链式调用）',
+        bookSourceComment:
+            '目录规则用 org.jsoup.Jsoup.parse 链式调用：守住 data() / select(...)[0] / remove()',
+        ruleBookInfo: {
+            ...base.ruleBookInfo,
+            tocUrl: '@css:a.toc-link@href##/toc/##/jsoup-toc/##',
+        },
+        ruleToc: {
+            ...base.ruleToc,
+            chapterList: `<js>
+a = org.jsoup.Jsoup.parse(result)
+sel = String(a.select("style").first().data()).replace(/{display:none}/g, ",").slice(0, -1)
+a.select(sel).remove()
+box = a.select(sel).html()
+list = []
+items = org.jsoup.Jsoup.parse(box).select("ul.chapter-list li a")
+for (i = 0; i < items.size(); i++) {
+  href = org.jsoup.Jsoup.parse(items.get(i).outerHtml()).select("a")[0].attr("href")
+  list.push({ url: href, name: items.get(i).text() })
+}
+list
+</js>`,
+            chapterName: 'name',
+            chapterUrl: 'url',
+        },
+    }
+}
+
+/**
  * 同一个测试站点，改用 XPath 规则
  *
  * 存在的意义是**对照验证**：两套方言打同一个页面，提取结果必须完全一致。
@@ -709,6 +765,7 @@ export function builtinSources(origin: string): RegisteredSource[] {
         fixtureExploreSource(origin),
         fixturePostFormSource(origin),
         fixtureBrHtmlSource(origin),
+        fixtureJsoupChainSource(origin),
     ]
 }
 

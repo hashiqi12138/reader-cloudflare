@@ -500,6 +500,45 @@ export function fixtureBrChapterPage(bookId: string, chapterId: string): string 
 }
 
 /**
+ * **jsoup 链式调用**版的目录页
+ *
+ * 模拟的是这一族真实书源（线上 86 条源用 `org.jsoup.Jsoup.parse`，10.5%）：
+ *
+ *   - 📂少年小说网：`Jsoup.parse(result).select("style").first().data()` ——
+ *     把 `<style>` 里的隐藏规则读出来当选择器。以前**桥里根本没有 `data` 这个 op**，
+ *     调用在沙箱那一侧就炸成 `TypeError: not a function`。
+ *   - 🎨漫画搬运：`Jsoup.parse(k).select("a")[0].attr("href")` ——
+ *     `select()` 的结果要能**下标**。以前 `Jsoup.parse()` 给的是裸 `JsoupElements`，
+ *     `[0]` 恒为 undefined，接着 `.attr(...)` 就报在 undefined 上。
+ *   - 两处都会 `select(...).remove()` —— 只读引擎里它是空操作，但必须存在。
+ *
+ * 页面按真实站点的写法搭：真正的列表容器**只在 `<style>` 里出现**
+ * （`.tocBox{display:none}` —— 站点用这招躲爬虫，所以书源才要去读 `data()`）。
+ * 拿不到 `data()` 的话选择器就是错的，章节会变成 0 条 —— 这就是可断言的地方。
+ */
+export function fixtureJsoupTocPage(bookId: string): string {
+    const book = BOOKS.find((b) => b.id === bookId)
+    if (!book) return page('未找到', '<p class="empty">没有这本书</p>')
+
+    const items = book.chapters
+        .map(
+            (ch) =>
+                `<li><a href="/fixture/chapter/${book.id}/${ch.id}">${escapeHtml(ch.name)}</a></li>`,
+        )
+        .join('\n        ')
+
+    return page(
+        `${book.name} 目录（jsoup 链式）`,
+        `<style>.tocBox{display:none}</style>
+<div class="tocBox">
+    <ul class="chapter-list">
+        ${items}
+    </ul>
+</div>`,
+    )
+}
+
+/**
  * **分页正文**，专供验证 `nextContentUrl`
  *
  * 不少站点把一章切成好几页，每页结尾挂着「本章未完，请点击下一页继续阅读」。
@@ -970,6 +1009,10 @@ export async function handleFixture(request: Request, url: URL): Promise<Respons
 
     const toc = /^\/fixture\/toc\/(\w+)$/.exec(pathname)
     if (toc) return html(fixtureTocPage(toc[1]!))
+
+    // jsoup 链式调用版的目录页（见 fixtureJsoupTocPage 的说明）
+    const jsoupToc = /^\/fixture\/jsoup-toc\/(\w+)$/.exec(pathname)
+    if (jsoupToc) return html(fixtureJsoupTocPage(jsoupToc[1]!))
 
     const pagedToc = /^\/fixture\/paged-toc\/(\w+)\/(\d+)$/.exec(pathname)
     if (pagedToc) return html(fixturePagedTocPage(pagedToc[1]!, Number(pagedToc[2])))
