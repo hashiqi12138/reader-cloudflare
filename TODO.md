@@ -3,7 +3,7 @@
 按「现在就能动手」排序。每条都写清四件事：**为什么**、**已经到哪一步**、**下一步做什么**、
 **怎么算做完**（能验的都要能验）。做完就删掉，别留在这里当装饰。
 
-最后更新：2026-10-05（v0.59.0，第七十一轮之后）
+最后更新：2026-10-05（v0.60.0，第七十二轮之后）
 
 ---
 
@@ -101,29 +101,41 @@ R2 没开通就建不了 bucket；不能在 `wrangler.jsonc` 里声明绑定（�
 
 ---
 
-## 6. 沙箱里 `Jsoup.parse(...).select(...)` 之后不能再链 jsoup 方法
+## 6. ~~沙箱里 `Jsoup.parse(...).select(...)` 之后不能再链 jsoup 方法~~ —— 第七十二轮已修
 
-**为什么**：第七十一轮抽检时 📂少年小说网 的目录规则报 `TypeError: not a function（脚本第 3 行）`。
-规则是 `org.jsoup.Jsoup.parse(result)` → `a.select("style").first().data()` →
-`a.select(b).remove()`。定位：`org.jsoup.Jsoup.parse()` 返回的 `__htmlApi`（字符串底座 + jsoup 方法）
-里，`select()` 为了让 `links[i]` 与 `links.length` 能用，返回的是**裸数组** ——
-于是 `select()` 之后再链 `.remove()` / `.first()` 就是 `not a function`
-（`remove()` 本身在桥里是有的，只是挂在 `JsoupElements` 上，挂在数组上的调用不到）。
+**修完了**（v0.60.0）。当时那条诊断有一半写歪了，修正后的真相：
 
-**影响面（已量）**：86 条源（10.5%）的规则里用了 `Jsoup.parse`，其中 8 条的规则里带
-`.remove()`、12 条带 `.first()`。**注意这只是「同一份 payload 里两个字符串都出现」，
-不等于「真的链在 select 后面」—— 下一步第一件事是逐条看，把真实受影响的那几条挑出来。**
+- **不是**「`select()` 返回裸数组所以链 `.remove()` 炸」。`Jsoup.parse()` 返回的是裸
+  `JsoupElements`，`.remove()` 在它上面**是有的**。
+- 真病因两处：**桥里根本没有 `data` 这个 op**（📂少年小说网 的
+  `Jsoup.parse(result).select("style").first().data()` 要读 `<style>` 里的隐藏规则）；
+  以及 `Jsoup.parse()` 返回的裸 `JsoupElements` **不能下标**（🎨漫画搬运 的
+  `select("a")[0].attr("href")`）。
+- 上一轮记的另一半是对的：`remove` / `addClass` 那几个只在四份手抄方法表的一份上，
+  所以 `result.select(css).remove()` 会炸 —— 四份表已经合成一份 `JS_SURFACE`。
 
-**下一步**：
+**做了什么**：桥补 `data` + `selectFirst`；`Jsoup.parse` 改成返回数组形态（与脚本里
+`result` 一致）；`test/jsoupSurface.test.ts` 做「沙箱方法面 ↔ 桥 op」的双向对账；
+靶子 `/fixture/jsoup-toc/1` + `builtin:fixture-jsoup-chain`；冒烟 12c。
+详见 README「第七十二轮」。
 
-1. 把 8 + 12 条源的规则原文拉出来，看有几条真的是 `select(...).方法(...)` 的链式写法。
-2. 修法：让 `__htmlApi` 里返回句柄的那几个方法（`select` / `not` / `filter` / `has` / `clone` …）
-   返回的对象**同时**具备数组的下标与 `length` **和** `JsoupElements` 的方法链
-   （形如「数组 + 方法挂到实例上、内部绑同一个句柄」）。别退化成裸 `JsoupElements`
-   —— 那会把 🔞紫云宫 那条 `links[i]` / `links.length` 的写法重新弄坏（有过一次）。
-3. 拿 📂少年小说网 做端到端的活靶子，另加一个内置测试源的 `<js>` 目录规则钉住链式调用。
+---
 
-**怎么算做完**：那几条源能在线上取到目录；冒烟里有「`Jsoup.parse(...).select(...)` 之后再链
-`.first()` / `.remove()`」的断言；`jsoupBridge` 的方法面也像 `java.*` 那样有一张登记表
-（现在沙箱侧的方法表在 `js.ts` 的 `JS_METHODS`，但**没有扫描**钉住「语料里用到的 jsoup 方法
-都在表里」—— 这一条值得一起补）。
+## 7. jsoup 那边还剩两处没实现
+
+**为什么**：第七十二轮把 `data` / `selectFirst` 补上了，下面两处是量过的剩余：
+
+1. **`Attributes` 迭代**：`Array.from(doc.selectFirst(ys).attributes())` —— jsoup 的
+   `Attributes` 是可迭代的（每项 `getKey()` / `getValue()`）。线上 **1 处**。
+2. **写操作仍是空操作**：`remove()` / `addClass()` / `removeClass()` / `append()` / `prepend()`
+   在桥里是空的，所以「先删掉广告条目再取目录」那类源**不会崩、但会多出条目**
+   （📂少年小说网、📂PO5、hareading、ao3mirror、📂97k.cc、m.xs8.cn 这一族用到了）。
+   真要支持得让句柄**复制节点集**再改，会牵动两千多处调用形态 —— 不是顺手能做的。
+
+**下一步**：先只做第 1 条（纯新增，不牵动别的）；第 2 条要么做成显式的
+「拷贝后修改」语义，要么就一直留着并在 README 里说清。
+
+**怎么算做完**：第 1 条有一处内置源的目录规则用 `attributes()` 跑通 + 冒烟断言；
+第 2 条要么有实现，要么 README 里那句「多出条目」的说法被替换成真实行为。
+
+---

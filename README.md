@@ -45,7 +45,7 @@
 | **书源登录界面**（`loginUi`：输入框 / 下拉 / 界面上的按钮）                                         | 已实现（35 条源写了它，六种控件、按钮动作 163 处是源自己的函数；书源页每行一个「登录」入口，见「第五十八轮」）                                                                                                                                                                                                                                  |
 | 书源自带的 `jsLib` 全局函数库                                                                       | 已实现（35 条源在用；作为沙箱前置脚本执行，失败不中断但会说明原因）                                                                                                                                                                                                                                                                             |
 | 沙箱里的 `book` / `chapter` 上下文与**书的变量**（`book.getVariable` / `putVariable`）              | 已实现（`book.name` 54 处 / 39 源、`chapter.title` 32 处 / 30 源；变量落 `book_variables`，见「第三十五轮」）                                                                                                                                                                                                                                   |
-| `org.jsoup.Jsoup` + Element/Elements API                                                            | 已实现（宿主桥 + cheerio 句柄；写操作是空操作，未实现的方法报出方法名；`<script>` / `<style>` 也是元素 —— 见「第四十九轮」）                                                                                                                                                                                                                    |
+| `org.jsoup.Jsoup` + Element/Elements API                                                            | 已实现（宿主桥 + cheerio 句柄；写操作是空操作，未实现的方法报出方法名；`<script>` / `<style>` 也是元素 —— 见「第四十九轮」；`data()` / `selectFirst()` 也有，`Jsoup.parse(...).select(...)` 的结果能下标与 `length` —— 见「第七十二轮」）                                                                                                       |
 | `Packages.java.*`（Java 反射）                                                                      | 部分实现（`String.getBytes` / `MessageDigest` 仅 MD5 / `Base64` / `System`；其余报出类名）                                                                                                                                                                                                                                                      |
 | JS 写在 URL 字段里（`searchUrl` 的 `@js:` / `<js>`）                                                | 已实现（见「URL 字段里的 JS」；线上 `searchUrl` 带 JS 的有 85 条）                                                                                                                                                                                                                                                                              |
 | URL 里的 `<,...>` 可选段（「第一页不要页码」）                                                      | 已实现（`/latest/<,index_{{page}}.html>`；见「第九轮」）                                                                                                                                                                                                                                                                                        |
@@ -6202,24 +6202,86 @@ script 与 style 不进正文 / 实体 / 空壳标签 / **纯文本逐字返回*
 
 1. **📂66书吧**：搜索有 20 条结果，但首条**没有 `bookUrl`** —— 详情页因此打不开
    （接口回「缺少 url 参数」）。是那个源的 `ruleSearch.bookUrl` 取不到值，不是链路坏了。
-2. **📂少年小说网**：目录规则报 `TypeError: not a function（脚本第 3 行）`。规则是
-   `a = org.jsoup.Jsoup.parse(result)` → `a.select("style").first().data()` →
-   `a.select(b).remove()`。定位到沙箱这一侧：`org.jsoup.Jsoup.parse()` 返回的是
-   `__htmlApi` 包装（字符串底座 + jsoup 方法），它的 `select()` 为了让 `links[i]` 与
-   `links.length` 能用，返回的是**裸数组** —— 于是 `select()` 之后再链 `.remove()` /
-   `.first()` 就是 `not a function`。量了一下影响面：**86 条源用了 `Jsoup.parse`**
-   （10.5%），其中 8 条的规则里带 `.remove()`、12 条带 `.first()`。
-   **暂不修**：把「数组」与「jsoup 方法链」合到同一个对象上要动沙箱的 jsoup 表面，
-   而且这 8~12 条里有多少真在链式调用还要逐条看 —— 作为下一轮的候选项记在这儿。
+2. **📂少年小说网**：目录规则报 `TypeError: not a function（脚本第 3 行）`。
+   **这一条的定位当时写歪了，第七十二轮已更正**：当时以为是「`select()` 返回裸数组、
+   所以链 `.remove()` 炸」，实际是**桥里根本没有 `data` 这个 op**（规则里
+   `Jsoup.parse(result).select("style").first().data()` 要读 `<style>` 里的隐藏规则），
+   而 `Jsoup.parse()` 返回的也不是 `__htmlApi` 而是裸 `JsoupElements`。
+   地点与修法见「第七十二轮」。
+
+### 第七十二轮：修好 jsoup 链式调用 —— 以及我自己上一轮写歪的那半条诊断
+
+**上一轮抽检挖出 📂少年小说网 的目录规则报 `TypeError: not a function（脚本第 3 行）`，
+当时给的定位是「`select()` 返回裸数组，所以链 `.remove()` 炸」。那句话是错的**，
+这一轮先把 86 条用 `org.jsoup.Jsoup.parse` 的源逐条看过，才把病因定下来。
+
+**一、先把影响面量清楚**（都是对线上 816 条启用源的普查）：
+
+| 探针                      | 条数 | 说明                                                 |
+| ------------------------- | ---- | ---------------------------------------------------- |
+| 用过 `Jsoup.parse`        | 86   | 10.5%，是 `source` / `java` 之后第三常用的未实现能力 |
+| 其中调过 `.data()`        | 2    | 直接崩                                               |
+| 其中调过 `select(...)[i]` | 80   | 与上一条同时出现；真正紧跟 `select` 的下标共 5 处    |
+| 其中调过 `.remove()`      | 8    | 这一路本来就有 `remove`，不崩                        |
+| 调过 `.selectFirst(...)`  | 5 处 | 桥里没有这个 op                                      |
+
+**二、真正的病因是两处，都不是「数组形态」那回事：**
+
+- **桥里根本没有 `data` 这个 op**（四份方法表也都没写它）。📂少年小说网 要的是
+  `Jsoup.parse(result).select("style").first().data()` —— 把 `<style>` 里的隐藏规则
+  读出来当选择器（站点用这招躲爬虫），拿不到就没有目录。报错发生在**沙箱那一侧**
+  （`not a function`），连桥的 `default:` 那句「还不支持的方法：xxx()」都说不上。
+- **`org.jsoup.Jsoup.parse(整页)` 给的是裸 `JsoupElements`** —— 既不能下标也没有 `length`。
+  🎨漫画搬运 的 `Jsoup.parse(k).select("a")[0].attr("href")` 于是拿到 `undefined`，
+  报 `cannot read property 'attr' of undefined`。jsoup 那边 `Elements` **本身就是一个 List**，
+  所以这种写法在书源里是成立的。
+- （上一轮记的**另一半是对的**：`remove` / `addClass` 那几个只在四份方法表里的**一份**上有，
+  所以 `result.select(css).remove()` 只要 `result` 不是 `JsoupElements` 就会炸 —— 线上 8 处这么写。
+  病的根子是**四份手抄的方法表会漂**，这一轮连这个一起治。）
+
+**三、修法：**
+
+1. **桥补两个 op**：`data`（按 jsoup 语义 —— 自己就是数据元素时给它的内容，否则只往下看**一层**
+   的直接子节点；注释不带进来，那只会把选择器弄坏）与 `selectFirst`（线上 5 处）。
+2. **沙箱那侧四份手抄表合成一份** `JS_SURFACE`，数组专用的那份由它派生
+   （去掉与 `Array.prototype` 撞名的 `filter` / `clone`）。加方法只改一处。
+3. **`Jsoup.parse` / `parseBodyFragment` 改成返回数组形态**（`__listOf`）——
+   与脚本里 `result` 的形态从此一致，于是 `.select(...)[i]`、`.first()`、`.remove()`
+   全都成立。代价只是文档句柄那两个子节点（`head` / `body`）。
+4. **防漂移**：`test/jsoupSurface.test.ts` 拿源码做**双向对账** ——
+   方法面上的每个名字桥都得认，桥认得的每个 op 要么在方法面上、要么写明了为什么不挂上去。
+   两个方向都实测过会红（临时把 `selectFirst` 改个名，两条断言各红一条）。
+
+**四、靶子与验证。** 新增 `/fixture/jsoup-toc/:bookId` 页面与内置源
+`builtin:fixture-jsoup-chain`：页面把**列表容器只写在 `<style>` 里**（`.tocBox{display:none}`，
+照真实站点的写法），所以 `data()` 一读不到就是 0 章 —— 「数得出章节」本身就是判据。
+目录规则是一段 `<js>`，把两条真源的形状都串进去（`parse` → `select` → `first().data()` →
+`select(...).remove()` → `get(i)` / `outerHtml()` → `select("a")[0].attr("href")`）。
+
+**修复临时撤掉实测过，报错与线上逐字相同**：
+
+- 撤掉 `data` → `规则脚本执行出错：TypeError: not a function（脚本第 3 行）`
+- 把 `parse` 撤成裸 `JsoupElements` → `规则脚本执行出错：TypeError: cannot read property 'attr' of undefined（脚本第 9 行）`
+
+冒烟新增一节 12c（三格：数出 3 章 / 章名与地址对 / 一路通到正文且与 CSS 源逐字一致）；
+「多方言对照」那一组会自动把这个源纳进来（现在 11 个源）。单测 979 → **982**。
+
+**五、没做与留下的（写清楚，不装作没有）：**
+
+- `remove()` / `addClass()` 那几个在只读引擎里**仍是空操作**：所以「先删掉广告条目再取目录」
+  那类源现在**不会崩、但会多出条目**。这是引擎「返回节点集合、不真改文档」的既定取舍
+  （动它的代价是牵动两千多处调用形态），不是这一轮该顺带改的事。
+- `Array.from(a.selectFirst(ys).attributes())` 那种用法还没实现（jsoup 的 `Attributes` 迭代器），
+  线上 1 处 —— 记进 `TODO.md`。
 
 ## 验证
 
 ```bash
 npm install
 npm run db:migrate   # 建本地 D1 表（首次、以及每次新增迁移后）
-npm test             # 单元测试（979 项，Node 里毫秒级跑完；另有十八个默认跳过的全量扫描，见下）
+npm test             # 单元测试（982 项，Node 里毫秒级跑完；另有十八个默认跳过的全量扫描，见下）
 npm run dev          # 起本地服务，浏览器打开首页即可用；另开一个终端跑下面这条
-npm run smoke        # 端到端：链路 + 书源管理（导入 / 启停 / 批量启停 / 内置源剔掉 / 空 ids 给 400）+ 正文里的 HTML 摊平（@html 取值与 @textNodes 逐字一致）+ 静态资源 + 账号/书架/进度/书签 + 改显示名/改密码 + 导出导入备份 + 书签清单 + 替换净化同步 + 笔记 + 媒体 + 字段模板 + 选择器@js: + 空选择器取值 + 列表标记（+ / 顶格 <js>）+ 沙箱助手 + setContent/digestHex/UI 动作 + 节点级助手/加解密 + 连接式取网与 result.toArray() + 书源变量落库 + 书的上下文与书的变量 + JS 尾段列表规则保留节点 + 连接符切分 + 列表规则（末尾那个词 / CSS 首段的位置后缀 / `!` 排除下标）+ 字段规则（CSS 式多段 `@`）+ 变量指令（`@put:` / `@get:` 含**跨请求**那一半）+ `init`（铺变量与**换根**两种）+ `<js>` 段 + JSONPath 尾段（`$[*]` / `$[:n]`）+ 地址尾部的请求选项（`地址,{选项}` / 排成多行的那份选项块）+ URL 选项里 `body` 写对象（`application/json`）+ 展示用字段的容错与 `warnings` + 单斜杠 XPath（`/a/p[1]/text()` 相对当前条目）+ 防盗链封面走 `/api/media` 代取 + http 封面（混合内容）也代取 + `<script>` / `<style>` 也是元素（`java.getElement("script")` 那条路） + JSOUP 简写 `class.A B`（两个类都要有） + `source.getLoginInfoMap()` 的 Map 语义 + URL 字段 JS + 发现/首页 + cookie 罐（收 / 发 / 按源落库）+ 重定向自己跟（302 上的 `Set-Cookie` 与 `Location`）+ 目录里的 `isVip` / `isPay` / `isVolume` / `updateTime` + 登录态（跑一次 `loginUrl` → 落库 → 之后每趟请求都带上）+ 登录界面（读 `loginUi` → 渲染表单 → 界面上的按钮单独调得到）+ 沙箱里的取网跟着这次求值的预算走（列表规则里 / 搜索地址模板里，含「响应头回了、正文拖很久」那层兜底）+ 搜索 / 发现里的逐条字段走批量求值（批按 jsLib 分开，两源互不串味）+ PWA（`manifest.json` / 四张图标是真 PNG / `/sw.js` 的 JS 类型 / `/js/swPolicy.js` 可取 / head 里的 link）+ 书源列表的协商缓存（首次带 `ETag` / 同一个 `ETag` 回 304 且无正文 / 对不上的照旧回完整列表）+ 版本与更新记录（`/api/version` 带版本号 / 记录非空且最新一条与版本号一致）+ 媒体缓存（换过地址后仍命中 / 命中字节与上游一致 / 带 `Range` 不进缓存）
+npm run smoke        # 端到端：链路 + 书源管理（导入 / 启停 / 批量启停 / 内置源剔掉 / 空 ids 给 400）+ 正文里的 HTML 摊平（@html 取值与 @textNodes 逐字一致）+ jsoup 链式调用（`data()` / `select(...)[0]` / `remove()`）+ 静态资源 + 账号/书架/进度/书签 + 改显示名/改密码 + 导出导入备份 + 书签清单 + 替换净化同步 + 笔记 + 媒体 + 字段模板 + 选择器@js: + 空选择器取值 + 列表标记（+ / 顶格 <js>）+ 沙箱助手 + setContent/digestHex/UI 动作 + 节点级助手/加解密 + 连接式取网与 result.toArray() + 书源变量落库 + 书的上下文与书的变量 + JS 尾段列表规则保留节点 + 连接符切分 + 列表规则（末尾那个词 / CSS 首段的位置后缀 / `!` 排除下标）+ 字段规则（CSS 式多段 `@`）+ 变量指令（`@put:` / `@get:` 含**跨请求**那一半）+ `init`（铺变量与**换根**两种）+ `<js>` 段 + JSONPath 尾段（`$[*]` / `$[:n]`）+ 地址尾部的请求选项（`地址,{选项}` / 排成多行的那份选项块）+ URL 选项里 `body` 写对象（`application/json`）+ 展示用字段的容错与 `warnings` + 单斜杠 XPath（`/a/p[1]/text()` 相对当前条目）+ 防盗链封面走 `/api/media` 代取 + http 封面（混合内容）也代取 + `<script>` / `<style>` 也是元素（`java.getElement("script")` 那条路） + JSOUP 简写 `class.A B`（两个类都要有） + `source.getLoginInfoMap()` 的 Map 语义 + URL 字段 JS + 发现/首页 + cookie 罐（收 / 发 / 按源落库）+ 重定向自己跟（302 上的 `Set-Cookie` 与 `Location`）+ 目录里的 `isVip` / `isPay` / `isVolume` / `updateTime` + 登录态（跑一次 `loginUrl` → 落库 → 之后每趟请求都带上）+ 登录界面（读 `loginUi` → 渲染表单 → 界面上的按钮单独调得到）+ 沙箱里的取网跟着这次求值的预算走（列表规则里 / 搜索地址模板里，含「响应头回了、正文拖很久」那层兜底）+ 搜索 / 发现里的逐条字段走批量求值（批按 jsLib 分开，两源互不串味）+ PWA（`manifest.json` / 四张图标是真 PNG / `/sw.js` 的 JS 类型 / `/js/swPolicy.js` 可取 / head 里的 link）+ 书源列表的协商缓存（首次带 `ETag` / 同一个 `ETag` 回 304 且无正文 / 对不上的照旧回完整列表）+ 版本与更新记录（`/api/version` 带版本号 / 记录非空且最新一条与版本号一致）+ 媒体缓存（换过地址后仍命中 / 命中字节与上游一致 / 带 `Range` 不进缓存）
 ```
 
 另外还有一条**不进 CI 的**体检命令（它要打真实站点，默认打线上那台）：
@@ -6244,6 +6306,7 @@ XPath 适配层与规则文本、**单斜杠 XPath 的相对语义**、`选择�
 **替换规则的校验与同步版本判定**、
 **书源清单的分组与筛选（`bookSourceGroup` 是多值标签串：归组只认第一个标签、筛选看全部标签）**、
 **正文里的 HTML 摊平（`<br>` 与块级标签 → 换行；内联元素不切段；`<script>` / `<style>` 不进正文；纯文本逐字返回）**、
+**沙箱的 jsoup 方法面 ↔ 宿主桥的 op 双向对账（源码级扫描，少一个 op 或写了一个没人认的都会红）**、
 **搜索分片与劈半重试**），
 因此能在 Node 里跑；
 涉及 cheerio、QuickJS-WASM、D1 与前端静态资源的部分交给 `npm run smoke`
