@@ -25,6 +25,11 @@ export interface ReleaseNote {
 
 export const CHANGELOG: ReleaseNote[] = [
     {
+        version: '0.61.0',
+        date: '2026-10-05',
+        note: '目录修全：`java.put` / `java.get` 的跨请求变量真正接通了（详情页存下的内容现在目录那次取得到），`remove()` 也从空操作改成真删 —— 📂少年小说网 的目录从 871 章乱序变成 950 章升序、开头 100 章不再丢；这一族写法在 816 条源里有 35 处断在 24 个源上',
+    },
+    {
         version: '0.60.0',
         date: '2026-10-05',
         note: '修好 jsoup 链式调用：补上 `data()` 与 `selectFirst()`，`Jsoup.parse(...).select(...)` 的结果现在能下标（线上 86 条源用这个写法，其中两条一直报 not a function / cannot read property of undefined）；顺带把沙箱里四份手抄的方法表合成一份并加了防漂移的扫描测试',
