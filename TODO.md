@@ -161,3 +161,31 @@ R2 没开通就建不了 bucket；不能在 `wrangler.jsonc` 里声明绑定（�
 「搜索页里 put、详情页里 get」的 fixture 源）+ 冒烟断言。
 
 ---
+
+## 9. 列表规则的 `<js>` **返回对象数组**（`push({href, text, volume})`）还不被支持
+
+**为什么**：Legado 的列表规则（`chapterList` / `bookList`）允许脚本 `return` 一个
+**对象数组**，每个对象带 `text` / `href` / `volume` 这些键，字段规则再写 `text` / `href` /
+`volume` 去读。引擎现在只把脚本结果逐项 `String()`（`sandboxResultToStrings`，
+`analyze.ts` 那句注释里就写着「对象数组还会退化成 `[object Object]`」），
+于是这一族的章节名 / 地址全取不到。
+
+**量过的账**（816 条启用源）：`push({…href/text…})` 共 **33 处 / 29 个源**，
+其中键就是 `href` + `text` 的 **12 个源**（⚡📂超凡小说、🎬非凡资源网、🎬量子资源网、
+📂趣书小说、🎨🔞老司机、🔞西瓜书屋、🔞紫云宫、🎨漫画搬运、📂基友书屋、⚡📂阅读书库…）。
+`🎨漫画搬运` 是最典型的一条：修完 jsoup 链式调用之后它**不再报错**，但目录是 **0 章**
+（不再有 `cannot read property 'attr' of undefined`，也不再有任何提示）。
+
+**已经有的类似实现**：发现页那条路已经支持对象数组 —— `legado/exploreParse.ts` 的
+`parseExploreCategories` 会读 `{title|name, url}`（见 `test/exploreParse.test.ts`）。
+列表规则这条路上没有对应的东西。
+
+**下一步**：在「逐条求值」那一层认一下「条目本身是对象」—— 那时 `chapterName` /
+`chapterUrl` / `isVolume` 这几个字段规则应当**当键名去条目上取**，而不是当规则求值。
+要小心两个边界：① 条目对象里同时有文本与地址时，`text` 该给 `text` 键；
+② 卷标题（`volume: true`）允许 `href` 为空。
+
+**怎么算做完**：造一个内置源，`chapterList` 是一段 `push({text, href, volume})` 的
+`<js>`，冒烟断言章节名 / 地址 / 卷标题都对；再拿 `🎨漫画搬运` 线上复测一次。
+
+---

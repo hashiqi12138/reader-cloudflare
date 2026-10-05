@@ -6374,6 +6374,13 @@ script 与 style 不进正文 / 实体 / 空壳标签 / **纯文本逐字返回*
   拿到的章节取决于客户端有没有把同一个 `bookUrl` 带下来，而那条通用链路是按 `url` 参数当书地址的。
   真实客户端会带（`public/js/reader.js` 两次请求都带），所以它有自己那一段（12d）按真实形状验。
 - `addClass` / `removeClass` / `append` / `prepend` / `attr(k,v)` 仍是空操作（语料里只当顺手清理）。
+- **复测时顺手挖到的另一件事**：🎨漫画搬运 修完 jsoup 链式调用之后**不再报错**，
+  但目录是 **0 章**。抓下它的目录页核对过：那半条选择器（`.uk-alert-warning:not(div) ~ .uk-subnav ~ .uk-switcher`）
+  实打实命中 3 个块，问题是**它的 `<js>` 返回的是对象数组**（`push({href, text, volume})`），
+  而引擎现在只把脚本结果逐项 `String()` —— 对象退化成 `[object Object]`，章节名与地址全取不到。
+  这是**另一件事**（Legado 列表规则的对象契约），量过的账：816 条源里 `push({…href/text…})`
+  共 33 处 / 29 个源，其中键就是 `href` + `text` 的 12 个 —— 记进 `TODO.md` 第 9 条，
+  不塞进这一轮。
 
 ## 验证
 
