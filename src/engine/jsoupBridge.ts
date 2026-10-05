@@ -53,13 +53,33 @@ export type JsoupReply =
     | { ok: true; kind: 'handle'; handle: number | null }
     | { ok: true; kind: 'value'; value: unknown }
     /**
-     * 一次把整串节点**连同各自的 `outerHTML`** 交出去（见 `case 'list'`）
+     * 一次把整串节点**连同各自的 `outerHTML`（以及顺手能拿到的字段）**交出去
      *
      * 这是唯一一种「复合」回复：`__listOf` 过去要靠 `size` + 每个元素 `get` + `outerHtml`
-     * 三次往返才能拼出一个元素数组，而元素一多（🎨漫画搬运 的目录有 459 条）
-     * 那九千多次往返就是实打实的耗时。`handle` 与 `html` 一起回传，往返降到一次。
+     * 三次往返才能拼出一个元素数组，而元素一多（一次 `select` 出几百个节点）那几百上千次
+     * 往返就是实打实的耗时。`handle` 与 `html` 一起回传，往返降到一次。
+     *
+     * 第七十七轮又顺手多带了两样，都是**零成本**的（不需要额外走一遍树）：
+     *
+     *   - `attrs`：cheerio 解析时就已经在 `node.attribs` 里。带上它之后沙箱侧
+     *     `e.attr('href')` / `hasAttr` / `className` / `id` / `val` 都不用再过桥 ——
+     *     而这几个是「逐节点取字段」里最集中的一批。
+     *   - `text`：**只在节点没有元素子节点时**给（那时文本就是几个直接文本子节点拼起来，
+     *     也是零成本）。有元素子节点的（整块容器）留 `null`、按需过桥 —— 免得为一个
+     *     从不读 `text` 的脚本白走一遍子树。
      */
-    | { ok: true; kind: 'list'; items: { handle: number; html: string }[] }
+    | {
+          ok: true
+          kind: 'list'
+          items: {
+              handle: number
+              html: string
+              /** 属性表（原样来自 `node.attribs`，顺序即书写顺序） */
+              attrs: Record<string, string>
+              /** 归一化后的文本；`null` = 没预取（有元素子节点），要的话得过桥 */
+              text: string | null
+          }[]
+      }
     | { ok: false; error: string }
 
 /** jsoup 的 `text()` 会把空白折叠成单个空格并去掉首尾，照它做 */
@@ -174,7 +194,7 @@ export class JsoupBridge {
 
         switch (op) {
             /**
-             * `list`：把整串节点**连同各自的 `outerHTML`** 一次交出去
+             * `list`：把整串节点**连同各自的 `outerHTML`、属性表、叶节点的文本**一次交出去
              *
              * 沙箱侧的 `__listOf` 要把一个集合变成「数组形态的 Elements」（每项是
              * 「自己的 HTML + 作用在自己身上的 jsoup 方法」）。按老写法它得先问 `size`，
@@ -185,16 +205,30 @@ export class JsoupBridge {
              * 这里把三件事在**宿主侧一次做完**：开句柄是纯内存操作、取 HTML 是纯 cheerio 调用，
              * 都不需要过桥 —— 于是 n 个元素从 `1 + 2n` 次往返降到 **1 次**。
              *
+             * 第七十七轮再多带两样**顺手**的（见 `JsoupReply` 里那段说明）：
+             * `attrs`（cheerio 早就解析好了）与「叶节点的文本」。带上它们之后，
+             * 脚本里最常见的「逐节点取 `attr('href')` / `text()`」也一并免了过桥 ——
+             * 这一批在实测里占剩余的多数（见 README 第七十七轮）。
+             *
              * 注意这不是「懒序列化」：调用它的地方（`__listOf`）本来就要把每个元素都串化
              * （书源会直接 `String(x)` / `x.includes('<h3')`），懒不到什么。
              * 这个 op 只有沙箱内部用，不是方法面上的成员（见 test/jsoupSurface.test.ts）。
              */
             case 'list': {
-                const items = handle.nodes.map((node) => ({
-                    handle: this.alloc({ $: handle.$, nodes: [node] }),
-                    // 与 `outerHtml` 那个 op 对**单节点**句柄的取值完全一致
-                    html: handle.$(node).prop('outerHTML') ?? '',
-                }))
+                const items = handle.nodes.map((node) => {
+                    const $node = handle.$(node)
+                    const kids = (node?.children ?? []) as Node[]
+                    return {
+                        handle: this.alloc({ $: handle.$, nodes: [node] }),
+                        // 与 `outerHtml` 那个 op 对**单节点**句柄的取值完全一致
+                        html: $node.prop('outerHTML') ?? '',
+                        // 属性表：就是解析时留下的那一份，交出去零成本
+                        attrs: (node?.attribs ?? {}) as Record<string, string>,
+                        // 文本只在**没有元素子节点**时预取：那时它就是几个直接文本子节点
+                        // 拼起来（零成本）；整块容器留 null，让按需那条路过桥
+                        text: kids.some(isElement) ? null : normalizeSpace($node.text()),
+                    }
+                })
                 return { ok: true, kind: 'list', items }
             }
             case 'select': {
@@ -340,9 +374,7 @@ export class JsoupBridge {
                 const node = this.one(handle)
                 if (!node) return this.value([])
                 const attribs = (node.attribs ?? {}) as Record<string, string>
-                return this.value(
-                    Object.entries(attribs).map(([key, value]) => ({ key, value })),
-                )
+                return this.value(Object.entries(attribs).map(([key, value]) => ({ key, value })))
             }
             case 'val':
                 return this.value(this.attrOf(handle, 'value'))

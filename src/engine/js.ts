@@ -143,6 +143,18 @@ export interface SandboxSession {
      */
     bookVars: Record<string, string>
     /**
+     * 这个请求里脚本**过了多少次 jsoup 桥**（`__host.jsoup` 被调用的次数）
+     *
+     * 纯记账，谁也不读它去改行为 —— 它的用处是让「一次求值要过多少次桥」变成
+     * 可断言的东西：桥的每一次调用都要过一次 JSON + 一次 QuickJS 宿主回调，
+     * 这个数字就是那笔开销的**直接度量**（`busy.ms` 量的是时间，这个量的是次数，
+     * 而次数是**可复现**的 —— 时间在测试里会抖，次数不会）。
+     *
+     * 见 `test/sandboxRun.test.ts`：那边用它钉住「一次取整串只过一次桥」
+     * （TODO 第 11 / 13 条），以及「预取过的字段不再过桥」。
+     */
+    jsoupCalls: number
+    /**
      * 本次请求里**已经为跨请求的 `java.put` 落过库**的键（见 `collectSourceVars`）
      *
      * 挂在会话上而不是 `ctx` 上：`ctx` 在目录循环里每翻一页都会拷一份
@@ -263,6 +275,7 @@ export function createSandboxSession(): SandboxSession {
         queue: Promise.resolve(),
         vars: {},
         bookVars: {},
+        jsoupCalls: 0,
         batches: new Map(),
     }
 }
@@ -1695,14 +1708,19 @@ function __attachList(handle, out) {
  * 复用 __htmlApi 那套方法名，但把它们指到**这个元素**的句柄上：
  * 指向文档的话 e.attr('href') 会问到文档根节点，永远返回空串。
  *
- * html 已经知道时就别再过一次桥（__listOf 是从宿主一口气拿到整串 HTML 的，
- * 见桥里的 list op）。
+ * html / attrs / text 已经知道时就别再过桥（__listOf 是从宿主一口气拿到整串的，
+ * 见桥里的 list op）。**这是一层纯缓存，不改语义** —— 同一个节点同一个取值，
+ * 过桥与不过桥必须给出同一个答案（test/sandboxRun.test.ts 里那条对拍就是这么钉的）。
+ *
+ * 为什么这三个能预取：它们的成本本来就在**过桥**上，而值在宿主侧是现成的
+ * （HTML 要串化一次、属性表解析时就有了、叶节点的文本就是几个文本子节点拼起来）。
+ * 逐节点 attr('href') / text() 是书源码里最集中的一批写法。
  */
-function __wrapElement(handle, html) {
-  var text = html === undefined || html === null
+function __wrapElement(handle, html, attrs, text) {
+  var text0 = html === undefined || html === null
     ? String(__jsoupCall('outerHtml', handle, []).value)
     : String(html)
-  var boxed = new String(text)
+  var boxed = new String(text0)
   var methods = JS_LIST_SURFACE
   for (var i = 0; i < methods.length; i++) {
     (function (name) {
@@ -1714,16 +1732,37 @@ function __wrapElement(handle, html) {
       }
     })(methods[i])
   }
+
+  /**
+   * 预取过的属性：attr / hasAttr / className / id / val 不再过桥
+   *
+   * 与桥那份实现**逐字对齐**（宿主那边读的是 $(node).attr(名字) ?? 空串 那一句，
+   * 取不到就是空串、不是 null 也不是 undefined），所以这里也不需要在键不存在时回退过桥。
+   */
+  if (attrs) {
+    var pick = function (name) {
+      var v = attrs[name]
+      return v === undefined || v === null ? '' : String(v)
+    }
+    boxed.attr = function (name) { return pick(String(name)) }
+    boxed.hasAttr = function (name) { return attrs[String(name)] !== undefined }
+    boxed.className = function () { return pick('class') }
+    boxed.id = function () { return pick('id') }
+    boxed.val = function () { return pick('value') }
+  }
+  // 叶节点的文本：宿主要么给一个字符串、要么给 null（= 没预取，有元素子节点）
+  if (text !== undefined && text !== null) {
+    boxed.text = function () { return String(text) }
+  }
   return boxed
 }
 
 /**
  * 把一个集合句柄变成「数组 + 集合级 jsoup 方法」
  *
- * 走桥的 list op **一次**拿回「每个元素的句柄 + 它自己的 outerHTML」。
- * 老写法是 size 一次、然后每个元素 get(i) 与 outerHtml 各一次 ——
- * 🎨漫画搬运 的目录 459 个条目就是 919 次额外往返（第七十四轮实测每条约 2.35ms）。
- * 现在整串一次往返，宿主侧顺手把句柄开好、HTML 取好。
+ * 走桥的 list op **一次**拿回「每个元素的句柄 + 它自己的 outerHTML（+ 属性表、
+ * 叶节点的文本）」—— 老写法是 size 一次、然后每个元素 get(i) 与 outerHtml 各一次。
+ * 604 个节点的实测（scripts/probe-jsoup-trips.mjs）：老 282ms / 新 223ms。
  */
 function __listOf(handle) {
   var reply = __jsoupCall('list', handle, [])
@@ -1731,7 +1770,7 @@ function __listOf(handle) {
   var out = []
   for (var i = 0; i < items.length; i++) {
     // 句柄号直接来自宿主（不是 JsoupElements 包装对象），正是下面那层要的东西
-    out.push(__wrapElement(items[i].handle, items[i].html))
+    out.push(__wrapElement(items[i].handle, items[i].html, items[i].attrs, items[i].text))
   }
   return __attachList(handle, out)
 }
@@ -2382,6 +2421,9 @@ async function executeInSandbox(
          */
         const jsoup = new JsoupBridge()
         defineHostFn('jsoup', (arg) => {
+            // 记账：每一次桥调用都过一次 JSON + 一次宿主回调，次数就是那笔开销的度量
+            // （见 SandboxSession.jsoupCalls —— 测试靠它断言「一次取整串只过一次桥」）
+            session.jsoupCalls += 1
             let reply: unknown
             try {
                 const payload = JSON.parse(String(vm.dump(arg))) as {
