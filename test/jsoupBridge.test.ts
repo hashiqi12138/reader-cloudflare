@@ -290,6 +290,110 @@ describe('org.jsoup 桥：script / style 不算「非元素」', () => {
     })
 })
 
+/**
+ * `list`：一次把整串节点的「句柄 + 自己的 outerHTML」都交出去
+ *
+ * 这个 op 是为**往返次数**加的（第七十六轮）：`__listOf` 老写法是
+ * `size` 一次、再对每个元素 `get(i)` + `outerHtml` 各一次 —— 459 个条目 919 次。
+ * 它的正确性判据只有一条：**结果必须与逐个取完全一致**（书源那边看不出区别）。
+ */
+describe('org.jsoup 桥：list 一次取回整串（第 7 / 11 条）', () => {
+    it('条数、每条的 HTML、每条的句柄都可用，且与逐个取的结果一致', () => {
+        const bridge = new JsoupBridge()
+        const doc = handleOf(bridge)
+        const chapters = handle(bridge, 'select', doc, ['ul.volume-chapters a'])
+
+        const reply = bridge.run('list', chapters, [])
+        expect(reply.ok).toBe(true)
+        if (!reply.ok || reply.kind !== 'list') throw new Error('list 应返回 {kind:list}')
+
+        // 与 `size` 对得上
+        expect(reply.items.length).toBe(Number(value(bridge, 'size', chapters)))
+
+        // 逐条与 `get(i)` + `outerHtml` 那条老路完全一致
+        for (let i = 0; i < reply.items.length; i += 1) {
+            const item = reply.items[i]!
+            const single = handle(bridge, 'get', chapters, [i])
+            expect(item.html, `第 ${i} 条的 HTML`).toBe(
+                String(value(bridge, 'outerHtml', single)),
+            )
+            // 句柄是**可用**的（不是只给了个 HTML 字符串）
+            expect(value(bridge, 'text', item.handle), `第 ${i} 条的 text`).toBe(
+                String(value(bridge, 'text', single)),
+            )
+            expect(value(bridge, 'attr', item.handle, ['href'])).toBe(
+                String(value(bridge, 'attr', single, ['href'])),
+            )
+        }
+    })
+
+    it('空集合给空数组，不是 null', () => {
+        const bridge = new JsoupBridge()
+        const doc = handleOf(bridge)
+        const none = handle(bridge, 'select', doc, ['li.nope'])
+        const reply = bridge.run('list', none, [])
+        if (!reply.ok || reply.kind !== 'list') throw new Error('list 应返回 {kind:list}')
+        expect(reply.items).toEqual([])
+    })
+
+    it('`parse` 出来的文档句柄也能走（org.jsoup.Jsoup.parse 那条路）', () => {
+        const bridge = new JsoupBridge()
+        const doc = handleOf(bridge)
+        const reply = bridge.run('list', doc, [])
+        if (!reply.ok || reply.kind !== 'list') throw new Error('list 应返回 {kind:list}')
+        // 文档句柄就是 `$.root()` 那一个节点
+        expect(reply.items.length).toBe(Number(value(bridge, 'size', doc)))
+    })
+})
+
+/**
+ * `attributes()`：📂贝壳读书 的目录规则要从属性里按**序号**取值
+ *
+ * 它写的是 `Array.from(a.selectFirst(ys).attributes())` 然后 `b[num-1].toString()`，
+ * 所以桥这一层只需要交出「键值对、**保持顺序**」，Attribute 那层方法在沙箱里补。
+ * 顺序是这里唯一容易错的地方（cheerio 的 `attribs` 是个对象）。
+ */
+describe('org.jsoup 桥：attributes（第 7 条）', () => {
+    it('按出现顺序给出键值对（书源是按序号取的，顺序错了就取错）', () => {
+        const bridge = new JsoupBridge()
+        const doc = handleOf(bridge)
+        const li = handle(bridge, 'selectFirst', doc, ['ul#filters li.sort-li'])
+        const reply = bridge.run('attributes', li, [])
+        expect(reply.ok).toBe(true)
+        if (!reply.ok || reply.kind !== 'value') throw new Error('attributes 应返回普通值')
+        expect(reply.value).toEqual([{ key: 'class', value: 'sort-li' }])
+    })
+
+    it('多属性时顺序就是源文件里的顺序', () => {
+        const bridge = new JsoupBridge()
+        const doc = handleOf(bridge)
+        const a = handle(bridge, 'selectFirst', doc, ['a.btn-tag'])
+        const reply = bridge.run('attributes', a, [])
+        if (!reply.ok || reply.kind !== 'value') throw new Error('attributes 应返回普通值')
+        expect(reply.value).toEqual([
+            { key: 'class', value: 'btn-tag jsTag' },
+            { key: 'data-filter-type', value: 'tagid' },
+            { key: 'data-filter-value', value: '1' },
+        ])
+    })
+
+    it('没有属性的元素给空数组（不是报错、也不是 null）', () => {
+        const bridge = new JsoupBridge()
+        const doc = handleOf(bridge)
+        // 简介里那个 `<b>一本</b>` 身上一个属性都没有
+        const b = handle(bridge, 'selectFirst', doc, ['div.book-desc b'])
+        expect(value(bridge, 'attributes', b)).toEqual([])
+    })
+
+    it('一个都没命中时也给空数组（空节点集的句柄走得通）', () => {
+        const bridge = new JsoupBridge()
+        const doc = handleOf(bridge)
+        // 注意 `select` 的空结果是**空节点集**（不是 null 句柄），所以这里能继续调方法
+        const none = handle(bridge, 'select', doc, ['li.nope'])
+        expect(value(bridge, 'attributes', none)).toEqual([])
+    })
+})
+
 /** 小工具：从 Elements 里再取一个元素句柄 */
 function createInner(bridge: JsoupBridge, from: number, index: number): number {
     return handle(bridge, 'get', from, [index])

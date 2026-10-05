@@ -44,7 +44,7 @@ import {
     type QuickJSHandle,
 } from 'quickjs-emscripten'
 
-import type { SandboxHttp } from './types'
+import type { ItemVarSink, SandboxHttp } from './types'
 import type { CookieJar } from '../lib/cookies'
 import { base64OfUtf8, bytesOfBase64, utf8OfBase64 } from '../lib/base64'
 import { DEFAULT_TIME_OFFSET_HOURS, formatJavaTime } from '../lib/javatime'
@@ -1494,10 +1494,30 @@ var JS_SURFACE = [
   'parent', 'parents', 'nextElementSibling', 'prevElementSibling', 'nextAll', 'prevAll',
   'siblingElements', 'not', 'filter', 'clone', 'has', 'is',
   'size', 'isEmpty', 'text', 'ownText', 'textNodes', 'eachText', 'data',
-  'html', 'outerHtml', 'attr', 'hasAttr', 'val', 'className', 'hasClass',
+  'html', 'outerHtml', 'attr', 'hasAttr', 'attributes', 'val', 'className', 'hasClass',
   'tagName', 'id', 'index', 'matches', 'matchesOwn',
   'remove', 'addClass', 'removeClass', 'append', 'prepend',
 ]
+
+/**
+ * 返回值要**再包一层**的那几个 op（见 __valueOf）
+ *
+ * 只有 attributes 一个：桥给的是最小契约（一串 {key, value} 键值对），
+ * 而脚本要的是 jsoup 的 Attribute（getKey() / getValue() / toString()）。
+ * 这层包装放在沙箱里，宿主就不必知道脚本会拿这些属性当什么用。
+ *
+ * 其余所有 value 形态的 op（text / attr / size …）给什么就是什么，不加包装 ——
+ * 这个表**故意是白名单**：谁加进来都得先想清楚为什么不能把包装放进桥里。
+ */
+var JS_VALUE_WRAPPERS = {
+  attributes: __attrList,
+}
+
+/** value 形态的回复 → 交回给脚本的东西（见 JS_VALUE_WRAPPERS） */
+function __valueOf(name, reply) {
+  var wrap = JS_VALUE_WRAPPERS[name]
+  return wrap ? wrap(reply.value) : reply.value
+}
 
 /**
  * 挂在**数组**上的那一份：与 Array.prototype 撞名的必须去掉
@@ -1520,7 +1540,7 @@ for (var __i = 0; __i < JS_METHODS.length; __i++) {
     JsoupElements.prototype[name] = function () {
       var reply = __jsoupCall(name, this.__id, Array.prototype.slice.call(arguments))
       if (reply.kind === 'handle') return reply.handle === null ? null : new JsoupElements(reply.handle)
-      return reply.value
+      return __valueOf(name, reply)
     }
   })(JS_METHODS[__i])
 }
@@ -1531,6 +1551,25 @@ JsoupElements.prototype.toArray = function () {
   var out = []
   for (var i = 0; i < this.size(); i++) out.push(this.get(i))
   return out
+}
+/**
+ * 让它**可迭代**，于是 Array.from(...) / for...of 都能用（第七十六轮）
+ *
+ * jsoup 的 Elements 本来就是个 List，所以书源里
+ *
+ *     x = Array.from(java.getElements("class.BCsectionTwo-top-chapter"))
+ *     x.map(...)
+ *
+ * 是常规写法（📂贝壳读书 的整条目录就建立在这个 x 上）。而以前这里**没有
+ * Symbol.iterator**：Array.from 对一个「既不可迭代、也没有 length」的对象
+ * **不报错**，直接给一个空数组 —— 于是目录 0 章、没有 warning、书源也不报错，
+ * 是最难查的那种静默故障。🎨51漫画 的 Array.from(java.getElement("script"))
+ * 是同一个坑的另一个形状（第四十九轮修的是它返回 null 那一半）。
+ *
+ * 交给 toArray()：条目的形态与别处一致（每个元素的 String() 就是它自己的 outerHTML）。
+ */
+JsoupElements.prototype[Symbol.iterator] = function () {
+  return this.toArray()[Symbol.iterator]()
 }
 // 书源里偶尔用 .eachText() 的返回值当数组迭代，这里保证它一定是数组
 JsoupElements.prototype.copy = function () { return this.clone() }
@@ -1565,7 +1604,7 @@ function __htmlApi(html) {
    */
   function run(name) {
     var reply = __jsoupCall(name, docHandle(), Array.prototype.slice.call(arguments, 1))
-    if (reply.kind !== 'handle') return reply.value
+    if (reply.kind !== 'handle') return __valueOf(name, reply)
     return reply.handle === null ? [] : __listOf(reply.handle)
   }
   var api = {}
@@ -1634,7 +1673,7 @@ function __attachList(handle, out) {
         var reply = __jsoupCall(name, handle, Array.prototype.slice.call(arguments))
         // 返回句柄的集合级方法（select / first / get / not …）继续给「数组形态」，
         // 否则 result.select('a')[0] 这种写法又会退回到不能下标的 JsoupElements
-        if (reply.kind !== 'handle') return reply.value
+        if (reply.kind !== 'handle') return __valueOf(name, reply)
         return reply.handle === null ? [] : __listOf(reply.handle)
       }
     })(methods[i])
@@ -1655,16 +1694,21 @@ function __attachList(handle, out) {
  *
  * 复用 __htmlApi 那套方法名，但把它们指到**这个元素**的句柄上：
  * 指向文档的话 e.attr('href') 会问到文档根节点，永远返回空串。
+ *
+ * html 已经知道时就别再过一次桥（__listOf 是从宿主一口气拿到整串 HTML 的，
+ * 见桥里的 list op）。
  */
-function __wrapElement(handle) {
-  var html = String(__jsoupCall('outerHtml', handle, []).value)
-  var boxed = new String(html)
+function __wrapElement(handle, html) {
+  var text = html === undefined || html === null
+    ? String(__jsoupCall('outerHtml', handle, []).value)
+    : String(html)
+  var boxed = new String(text)
   var methods = JS_LIST_SURFACE
   for (var i = 0; i < methods.length; i++) {
     (function (name) {
       boxed[name] = function () {
         var reply = __jsoupCall(name, handle, Array.prototype.slice.call(arguments))
-        if (reply.kind !== 'handle') return reply.value
+        if (reply.kind !== 'handle') return __valueOf(name, reply)
         if (reply.handle === null) return []
         return __listOf(reply.handle)
       }
@@ -1673,18 +1717,66 @@ function __wrapElement(handle) {
   return boxed
 }
 
-/** 把一个集合句柄变成「数组 + 集合级 jsoup 方法」 */
+/**
+ * 把一个集合句柄变成「数组 + 集合级 jsoup 方法」
+ *
+ * 走桥的 list op **一次**拿回「每个元素的句柄 + 它自己的 outerHTML」。
+ * 老写法是 size 一次、然后每个元素 get(i) 与 outerHtml 各一次 ——
+ * 🎨漫画搬运 的目录 459 个条目就是 919 次额外往返（第七十四轮实测每条约 2.35ms）。
+ * 现在整串一次往返，宿主侧顺手把句柄开好、HTML 取好。
+ */
 function __listOf(handle) {
-  // 逐个元素都直接走桥拿**裸句柄号**：JsoupElements 那层的 get(i) 返回的是包装对象，
-  // 把它当句柄号传回去会变成「jsoup 对象已失效」
-  var n = Number(__jsoupCall('size', handle, []).value)
+  var reply = __jsoupCall('list', handle, [])
+  var items = reply.items || []
   var out = []
-  for (var i = 0; i < n; i++) {
-    var reply = __jsoupCall('get', handle, [i])
-    if (reply.handle === null || reply.handle === undefined) continue
-    out.push(__wrapElement(reply.handle))
+  for (var i = 0; i < items.length; i++) {
+    // 句柄号直接来自宿主（不是 JsoupElements 包装对象），正是下面那层要的东西
+    out.push(__wrapElement(items[i].handle, items[i].html))
   }
   return __attachList(handle, out)
+}
+
+/**
+ * jsoup 的 Attributes：一个数组，每项是 Attribute
+ *
+ * 宿主给的只是 {key, value} 一串（最小契约），Attribute 那层在沙箱里补。
+ * Attributes 在 jsoup 里就是 ArrayList of Attribute，所以 Array.from(...)、
+ * [i]、length 天然就有；要补的是：
+ *
+ *   - 每项的 getKey() / getValue() / toString()
+ *     （📂贝壳读书 的目录规则正是靠 toString() 拿到 key="value" 再抠出值）
+ *   - 集合级的 size() / hasKey(k) / get(i 或 键名) —— jsoup 的 Attributes 有这三个，
+ *     而数组原生没有（length 有、size() 没有）
+ *
+ * 加了这三个名字之后 for (i in attrs) 会把它们一起枚举出来。这里按**属性表**处理，
+ * 与 __attachList 上那批集合级方法同一个取舍：语料里没人对属性表用 for...in，
+ * 而那三处写法的收益是实打实的。
+ */
+function __attrList(pairs) {
+  var out = []
+  var list = pairs || []
+  for (var i = 0; i < list.length; i++) {
+    (function (pair) {
+      out.push({
+        getKey: function () { return String(pair.key) },
+        getValue: function () { return String(pair.value === undefined || pair.value === null ? '' : pair.value) },
+        // jsoup 的 Attribute.toString() 就是 key="value"
+        toString: function () { return String(pair.key) + '="' + String(pair.value === undefined || pair.value === null ? '' : pair.value) + '"' },
+      })
+    })(list[i])
+  }
+  out.size = function () { return out.length }
+  out.hasKey = function (key) {
+    for (var i = 0; i < out.length; i++) if (out[i].getKey() === String(key)) return true
+    return false
+  }
+  // jsoup 是重载：get(int) 给 Attribute、get(String) 给值
+  out.get = function (key) {
+    if (typeof key === 'number') return out[key]
+    for (var i = 0; i < out.length; i++) if (out[i].getKey() === String(key)) return out[i].getValue()
+    return null
+  }
+  return out
 }
 
 /** N 段 HTML → 数组形态的 Elements（宿主侧按规则命中了 N 个节点） */
@@ -2007,6 +2099,13 @@ export interface SandboxLimits {
      * 不传就是不落库，行为与以前一样。见 `collectSourceVars`。
      */
     crossRequestInfoKeys?: ReadonlySet<string>
+    /**
+     * **搜索里**逐条落跨请求变量的通道（`RuleContext.itemVarSink` 转进来的）
+     *
+     * 给了它就走它、并且**不做**「一次请求只落一次」的去重：搜索里的键是按
+     * **每一条搜索结果**各落一次的（每条是另一本书）。见 `collectSourceVars`。
+     */
+    itemVarSink?: ItemVarSink
     /**
      * cookie 罐（书源开着 `enabledCookieJar` 时才有，见 `BookSource.cookieJar`）
      *
@@ -2620,6 +2719,24 @@ function collectSourceVars(
             session.vars[key] = String(parsed.all?.[key] ?? '')
         }
         const keys = limits.crossRequestInfoKeys
+        const sink = limits.itemVarSink
+        /**
+         * 搜索那一趟走这条岔路（给的是 `RuleContext.itemVarSink`）
+         *
+         * 它**不做**「一次请求只落一次」那道去重，因为搜索里的同一个键是**逐条**写的、
+         * 每条属于另一本书（📂阿巴小说 的 `bid`、🔊潇社音乐 的 `json`…）。
+         * 去重会把第 2 条之后的全部丢掉 —— 而 `__varsDirty` 是**每次求值重置**的，
+         * 所以这里天然只含「这次求值真的写过的键」，不需要那层保护。
+         */
+        if (sink) {
+            for (const key of Object.keys(parsed.dirty ?? {})) {
+                const value = String(parsed.all?.[key] ?? '')
+                if (value === '' || !(keys?.has(key) ?? false)) continue
+                sink.push(key, value)
+            }
+            return
+        }
+
         const persist = limits.persistBookVariable
         if (!keys || keys.size === 0 || !persist) return
         const target = { keys, persist, saved: (session.crossVarSaved ??= new Set<string>()) }

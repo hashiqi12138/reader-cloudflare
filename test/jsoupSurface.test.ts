@@ -22,10 +22,27 @@ import { describe, expect, it } from 'vitest'
 /**
  * 桥认得、但**不该**出现在沙箱那份方法面上的 op
  *
- * - `toString`：每种包装各自实现（数组给集合的 outerHTML、盒装字符串给自己）
- * - `attrSet`：桥里的内部别名，沙箱从不发它（`attr` 带值那一路走的是 `case 'attr'`）
+ * 两类：
+ *
+ *   1. 每种包装各自实现的：`toString`（数组给集合的 outerHTML、盒装字符串给自己）
+ *   2. **沙箱内部直接调的**，它们不是「元素上的方法」——
+ *      `parse` / `parseBodyFragment` / `parseFragments` / `clean` 是构造入口
+ *      （`org.jsoup.Jsoup.parse(…)` 与 `java.getElements(…)`），
+ *      `list` 是 `__listOf` 一次取回整串元素用的（见桥里的说明）。
+ *
+ * 第七十六轮把扫描从「只认 `case '…'`」放宽到「也认 `if (op === '…')`」：
+ * 原先那四个构造入口写的是 `if`，于是它们**完全在盲区里** —— 桥里多一个少一个，
+ * 这道护栏都不会响。现在两张表都扫，漏了就红。
  */
-const NOT_ON_SURFACE = new Set(['toString', 'attrSet'])
+const NOT_ON_SURFACE = new Set([
+    'toString',
+    'attrSet',
+    'parse',
+    'parseBodyFragment',
+    'parseFragments',
+    'clean',
+    'list',
+])
 
 /** 沙箱那侧唯一的那份清单 */
 function sandboxSurface(): string[] {
@@ -35,11 +52,12 @@ function sandboxSurface(): string[] {
     return [...block![1]!.matchAll(/'([^']+)'/g)].map((m) => m[1]!)
 }
 
-/** 宿主桥的 switch 里认得的那些 op */
+/** 宿主桥的 switch 里认得的那些 op（两种写法都算，见 NOT_ON_SURFACE 的说明） */
 function bridgeOps(): Set<string> {
     const text = readFileSync('src/engine/jsoupBridge.ts', 'utf8')
     const ops = new Set<string>()
     for (const match of text.matchAll(/case '([A-Za-z]\w*)':/g)) ops.add(match[1]!)
+    for (const match of text.matchAll(/if \(op === '([A-Za-z]\w*)'\)/g)) ops.add(match[1]!)
     return ops
 }
 
@@ -50,8 +68,13 @@ describe('沙箱的 jsoup 方法面与宿主桥的 op 必须一一对上', () =>
     it('两张表都扫得出东西（不然这条测试永远是绿的）', () => {
         expect(surface.length).toBeGreaterThan(40)
         expect(ops.size).toBeGreaterThan(40)
-        // 这一轮补上的三个，钉住它们不许再掉出去
-        for (const name of ['data', 'selectFirst', 'remove']) expect(surface).toContain(name)
+        // 这几轮补上的几个，钉住它们不许再掉出去
+        for (const name of ['data', 'selectFirst', 'remove', 'attributes']) {
+            expect(surface).toContain(name)
+        }
+        // 内部 op 不许**溜到**方法面上：`list` 多出来的话，脚本里
+        // `x.list()` 会变成一个说不清语义的方法
+        expect(surface).not.toContain('list')
     })
 
     it('方法面上的每一个名字，桥都得认（否则脚本拿到的是 `not a function`）', () => {

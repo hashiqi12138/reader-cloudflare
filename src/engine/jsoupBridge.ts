@@ -52,6 +52,14 @@ interface Handle {
 export type JsoupReply =
     | { ok: true; kind: 'handle'; handle: number | null }
     | { ok: true; kind: 'value'; value: unknown }
+    /**
+     * 一次把整串节点**连同各自的 `outerHTML`** 交出去（见 `case 'list'`）
+     *
+     * 这是唯一一种「复合」回复：`__listOf` 过去要靠 `size` + 每个元素 `get` + `outerHtml`
+     * 三次往返才能拼出一个元素数组，而元素一多（🎨漫画搬运 的目录有 459 条）
+     * 那九千多次往返就是实打实的耗时。`handle` 与 `html` 一起回传，往返降到一次。
+     */
+    | { ok: true; kind: 'list'; items: { handle: number; html: string }[] }
     | { ok: false; error: string }
 
 /** jsoup 的 `text()` 会把空白折叠成单个空格并去掉首尾，照它做 */
@@ -94,11 +102,16 @@ export class JsoupBridge {
         }
     }
 
-    private put(handle: Handle | null): JsoupReply {
-        if (handle === null) return { ok: true, kind: 'handle', handle: null }
+    /** 开一个新句柄（不经过 `put` 那层回复包装，`list` 要一次开一串） */
+    private alloc(handle: Handle): number {
         const id = (this.seq += 1)
         this.store.set(id, handle)
-        return { ok: true, kind: 'handle', handle: id }
+        return id
+    }
+
+    private put(handle: Handle | null): JsoupReply {
+        if (handle === null) return { ok: true, kind: 'handle', handle: null }
+        return { ok: true, kind: 'handle', handle: this.alloc(handle) }
     }
 
     private at(handleId: number | null): Handle {
@@ -160,6 +173,30 @@ export class JsoupBridge {
         const handle = this.at(handleId)
 
         switch (op) {
+            /**
+             * `list`：把整串节点**连同各自的 `outerHTML`** 一次交出去
+             *
+             * 沙箱侧的 `__listOf` 要把一个集合变成「数组形态的 Elements」（每项是
+             * 「自己的 HTML + 作用在自己身上的 jsoup 方法」）。按老写法它得先问 `size`，
+             * 再对每个元素 `get(i)`（开句柄）+ `outerHtml`（取 HTML）—— **每个元素两次往返**。
+             * 🎨漫画搬运 的目录 459 个条目就是 919 次，而每次往返都要过一遍 JSON，
+             * 实测每条约 2.35ms（第七十四轮量过）。
+             *
+             * 这里把三件事在**宿主侧一次做完**：开句柄是纯内存操作、取 HTML 是纯 cheerio 调用，
+             * 都不需要过桥 —— 于是 n 个元素从 `1 + 2n` 次往返降到 **1 次**。
+             *
+             * 注意这不是「懒序列化」：调用它的地方（`__listOf`）本来就要把每个元素都串化
+             * （书源会直接 `String(x)` / `x.includes('<h3')`），懒不到什么。
+             * 这个 op 只有沙箱内部用，不是方法面上的成员（见 test/jsoupSurface.test.ts）。
+             */
+            case 'list': {
+                const items = handle.nodes.map((node) => ({
+                    handle: this.alloc({ $: handle.$, nodes: [node] }),
+                    // 与 `outerHtml` 那个 op 对**单节点**句柄的取值完全一致
+                    html: handle.$(node).prop('outerHTML') ?? '',
+                }))
+                return { ok: true, kind: 'list', items }
+            }
             case 'select': {
                 const css = str(0)
                 try {
@@ -279,6 +316,33 @@ export class JsoupBridge {
                 const node = this.one(handle)
                 if (!node) return this.value(false)
                 return this.value(handle.$(node).attr(str(0)) !== undefined)
+            }
+            /**
+             * `attributes()` —— jsoup 的 `Element.attributes()`（返回一个 `Attributes`）
+             *
+             * 线上 1 处：📂贝壳读书 的目录规则要从属性里**按序号**取值 ——
+             *
+             *     let b = Array.from(a.selectFirst(ys).attributes())
+             *     return b[num - 1]?.toString().match(/"(.+)"\/)?.[1]
+             *
+             * 也就是说它要的是「第 n 个属性」加上 `Attribute.toString()` 那个 `key="value"` 形状。
+             * 以前桥里没这个 op，于是报的是 `attributes is not a function` ——
+             * 报错行号指向规则里的那一行，看着像书源写错了。
+             *
+             * 这里只把**键值对**交出去，Attribute 那层方法（`getKey` / `getValue` /
+             * `toString`）由沙箱侧补（见 js.ts 的 `__attrList`）：宿主不该知道
+             * 脚本会拿它当什么用，而值形态是最小、最不需要维护的契约。
+             *
+             * 取**第一个**节点，与 `attr` / `hasAttr` / `val` / `className` 一致
+             * （jsoup 的 `Elements` 没有 `attributes()`，能走到这里的都是 `selectFirst` 出来的单个元素）。
+             */
+            case 'attributes': {
+                const node = this.one(handle)
+                if (!node) return this.value([])
+                const attribs = (node.attribs ?? {}) as Record<string, string>
+                return this.value(
+                    Object.entries(attribs).map(([key, value]) => ({ key, value })),
+                )
             }
             case 'val':
                 return this.value(this.attrOf(handle, 'value'))
