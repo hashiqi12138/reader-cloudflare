@@ -1425,15 +1425,55 @@ function __jsoupCall(op, handleId, args) {
 
 function JsoupElements(id) { this.__id = id }
 
-var JS_METHODS = [
-  'select', 'get', 'first', 'last', 'eq', 'children', 'child', 'childNodeSize',
+/**
+ * 沙箱里 jsoup 对象的**方法面** —— 只有这一份清单
+ *
+ * 它要挂在四种包装上：
+ *
+ *   1. JsoupElements（java.getElements(规则) 与它自己的返回值）
+ *   2. org.jsoup.Jsoup.parse(整页) 的返回值
+ *   3. 「命中多个节点」时的**数组形态**（能下标、能 forEach / map）
+ *   4. 单个元素的「盒装字符串」（脚本常常直接把它 return 回去，要能串化成文本）
+ *
+ * 以前这四份是**各写一遍的字面量数组**，于是漂了，而且是两种不同的漂：
+ *
+ *   - **桥里根本没有 data 这个 op**，四份清单也都没写它 ——
+ *     📂少年小说网 的目录规则（Jsoup.parse(result).select("style").first().data()）
+ *     因此报 TypeError: not a function，报错行号还指向规则里那一行；
+ *     既不是选择器错、也不是桥那句「还不支持的方法：xxx()」，无从下手。
+ *   - **改文档的那几个**（remove / addClass / …）只在第 1 份里有，
+ *     于是 X.select(css).remove() 只要 X 不是 JsoupElements（脚本里的 result、
+ *     Jsoup.parse(...) 的返回值）就炸 —— 线上 8 处是这么写的。
+ *
+ * 现在只留这一份，四种包装各取所需（数组那两种要去掉与 Array.prototype 撞名的）。
+ * 加方法时改一处；test/jsoupSurface.test.ts 盯着清单与桥的 op 一一对上。
+ */
+var JS_SURFACE = [
+  'select', 'selectFirst', 'get', 'first', 'last', 'eq', 'children', 'child', 'childNodeSize',
   'parent', 'parents', 'nextElementSibling', 'prevElementSibling', 'nextAll', 'prevAll',
   'siblingElements', 'not', 'filter', 'clone', 'has', 'is',
-  'size', 'isEmpty', 'text', 'ownText', 'textNodes', 'eachText',
+  'size', 'isEmpty', 'text', 'ownText', 'textNodes', 'eachText', 'data',
   'html', 'outerHtml', 'attr', 'hasAttr', 'val', 'className', 'hasClass',
   'tagName', 'id', 'index', 'matches', 'matchesOwn',
   'remove', 'addClass', 'removeClass', 'append', 'prepend',
 ]
+
+/**
+ * 挂在**数组**上的那一份：与 Array.prototype 撞名的必须去掉
+ *
+ * filter 挂上去会被数组自己的 filter 顶掉；clone 同理 —— 都不该拿 jsoup 的语义
+ * 去覆盖数组自己的方法。
+ */
+var JS_LIST_SURFACE = (function () {
+  var clash = { filter: 1, clone: 1 }
+  var out = []
+  for (var i = 0; i < JS_SURFACE.length; i++) {
+    if (!clash[JS_SURFACE[i]]) out.push(JS_SURFACE[i])
+  }
+  return out
+})()
+
+var JS_METHODS = JS_SURFACE
 for (var __i = 0; __i < JS_METHODS.length; __i++) {
   (function (name) {
     JsoupElements.prototype[name] = function () {
@@ -1488,14 +1528,7 @@ function __htmlApi(html) {
     return reply.handle === null ? [] : __listOf(reply.handle)
   }
   var api = {}
-  var methods = [
-    'select', 'get', 'first', 'last', 'eq', 'children', 'child', 'childNodeSize',
-    'parent', 'parents', 'nextElementSibling', 'prevElementSibling', 'nextAll', 'prevAll',
-    'siblingElements', 'not', 'filter', 'has', 'is',
-    'size', 'isEmpty', 'text', 'ownText', 'textNodes', 'eachText',
-    'html', 'outerHtml', 'attr', 'hasAttr', 'val', 'className', 'hasClass',
-    'tagName', 'id', 'index', 'matches', 'matchesOwn',
-  ]
+  var methods = JS_SURFACE
   for (var i = 0; i < methods.length; i++) {
     (function (name) {
       api[name] = function () {
@@ -1553,14 +1586,7 @@ function __boxHtml(value) {
  * Array.prototype 上已有的那些（尤其 filter / map / forEach / join）。
  */
 function __attachList(handle, out) {
-  var methods = [
-    'select', 'get', 'first', 'last', 'eq', 'children', 'child', 'childNodeSize',
-    'parent', 'parents', 'nextElementSibling', 'prevElementSibling', 'nextAll', 'prevAll',
-    'siblingElements', 'not', 'has', 'is',
-    'size', 'isEmpty', 'text', 'ownText', 'textNodes', 'eachText',
-    'html', 'outerHtml', 'attr', 'hasAttr', 'val', 'className', 'hasClass',
-    'tagName', 'id', 'index', 'matches', 'matchesOwn',
-  ]
+  var methods = JS_LIST_SURFACE
   for (var i = 0; i < methods.length; i++) {
     (function (name) {
       out[name] = function () {
@@ -1592,14 +1618,7 @@ function __attachList(handle, out) {
 function __wrapElement(handle) {
   var html = String(__jsoupCall('outerHtml', handle, []).value)
   var boxed = new String(html)
-  var methods = [
-    'select', 'get', 'first', 'last', 'eq', 'children', 'child', 'childNodeSize',
-    'parent', 'parents', 'nextElementSibling', 'prevElementSibling', 'nextAll', 'prevAll',
-    'siblingElements', 'not', 'has', 'is',
-    'size', 'isEmpty', 'text', 'ownText', 'textNodes', 'eachText',
-    'html', 'outerHtml', 'attr', 'hasAttr', 'val', 'className', 'hasClass',
-    'tagName', 'id', 'index', 'matches', 'matchesOwn',
-  ]
+  var methods = JS_LIST_SURFACE
   for (var i = 0; i < methods.length; i++) {
     (function (name) {
       boxed[name] = function () {
@@ -1634,12 +1653,28 @@ function __elemsFrom(htmls) {
   return __listOf(reply.handle)
 }
 
+/**
+ * org.jsoup.Jsoup.parse(整页) 给的是**数组形态**的包装，不是裸的 JsoupElements
+ *
+ * 为什么：jsoup 那边 Document 是 Element，而 select() 返回的 Elements
+ * **本身就是一个 List** —— 所以书源里
+ *
+ *     org.jsoup.Jsoup.parse(k).select("a")[0].attr("href")
+ *
+ * 这种写法是成立的（线上 🎨漫画搬运 的目录规则就是这么写的）。而裸的 JsoupElements
+ * 既不能下标也没有 length： [0] 恒为 undefined，接着 .attr(...) 就报在 undefined 上，
+ * 报错指向规则里那一行，看不出缺的是「这个返回值得能下标」。
+ *
+ * 数组形态（__listOf）同时具备下标、length 与集合级方法，正是这里要的；
+ * 而且它本来就是脚本里 result 的形态 —— 两个入口从此形状一致。
+ * 代价很小：文档句柄的子节点就 head / body 两个。
+ */
 var org = {
   jsoup: {
     Jsoup: {
-      parse: function (html) { return new JsoupElements(__jsoupCall('parse', null, [String(html)]).handle) },
+      parse: function (html) { return __listOf(__jsoupCall('parse', null, [String(html)]).handle) },
       parseBodyFragment: function (html) {
-        return new JsoupElements(__jsoupCall('parseBodyFragment', null, [String(html)]).handle)
+        return __listOf(__jsoupCall('parseBodyFragment', null, [String(html)]).handle)
       },
       clean: function (html) { return String(__jsoupCall('clean', null, [String(html)]).value) },
     },

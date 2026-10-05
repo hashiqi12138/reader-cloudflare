@@ -36,6 +36,14 @@ import { isElement } from './select'
 /** 与 select.ts 保持一致：不从传递依赖 domhandler 里 import 类型 */
 type Node = any
 
+/**
+ * 「数据元素」：内容原样保留、不当 HTML 解析的那几个标签
+ *
+ * jsoup 用它实现 `Element.data()`（见下面 `case 'data'`），
+ * 也用它判断 `<script>` / `<style>` 里的东西该不该被当成正文文本。
+ */
+const DATA_TAGS = new Set(['script', 'style'])
+
 interface Handle {
     $: CheerioAPI
     nodes: Node[]
@@ -163,6 +171,61 @@ export class JsoupBridge {
                     // 选择器写坏在书源里很常见：当作没匹配到，不要让整条规则崩掉
                     return this.put({ $: handle.$, nodes: [] })
                 }
+            }
+            /**
+             * `selectFirst(css)` —— jsoup 的 `Element.selectFirst` / `Elements.selectFirst`
+             *
+             * 与 `select` 同一件事，只是**只取第一个**。线上一共 5 处，
+             * 形状是 `doc.selectFirst("#pager a:contains(末页)")`、
+             * `result.selectFirst("a")`、`doc.selectFirst('.chaptercount')` 这一类。
+             * 少了它，脚本拿到的是 `TypeError: not a function` —— 报错行号指向规则里那一行，
+             * 看着像书源写错了，其实是我们这一侧没这个 op。
+             */
+            case 'selectFirst': {
+                const css = str(0)
+                try {
+                    const hit = handle.$(handle.nodes).find(css).toArray().filter(isElement)
+                    return this.put(
+                        hit.length > 0 ? { $: handle.$, nodes: [hit[0] as Node] } : null,
+                    )
+                } catch {
+                    return this.put(null)
+                }
+            }
+            /**
+             * `data()` —— jsoup 的 `Element.data()`：`<script>` / `<style>` 这类
+             * **数据元素**里的内容（不是它们的子节点文本，是整段原始内容）
+             *
+             * 线上 📂少年小说网 的目录规则正是拿它把 `<style>` 里的隐藏规则读出来当选择器：
+             *
+             *     a = org.jsoup.Jsoup.parse(result)
+             *     b = String(a.select("style").first().data()).replace(/{display:none}/g, ",").slice(0, -1)
+             *     a.select(b).remove()
+             *
+             * 以前**桥里根本没有这个 op**，于是调用在沙箱那一侧就炸了
+             * （`not a function`），连桥的 `default:` 那句「还不支持的方法：xxx()」都说不上 ——
+             * 这是最坏的一种失败：既不是选择器错，也不是「明确不支持」，无从下手。
+             *
+             * 语义按 jsoup：自己就是数据元素时给它的内容；否则只往下看**一层**，
+             * 取直接子节点里那些数据元素的内容。注释不带进来（jsoup 会带，
+             * 但注释混进 CSS 只会把选择器弄坏）。
+             */
+            case 'data': {
+                let out = ''
+                for (const node of handle.nodes) {
+                    if (!isElement(node)) continue
+                    const own = String(node.name ?? '').toLowerCase()
+                    if (DATA_TAGS.has(own)) {
+                        out += handle.$(node).text()
+                        continue
+                    }
+                    for (const child of (node.children ?? []) as Node[]) {
+                        const tag = String(child?.name ?? '').toLowerCase()
+                        if (child?.type === 'tag' && DATA_TAGS.has(tag))
+                            out += handle.$(child).text()
+                    }
+                }
+                return this.value(out)
             }
             case 'size':
                 return this.value(handle.nodes.length)
