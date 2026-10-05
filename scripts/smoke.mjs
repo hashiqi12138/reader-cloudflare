@@ -2443,6 +2443,62 @@ console.log('\n=== 12. 分页正文（nextContentUrl） ===')
     check(!left.some((s) => s.id === id), '分页正文测试源已清理')
 }
 
+console.log('\n=== 12b. 正文里的 HTML 摊平（@html 取值 / <br> 分段） ===')
+{
+    /**
+     * 正文取值方式里 `@html` 占**一半以上**（线上 816 条启用源里 440 条，54%），
+     * 而那一路取回来的是**原样的 HTML** —— 阅读界面把正文当纯文本渲染，
+     * 于是用户看到的是字面的 `<p>` / `<br>`，段落还全糊在一起。
+     *
+     * 这里打的是**同一章**的两个页面：
+     *
+     *   - 内置 CSS 源：`@css:div#content@textNodes`，段落各自是文本节点（本来就对）
+     *   - 内置 @html 源：`@css:div#nr1@html`，页面的段落之间**只有 `<br>`**、
+     *     整段 HTML 一行到底，div 里还挂着一句 `<script>read_top()</script>`，
+     *     末尾一个「↑返回顶部↑」由净化正则删掉（留下的是空壳标签）
+     *
+     * 两条路的正文必须**逐字相同**。这才是「`<br>` 真的变成了换行」的证明 ——
+     * 光断言「没有 `<`」是不够的：把标签全删掉也能过，但段落会糊成一坨。
+     */
+    const q = (sourceId, url) =>
+        getJson(
+            `/api/content?sourceId=${encodeURIComponent(sourceId)}&url=${encodeURIComponent(url)}`,
+        )
+
+    const css = await q('builtin:fixture-css', `${BASE}/fixture/chapter/1/1`)
+    const html = await q('builtin:fixture-br-html', `${BASE}/fixture/br-chapter/1/1`)
+    const cssText = String(css.json?.content ?? '')
+    const htmlText = String(html.json?.content ?? '')
+
+    check(cssText.length > 0, '对照基准：@textNodes 那份正文取到了', `len=${cssText.length}`)
+    check(htmlText.length > 0, '@html 那份正文取到了', html.json?.error ?? `len=${htmlText.length}`)
+    check(
+        !/<[^>]*>/.test(htmlText),
+        '正文里一个标签都不剩（`<br>` / `<p>` / `<script>` 都不该露出来）',
+        JSON.stringify(htmlText.slice(0, 90)),
+    )
+    check(
+        htmlText.split('\n').filter((line) => line.trim() !== '').length === 3,
+        '`<br>` 真的变成了换行（3 段）',
+        JSON.stringify(htmlText),
+    )
+    check(
+        !/\n\s*\n/.test(htmlText),
+        '没有空段落（连续 `<br>` 与空 `<p>` 不该切出空行）',
+        JSON.stringify(htmlText),
+    )
+    check(!htmlText.includes('read_top'), '正文 div 里挂着的 `<script>` 没被读进来')
+    check(
+        htmlText === cssText,
+        '@html 摊平出来的正文与 @textNodes 取到的那份**逐字一致**',
+        `html=${htmlText.length}字 textNodes=${cssText.length}字`,
+    )
+    if (htmlText !== cssText) {
+        console.log(`    @html ：${JSON.stringify(htmlText)}`)
+        console.log(`    textNodes：${JSON.stringify(cssText)}`)
+    }
+}
+
 console.log('\n=== 13. 图片 / 音频 / 文件源 ===')
 {
     /**
