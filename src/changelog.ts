@@ -25,6 +25,11 @@ export interface ReleaseNote {
 
 export const CHANGELOG: ReleaseNote[] = [
     {
+        version: '0.64.0',
+        date: '2026-10-05',
+        note: '又修好两条**静默变 0 章**的路：脚本用 `Array.from(java.getElements(…))` 时拿到的永远是空数组（沙箱里没有迭代器），以及 `attributes()` 缺失 —— 📂贝壳读书 现在能出目录，🎨51漫画 也终于读到它藏在 script 里的**真目录**（以前只有兜底的一章）；顺带把桥取整串元素的往返从「每个元素三次」压成一次，604 个节点的规则上实测快约 21%',
+    },
+    {
         version: '0.63.0',
         date: '2026-10-05',
         note: '多了第二条腿：整套东西现在也能跑在自己的一台机器上（`npm run start:node`）—— 不碰 Cloudflare、没有每请求 10 毫秒的 CPU 上限，书源与进度存在本机 SQLite 里；线上那份部署一行没变',
