@@ -223,6 +223,14 @@ export interface SandboxBatch {
     injected: string[]
     /** 只卡 VM 内代码的时限（复用时要每次重设） */
     deadline: number
+    /**
+     * 这一次求值的**宿主侧累计耗时**（复用路径下由 `executeInSandbox` 挂上来）
+     *
+     * `deadline` 的语义是「只卡 VM 里跑的代码」，而中断回调只能看到墙上时间 ——
+     * 不减掉这一项，一次几百毫秒的 `jsoup` 桥调用也会被算成「脚本跑了这么久」。
+     * 详见图注里 📂漫画搬运 那段实测。
+     */
+    busy: { ms: number }
     /** 卡整次求值（含宿主侧等待）的时限 */
     hardDeadline: number
     /** 这一批里最近一次求值是不是被超时中断的 */
@@ -299,6 +307,7 @@ export async function openSandboxBatch(
         ready: false,
         injected: [],
         deadline: Number.POSITIVE_INFINITY,
+        busy: { ms: 0 },
         hardDeadline: Number.POSITIVE_INFINITY,
         timedOut: false,
         runs: 0,
@@ -306,7 +315,7 @@ export async function openSandboxBatch(
     // 整批共用一个中断回调：时限每次求值由 executeInSandbox 重设（不能摘掉，
     // 摘掉之后这一批剩下的求值就再也没有超时保护了）
     runtime.setInterruptHandler(() => {
-        if (Date.now() > batch.deadline || Date.now() > batch.hardDeadline) {
+        if (Date.now() - batch.busy.ms > batch.deadline || Date.now() > batch.hardDeadline) {
             batch.timedOut = true
             return true
         }
@@ -2089,9 +2098,16 @@ async function executeInSandbox(
     // 两套时限：
     //   deadline  只卡 VM 里跑的代码（中断回调只管得到这里）
     //   hardDeadline 卡整次求值，含宿主侧的等待
+    //
+    // 「只卡 VM」要**减掉宿主函数的耗时**才算数：中断回调看到的只有墙上时间，
+    // 而宿主侧那些活（cheerio 解析、JSON 序列化）都发生在回调的两次触发之间。
+    // 一次 `jsoup` 桥调用是微秒级，可 📂漫画搬运 的目录规则要调**上万次**
+    // （459 个条目 × 两次 `Jsoup.parse` + 每次好几个 op），宿主侧实测 ~1.1s、
+    // 而 VM 侧真正跑的只有几十毫秒 —— 不减这一项，它永远卡在 1200ms 的 deadline 上。
     const started = Date.now()
     const deadline = started + timeoutMs
     const hardDeadline = started + totalTimeoutMs
+    const busy = { ms: 0 }
 
     let timedOut = false
     if (reuse) {
@@ -2100,10 +2116,11 @@ async function executeInSandbox(
         batch.timedOut = false
         batch.deadline = deadline
         batch.hardDeadline = hardDeadline
+        batch.busy = busy
         batch.runs += 1
     } else {
         runtime.setInterruptHandler(() => {
-            if (Date.now() > deadline || Date.now() > hardDeadline) {
+            if (Date.now() - busy.ms > deadline || Date.now() > hardDeadline) {
                 timedOut = true
                 return true
             }
@@ -2125,11 +2142,34 @@ async function executeInSandbox(
         // 表现为整个请求 Aborted，报错信息里完全不会提到句柄。
         const host = vm.newObject()
 
+        /**
+         * 记一笔宿主耗时（`busy.ms` 被中断回调用作「VM 实际跑了多久」的修正项）
+         *
+         * 同步与异步各一份：异步那位必须等 `await` 结束才算完，否则记的是
+         * 「派出去」的那一瞬间。
+         */
+        const counted = <T>(fn: () => T): T => {
+            const t0 = Date.now()
+            try {
+                return fn()
+            } finally {
+                busy.ms += Date.now() - t0
+            }
+        }
+        const countedAsync = async <T>(fn: () => Promise<T>): Promise<T> => {
+            const t0 = Date.now()
+            try {
+                return await fn()
+            } finally {
+                busy.ms += Date.now() - t0
+            }
+        }
+
         const defineHostFn = (
             name: string,
             impl: (arg: QuickJSHandle) => QuickJSHandle | void,
         ): void => {
-            const fn = vm.newFunction(name, impl)
+            const fn = vm.newFunction(name, (arg) => counted(() => impl(arg)))
             vm.setProp(host, name, fn)
             fn.dispose()
         }
@@ -2139,7 +2179,7 @@ async function executeInSandbox(
             name: string,
             impl: (...args: QuickJSHandle[]) => QuickJSHandle | void,
         ): void => {
-            const fn = vm.newFunction(name, impl)
+            const fn = vm.newFunction(name, (...args) => counted(() => impl(...args)))
             vm.setProp(host, name, fn)
             fn.dispose()
         }
@@ -2276,10 +2316,12 @@ async function executeInSandbox(
         // 约束：asyncify 函数内部**不能再调用另一个 asyncify 函数**，
         // 所以这里只做 fetch 与规则求值，不做任何会再次进入沙箱的事 ——
         // 规则求值那一侧为此挡住了含 `@js:` 的规则（见 analyze.ts 的 sandboxGetString）。
-        const getStringFn = vm.newAsyncifiedFunction('getString', async (arg) => {
-            const raw = String(vm.dump(arg))
-            return vm.newString(await handleGetString(raw, { getString }))
-        })
+        const getStringFn = vm.newAsyncifiedFunction('getString', async (arg) =>
+            countedAsync(async () => {
+                const raw = String(vm.dump(arg))
+                return vm.newString(await handleGetString(raw, { getString }))
+            }),
+        )
         vm.setProp(host, 'getString', getStringFn)
         getStringFn.dispose()
 
@@ -2290,10 +2332,12 @@ async function executeInSandbox(
          * 只是交回去的不是字符串而是**每个节点的 outerHTML** —— 脚本那侧再解析成 Elements。
          * 同样是 asyncify 函数，因此规则里不能再套 JS（见 analyze.ts 的 getElements 实现）。
          */
-        const getElementsFn = vm.newAsyncifiedFunction('getElements', async (arg) => {
-            const raw = String(vm.dump(arg))
-            return vm.newString(await handleGetElements(raw, { getElements }))
-        })
+        const getElementsFn = vm.newAsyncifiedFunction('getElements', async (arg) =>
+            countedAsync(async () => {
+                const raw = String(vm.dump(arg))
+                return vm.newString(await handleGetElements(raw, { getElements }))
+            }),
+        )
         vm.setProp(host, 'getElements', getElementsFn)
         getElementsFn.dispose()
 
@@ -2304,10 +2348,12 @@ async function executeInSandbox(
          * 而沙箱本来就是 asyncify 的，写法与上面几条异步桥完全一样。
          * 给 `java.digestHex(str, 'SHA-256')` 用（线上 5 处）。
          */
-        const sha256Fn = vm.newAsyncifiedFunction('sha256', async (arg) => {
-            const text = String(vm.dump(arg))
-            return vm.newString(await sha256Hex(text))
-        })
+        const sha256Fn = vm.newAsyncifiedFunction('sha256', async (arg) =>
+            countedAsync(async () => {
+                const text = String(vm.dump(arg))
+                return vm.newString(await sha256Hex(text))
+            }),
+        )
         vm.setProp(host, 'sha256', sha256Fn)
         sha256Fn.dispose()
 
@@ -2318,10 +2364,12 @@ async function executeInSandbox(
          * 它们的输入输出约定一样，只有算法与要不要密钥不同，所以合成一条桥就够了 ——
          * 沙箱那侧三个成员都只是拼一个 JSON 而已（见 JAVA_PRELUDE）。
          */
-        const hashFn = vm.newAsyncifiedFunction('hash', async (arg) => {
-            const requestJson = String(vm.dump(arg))
-            return vm.newString(await runHash(JSON.parse(requestJson) as HashRequest))
-        })
+        const hashFn = vm.newAsyncifiedFunction('hash', async (arg) =>
+            countedAsync(async () => {
+                const requestJson = String(vm.dump(arg))
+                return vm.newString(await runHash(JSON.parse(requestJson) as HashRequest))
+            }),
+        )
         vm.setProp(host, 'hash', hashFn)
         hashFn.dispose()
 
@@ -2332,16 +2380,18 @@ async function executeInSandbox(
             }
         }
 
-        const requestFn = vm.newAsyncifiedFunction('request', async (arg) => {
-            const optionsJson = String(vm.dump(arg))
-            const response = await handleHttpRequest(optionsJson, {
-                http,
-                now: () => Date.now(),
-                hardDeadline,
-                takeCall,
-            })
-            return vm.newString(response)
-        })
+        const requestFn = vm.newAsyncifiedFunction('request', async (arg) =>
+            countedAsync(async () => {
+                const optionsJson = String(vm.dump(arg))
+                const response = await handleHttpRequest(optionsJson, {
+                    http,
+                    now: () => Date.now(),
+                    hardDeadline,
+                    takeCall,
+                })
+                return vm.newString(response)
+            }),
+        )
         vm.setProp(host, 'request', requestFn)
         requestFn.dispose()
 
@@ -2351,10 +2401,12 @@ async function executeInSandbox(
          * 同步、且**不发请求** —— 那 9 个只在 URL 模板里取地址的源，不该为拿一个地址
          * 多打一次网络（Legado 的 AnalyzeUrl 也是发请求之前就把地址定下来的）。
          */
-        const resolveUrlFn = vm.newFunction('resolveUrl', (arg) => {
-            const url = String(vm.dump(arg))
-            return vm.newString(resolveSandboxUrl(url, http))
-        })
+        const resolveUrlFn = vm.newFunction('resolveUrl', (arg) =>
+            counted(() => {
+                const url = String(vm.dump(arg))
+                return vm.newString(resolveSandboxUrl(url, http))
+            }),
+        )
         vm.setProp(host, 'resolveUrl', resolveUrlFn)
         resolveUrlFn.dispose()
 
@@ -2364,16 +2416,18 @@ async function executeInSandbox(
          * `java.connect` 用它 —— 书源要做 `res.code() == 403`、`res.raw().headers('Set-Cookie')`
          * 这类判断，抛错等于把「判断」变成了「异常」。
          */
-        const fetchFullFn = vm.newAsyncifiedFunction('fetchFull', async (arg) => {
-            const optionsJson = String(vm.dump(arg))
-            const response = await handleHttpResponse(optionsJson, {
-                http,
-                now: () => Date.now(),
-                hardDeadline,
-                takeCall,
-            })
-            return vm.newString(response)
-        })
+        const fetchFullFn = vm.newAsyncifiedFunction('fetchFull', async (arg) =>
+            countedAsync(async () => {
+                const optionsJson = String(vm.dump(arg))
+                const response = await handleHttpResponse(optionsJson, {
+                    http,
+                    now: () => Date.now(),
+                    hardDeadline,
+                    takeCall,
+                })
+                return vm.newString(response)
+            }),
+        )
         vm.setProp(host, 'fetchFull', fetchFullFn)
         fetchFullFn.dispose()
 
