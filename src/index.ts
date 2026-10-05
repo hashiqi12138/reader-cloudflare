@@ -2111,17 +2111,36 @@ app.notFound((c) => {
 
 app.onError((err, c) => fail(c, err))
 
+/**
+ * 与平台无关的请求入口
+ *
+ * 放在这里而不是塞进 `default.fetch` 里，是因为**第二个平台适配器**（`server/node.ts`）
+ * 要用同一个入口 —— 内置测试站点的路由、`app.onError`、以及那些「按书源独立失败」的
+ * 处理都在这一层，各写一遍必然有一处漂掉（而漂掉的表现是「某个平台上少一条路由」，
+ * 不报错，只是那个平台上测不了）。
+ *
+ * `ctx` 只在媒体缓存那条路上用得到（`waitUntil`）：Node 侧传一个「等 Promise 落地」的
+ * 替身即可，见 `server/node.ts`。
+ */
+export async function handleRequest(
+    request: Request,
+    env: AppEnv,
+    ctx?: { waitUntil(promise: Promise<unknown>): void; passThroughOnException(): void },
+): Promise<Response> {
+    const url = new URL(request.url)
+
+    // 内置测试站点：默认关闭，只在本地开发与 CI 里打开
+    if (env.ENABLE_FIXTURE === 'true') {
+        // 测试站点里有需要读请求体的端点（POST 表单搜索），所以是异步的
+        const handled = await handleFixture(request, url)
+        if (handled) return handled
+    }
+
+    return app.fetch(request, env, ctx as ExecutionContext)
+}
+
 export default {
     async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-        const url = new URL(request.url)
-
-        // 内置测试站点：默认关闭，只在本地开发与 CI 里打开
-        if (env.ENABLE_FIXTURE === 'true') {
-            // 测试站点里有需要读请求体的端点（POST 表单搜索），所以是异步的
-            const handled = await handleFixture(request, url)
-            if (handled) return handled
-        }
-
-        return app.fetch(request, cloudflareEnv(env), ctx)
+        return handleRequest(request, cloudflareEnv(env), ctx)
     },
 } satisfies ExportedHandler<Env>

@@ -20,6 +20,8 @@
         "types": "wrangler types --strict-vars=false && prettier --write worker-configuration.d.ts",
         "db:migrate": "wrangler d1 migrations apply reader-cloudflare --local",
         "db:migrate:remote": "wrangler d1 migrations apply reader-cloudflare --remote",
+        "build:node": "node scripts/build-node.mjs",
+        "start:node": "node scripts/build-node.mjs && node dist-node/server.mjs",
         "typecheck": "tsc --noEmit",
         "format": "prettier --write .",
         "format:check": "prettier --check .",
@@ -36,6 +38,7 @@
     },
     "devDependencies": {
         "@types/node": "^26.6.3",
+        "esbuild": "^0.28.1",
         "prettier": "^3.9.9",
         "typescript": "^7.0.2",
         "vitest": "^5.0.3",

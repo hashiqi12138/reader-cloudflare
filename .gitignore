@@ -4,6 +4,10 @@ node_modules/
 # 构建产物
 dist/
 build/
+# 自建（Node）那份产物 —— 由 `npm run build:node` 生成，不入库
+dist-node/
+# 自建模式默认落在这里的 SQLite 与它的 WAL 文件
+data/
 
 # Wrangler 本地状态（本地 D1 数据、缓存、账号信息）
 .wrangler/
