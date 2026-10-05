@@ -16,6 +16,7 @@
 
 import { analyzeSelections, rootSelection, type Selection } from '../engine/analyze'
 import { sourceGlobals, sourceLimits } from '../engine/globals'
+import { crossRequestInfoKeys } from '../engine/infoVars'
 import {
     closeSandboxBatch,
     openSandboxBatch,
@@ -113,6 +114,18 @@ export async function exploreBooks(
         page: safePage,
         baseUrl: base,
         http: sandboxHttp(source, base),
+        /**
+         * 发现页的逐条字段里也可能写跨请求变量（第七十八轮，TODO 第 8 条）
+         *
+         * 语料里 4 条源的 `ruleExplore` 写了 `java.put`（📂阿巴小说 / 🏷七猫小说 /
+         * 📂乐乎文章 / 📂小米书城），读端在详情 / 目录那一趟 —— 与搜索那条路同一个形状。
+         * 少了这一行，「读」的那一趟认得这个键（那边算出来的是「别的组读过」），
+         * 而「写」的这一趟不落库，表现为「明明是同一套写法，搜索能用发现不能用」。
+         *
+         * 落库通道（`itemVarSink`）由调用方注入，与 `searchBooks` 一致 ——
+         * 发现这一趟同样没有「这本书」，得等每一条的 `bookUrl` 算出来才知道挂给谁。
+         */
+        infoVarCrossKeys: crossRequestInfoKeys(source, 'ruleExplore'),
     }
 
     const sel = rootSelection(html)

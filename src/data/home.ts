@@ -15,10 +15,9 @@
  *    这一条能直接解释给用户听，也不需要任何埋点。
  */
 
-import type { SearchBook } from '../engine/types'
 import { createSandboxSession } from '../engine/js'
 import { listExploreCategories, exploreBooks } from '../legado/explore'
-import type { BookSource } from '../engine/types'
+import type { BookSource, ItemVarSink, SearchBook } from '../engine/types'
 import type { PlatformDb } from '../platform/types'
 import { DataError } from './types'
 
@@ -117,6 +116,18 @@ export async function buildHomeSections<T extends BookSource>(
     sources: T[],
     preferredSourceIds: string[],
     idOf: (source: T) => string,
+    /**
+     * 逐条落跨请求变量的通道（第七十八轮，TODO 第 8 条）
+     *
+     * 推荐位走的也是**发现页**（`exploreBooks`），而语料里 4 条源把 `java.put`
+     * 写在 `ruleExplore` 的逐条字段规则里、读端在详情 / 目录那一趟 —— 与搜索同一个形状。
+     * 不接的话，从首页点进这类书会在详情里读不到变量（表现为简介 / 目录空掉）。
+     *
+     * 用工厂而不是直接传 `ItemVarSink`：这里一页几个源并发，**一个源要一个缓冲**
+     * （见 `index.ts` 的 `itemVarSinkFor`）。不传就是「这一趟不落库」，与以前一样 ——
+     * 这条路的调用方（缓存重建）拿不到 db 时也不会退化。
+     */
+    makeSink?: (source: T) => ItemVarSink | undefined,
 ): Promise<{ sections: HomeSection[]; failures: string[] }> {
     const eligible = sources.filter(
         (s) => (s.exploreUrl ?? '').trim() !== '' && s.ruleExplore?.bookList,
@@ -154,9 +165,18 @@ export async function buildHomeSections<T extends BookSource>(
                     const category = pickCategory(categories)
                     if (!category) return null
 
+                    // 这一趟发现页的逐条 put 往这本书自己身上落（一个源一个缓冲）
+                    const sink = makeSink?.(source)
                     const result = await exploreBooks(source, category.url, 1, {
                         baseUrl: source.bookSourceUrl,
                         sandbox: session,
+                        ...(sink
+                            ? {
+                                  itemVarSink: sink,
+                                  persistBookVariable: (name: string, value: string) =>
+                                      sink.push(name, value),
+                              }
+                            : {}),
                     })
                     if (result.books.length === 0) return null
 

@@ -289,7 +289,7 @@ async function bookEvalContext(
 }
 
 /**
- * 搜索里的「逐条落跨请求变量」通道（第七十六轮，TODO 第 8 条）
+ * 列表那一趟（搜索 / 发现）的「逐条落跨请求变量」通道（第七十六轮，TODO 第 8 条）
  *
  * 搜索与取书链路（详情 / 目录 / 正文）的根本区别是**它没有「这本书」**：
  * `bookEvalContext` 能直接算出 `book_key` 是因为请求的 `url` 参数就是书地址，
@@ -300,10 +300,13 @@ async function bookEvalContext(
  * 「写的时候收起来、这一条算完再落」：`persistBookVariable` 指向 `push`，
  * `booksFromItems` 每算完一条调一次 `flush(bookUrl)`（见 `ItemVarSink`）。
  *
+ * **发现页（`ruleExplore`）是同一个形状**（第七十八轮接上）：那里也有 4 条源把
+ * `java.put` 写在逐条的字段规则里，所以这个通道同时给搜索与发现两条路用。
+ *
  * **一个源一个**：搜索一页几十个源是并发的（`Promise.all`），共用一个缓冲会把
  * A 源那条书的 `bid` 落给 B 源的某一本。沙箱求值是串行的，但宿主侧的 await 会交错。
  */
-function searchItemVarSink(db: PlatformDb, source: RegisteredSource): ItemVarSink {
+function itemVarSinkFor(db: PlatformDb, source: RegisteredSource): ItemVarSink {
     let pending: Array<{ name: string; value: string }> = []
     return {
         push: (name, value) => {
@@ -1521,7 +1524,14 @@ app.get('/api/explore/books', async (c) => {
     if (target === '') return c.json({ error: '缺少 url 参数' }, 400)
 
     try {
-        const result = await exploreBooks(source, target, page, evalContext(c.env.DB, source))
+        // 发现一趟的逐条 put 也往这本书自己身上落（第七十八轮，TODO 第 8 条）——
+        // 与搜索同一个机制，只是规则组换成了 ruleExplore
+        const sink = itemVarSinkFor(c.env.DB, source)
+        const result = await exploreBooks(source, target, page, {
+            ...evalContext(c.env.DB, source),
+            itemVarSink: sink,
+            persistBookVariable: (name, value) => sink.push(name, value),
+        })
         return c.json({
             sourceId: source.id,
             sourceName: source.bookSourceName,
@@ -1571,7 +1581,12 @@ app.get('/api/home', async (c) => {
         const all = await listEnabledSources(c.env.DB, origin, registryOf(c.env))
         // 书架里出现过的书源排在前面：最轻量的「个人化」，且能一句话解释清楚
         const preferred = [...new Set(entries.map((e) => e.sourceId))]
-        const built = await buildHomeSections(all, preferred, (s) => s.id)
+        const built = await buildHomeSections(
+            all,
+            preferred,
+            (s) => s.id,
+            (s) => itemVarSinkFor(c.env.DB, s),
+        )
         payload = { sections: built.sections, failures: built.failures, builtAt: Date.now() }
         try {
             await writeHomeCache(c.env.DB, payload)
@@ -1654,8 +1669,8 @@ app.post('/api/search', async (c) => {
             try {
                 // 展示用字段的容错原因（封面 / 简介 / 作者……）——见 ops.ts 的 tolerantField
                 const warnings: FieldWarning[] = []
-                // 一个源一个：`push` 收、`flush` 落，见 searchItemVarSink
-                const sink = searchItemVarSink(c.env.DB, source)
+                // 一个源一个：`push` 收、`flush` 落，见 itemVarSinkFor
+                const sink = itemVarSinkFor(c.env.DB, source)
                 const books = await searchBooks(
                     source,
                     keyword,
