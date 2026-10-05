@@ -3,7 +3,7 @@
 按「现在就能动手」排序。每条都写清四件事：**为什么**、**已经到哪一步**、**下一步做什么**、
 **怎么算做完**（能验的都要能验）。做完就删掉，别留在这里当装饰。
 
-最后更新：2026-10-05（v0.65.0，第七十七轮之后）
+最后更新：2026-10-05（v0.66.0，第七十八轮之后）
 
 ---
 
@@ -191,7 +191,7 @@ x = Array.from(java.getElements('class.BCsectionTwo-top-chapter'))
 
 ---
 
-## 8. ~~写在 `ruleSearch` 里的跨请求 `java.put`~~ —— 第七十六轮已做（剩 2 条源与发现页）
+## 8. ~~写在 `ruleSearch` 里的跨请求 `java.put`~~ —— 第七十六轮已做，第七十八轮把发现页也接上
 
 **做完了**（按每条各自的 `bookUrl` 落库）。难点是搜索这一趟**没有「这本书」**，而
 `java.put` 是在**每一条**的字段规则里写的（大半就写在 `ruleSearch.bookUrl` 上）——
@@ -226,14 +226,38 @@ x = Array.from(java.getElements('class.BCsectionTwo-top-chapter'))
 
 **还剩**：
 
-1. **写在整个 `bookList` 脚本里的 put**（⚡📂rezero / 🔞Linpx）：那一段脚本**一次**产出
-   整页条目，写的时候无法归属到某一条 —— 要修得让「列表脚本」也能按条目分段，属于
-   架构上的改动，不是补一个参数。这两条的语言义本来就是「整页一个值」（rezero 的 `is`
-   是「这次搜索匹配上没有」），所以先记着。
-2. **发现页（`ruleExplore`）那一趟没接**：`explore.ts` 既没设 `itemVarSink` 也没设
-   `crossRequestInfoKeys`，所以 `🏷七猫小说` 在 `ruleExplore.bookUrl` 里读 `headers` 仍然读不到。
-   形状与搜索完全一样（同一个 `booksFromItems`），接上是小改动 —— 但要先确认「发现页里读
-   搜索留下的变量」是不是真的该成立（发现页与搜索页可能不是同一批书的地址）。
+**第七十八轮把发现页那一趟接上了**（原来是「同一套写法，搜索能用、发现不能用」）：
+
+- `exploreBooks` 补上 `infoVarCrossKeys: crossRequestInfoKeys(source, 'ruleExplore')`
+- 落库通道由调用方注入 —— `/api/explore/books` 与首页推荐位各建一个 sink
+  （`index.ts` 的 `itemVarSinkFor`，第七十六轮叫 `searchItemVarSink`，现在搜索与发现共用）；
+  `home.ts` 的 `buildHomeSections` 多了一个可选的 `makeSink` 工厂（**一个源一个缓冲**）
+- 靶子 `builtin:fixture-explore-var`（发现页每条 put 一个**互不相同**的值、详情里读回来），
+  冒烟 12j 断言每一本读到的都是**它自己**那条写下的值
+
+**实测（这份导出里 594 条带发现页的源，`live-explore-dump.json`）**：`ruleExplore` 里写
+`java.put` 的共 4 条，其中 **3 条真的跨请求**（读端在别的组）：
+
+| 源         | put 在哪                                       | 读端           | 这一轮   |
+| ---------- | ---------------------------------------------- | -------------- | -------- |
+| 📂阿巴小说 | `ruleExplore.bookUrl` → `bid`                  | `ruleBookInfo` | **修好** |
+| 📂乐乎文章 | `ruleExplore.lastChapter` → `time`             | `ruleToc`      | **修好** |
+| 📂小米书城 | `ruleExplore.kind` → `time`                    | `ruleBookInfo` | **修好** |
+| 🏷七猫小说  | `ruleExplore.bookList` + `bookUrl` → `headers` | `ruleSearch`   | 见下     |
+
+七猫那条的读端在**搜索**那一趟（不是取书链路），发现页写下的 `headers` 落不到搜索请求里；
+而且它的 `bookList` 是列表脚本，与下面 rezero 同一个架构问题。
+
+**还剩（现在只有一处了）**：
+
+**写在整个 `bookList` 脚本里的 put**（⚡📂rezero）：那一段脚本**一次**产出整页条目，
+写的时候无法归属到某一条 —— 要修得让「列表脚本」也能按条目分段，属于架构上的改动。
+rezero 的 `is` 读端在 `ruleBookInfo`（真的跨请求），但它的语义本来就是「这次搜索匹配上没有」，
+整页一个值 —— 先记着。
+
+**顺手把一个「以为要做」的排除了**：🔞Linpx 的 `java.put('key')` / `java.get('key')`
+**都在 `ruleSearch` 组里**，走会话表本来就读得到，根本不需要落库。第七十六轮把它列进
+「剩 2 条源」是**数错了** —— 按「put 写在 bookList 里」这个形状数的，没看读端在哪一组。
 
 ---
 
@@ -331,18 +355,62 @@ SRC={"text":"甲页","href":"/dbg-a"}
 
 ---
 
-## 12. jsoup 的写操作仍是空操作（`remove()` 之外的那几个）
+## 12. ~~jsoup 的写操作仍是空操作（`remove()` 之外的那几个）~~ —— 第七十八轮已做
 
-**为什么**：`remove()` 在第七十三轮已经做成**真删**（📂少年小说网 的目录靠它）。剩下
-`addClass()` / `removeClass()` / `append()` / `prepend()` / `attr(k,v)` 仍然一律返回 `null`
-（`jsoupBridge.ts` 里那一组 `case`）。语料里它们只当「顺手清理」——
-**没有一条规则依赖「改完之后再读回来」**，所以按空操作处理是**有依据的**，不是偷懒。
+**为什么当时留在那儿**：`remove()` 在第七十三轮已经做成**真删**（📂少年小说网 的目录靠它）。
+剩下的 `addClass()` / `removeClass()` / `append()` / `prepend()` / `attr(k,v)` 一律返回 `null`。
+当时的判断是「语料里它们只当顺手清理，**没有一条规则依赖改完再读回来**」—— 这句**只对了一半**。
 
-**下一步**：等到真的遇到「改完要读回来」的源再做。做的时候注意 `attr(k, v)` 与读属性
-那一路（`case 'attr'`）是同一个方法名，得按**参数个数**分派（`sandboxSurface.test.ts`
-那条「`attrSet` 是桥里的内部别名」的注释说的就是这件事）。
+**做完了**（v0.66.0）。真正的推手是 🎨笔趣漫画 的 `ruleContent.content`：
 
-**怎么算做完**：有源依赖了 + 那个源在冒烟里有一条断言。
+```js
+imgs = java.getElements('.rd-article-wr img')
+imgs.forEach((e) => {
+    e.attr('src', e.attr('data-original'))
+})
+imgs
+```
+
+这条规则**整条都依赖写操作**，而且它同时踩中三处，缺哪一样都是「整章取不到」：
+
+| 缺的东西                                       | 症状                                                                  |
+| ---------------------------------------------- | --------------------------------------------------------------------- |
+| `attr(k, v)` 真改                              | 静默返回旧值 —— 不报错，图还是占位图                                  |
+| 预取过的 HTML 缓存要失效                       | `String(e)` 吐的是**改之前**那份 HTML（第七十七轮刚加的那层缓存打架） |
+| `java.getElements(...)` 的返回值得能 `forEach` | `TypeError: forEach is not a function`（裸 `JsoupElements` 没有它）   |
+
+落地的东西：
+
+- 桥的 `attr` / `text` / `html` 改成**按参数个数分派**读与写（jsoup 那边就是同名重载）；
+  `addClass` / `removeClass` / `append` / `prepend` 真改；删掉纯死代码 `case 'attrSet'`
+- `__wrapElement` 的预取缓存带上了 `invalidate()`：任何写操作落地就把这一格清空，
+  之后的读一律过桥（读到的是改过的那份）。清的是**这个元素**的缓存
+- **删掉了「裸 JsoupElements」那一份包装**：`java.getElements(...)` 改成与 `select()` /
+  `Jsoup.parse()` 一样的**数组形态**（能下标、有 `length`、能 `forEach` / `map` / `Array.from`，
+  集合级方法挂在数组上）。少一种形态、少一处漂移
+- `java.getElement(...)` 给**含一个元素的数组形态**（与 `selectFirst` 同种东西）
+
+**这里有一个差点写错的坑，如实记下**：删掉裸 `JsoupElements` 时，`getElement` 我第一版
+写成返回「单个元素包装」（盒装字符串），结果是 🎨51漫画 那条规则**静默走错分支**：
+
+```js
+Array.from(java.getElement('script')).filter((e) => String(e).includes('目录'))
+```
+
+盒装字符串是 String 对象 —— `Array.from` 见到 `length` 就按**字符**摊开，于是 `scripts[0]`
+是 undefined，整条目录落到兜底那一支（**只剩一章**）。不报错，只是书的内容变成一章。
+是冒烟第 37 段（第七十六轮刚改强的那条断言）把它抓出来的 —— 那一轮的「先写断言、再动实现」
+在这里救了第二次。
+
+**靶子与断言**：
+
+- `builtin:fixture-img-write`（新）+ `fixtureImgWriteChapterPage`（新）。真源的属性名是
+  `data-original`，靶子**故意换成 `data-real-src`**（`mediaLinks.ts` 的优先表里没有这个名字）——
+  用 `data-original` 的话，改不改 `src` 都能取到真地址，靶子就分辨不出「脚本到底改没改」。
+  于是「这一章取不到图」**直接等价于**「写操作（或它的缓存失效）没生效」。冒烟 12i 断言
+  三张图取到的是脚本写进 `src` 的真地址。
+- `test/sandboxRun.test.ts` 加一个 describe（9 条）：写操作真改 + 缓存失效 + 数组形态 +
+  `getElement` 的数组形态 + `Array.from(getElement('script'))` 不再按字符摊开 + 取不到给 null。
 
 ---
 

@@ -6808,14 +6808,118 @@ parse(整页).select('a') + 逐个读 attr/text(String) → 4 次，5 个节点�
 **六、没做：** 第 12 条（jsoup 那几个写操作仍是空操作）与第 8 条剩下的两处
 （`java.put` 写在整个列表脚本里、发现页那一趟没接 `itemVarSink`）—— 都还留在 `TODO.md` 里。
 
+### 第七十八轮：jsoup 的写操作真改了 —— 顺带把「一批节点」的形态收敛成一种
+
+这一轮做 `TODO.md` 的第 12 条与第 8 条的余量（发现页那一趟）。
+
+**一、第 12 条：从「改了等于没改」变成真改**
+
+原先 `remove()` 之外的写操作（`addClass` / `removeClass` / `append` / `prepend` / `attr(k,v)`）
+一律返回 `null`，也就是**静默无效**。当时的依据是「语料里没有一条规则依赖改完再读回来」——
+这句只对了一半：🎨笔趣漫画 的 `ruleContent.content` 整条都依赖它。
+
+```js
+imgs = java.getElements('.rd-article-wr img')
+imgs.forEach((e) => {
+    e.attr('src', e.attr('data-original'))
+})
+imgs
+```
+
+这条规则同时踩中三处，缺哪一样都是「整章取不到」，而且**都不报「写操作没生效」**：
+
+| 缺的东西                                       | 症状                                                                  |
+| ---------------------------------------------- | --------------------------------------------------------------------- |
+| `attr(k, v)` 真改                              | 静默返回旧值 —— 图还是占位图                                          |
+| 预取过的 HTML 缓存要失效                       | `String(e)` 吐的是**改之前**那份 HTML（第七十七轮刚加的那层缓存打架） |
+| `java.getElements(...)` 的返回值得能 `forEach` | `TypeError: forEach is not a function`（裸 `JsoupElements` 没有它）   |
+
+落地的东西：
+
+- 桥的 `attr` / `text` / `html` 改成**按参数个数分派**读与写（jsoup 那边就是同名重载）；
+  `addClass` / `removeClass` / `append` / `prepend` 真改；删掉纯死代码 `case 'attrSet'`
+- `__wrapElement` 的预取缓存带上 `invalidate()`：任何写操作落地就把这一格清空，
+  之后的读一律过桥。清的是**这个元素**的缓存（被 `remove()` 掉的子节点那份仍然有效）
+- **删掉「裸 `JsoupElements`」那一份包装**：`java.getElements(...)` 改成与 `select()` /
+  `Jsoup.parse()` 一样的**数组形态** —— 能下标、有 `length`、能 `forEach` / `map` /
+  `Array.from`，集合级方法挂在数组上。少一种形态、少一处漂移
+- `java.getElement(...)` 给**含一个元素的数组形态**（与 `selectFirst` 同种东西）
+
+**语料账（手上那份含发现页的导出 594 条全量扫过）**：`attr(k, v)` **只有 1 处**（🎨笔趣漫画）、
+`addClass` / `removeClass` / `append` / `prepend` / `html(串)` / `text(串)` **各 0 处**，
+`remove()` 9 处 / 6 源（第七十三轮已经是真删）。也就是说这一轮真正修到的源只有一条 ——
+但漏掉它的代价是「整章取不到」且**不报「写操作没生效」**；而那几个 0 处的实现，
+价值不在修谁，在于不再留「静默无操作」这个坑。
+
+**二、差点写错的那一版（如实记下）**
+
+删掉裸 `JsoupElements` 时，`getElement` 我第一版写成返回「单个元素包装」（盒装字符串）——
+想法是「单个元素就该是单个对象」。结果是 🎨51漫画 那条规则**静默走错分支**：
+
+```js
+Array.from(java.getElement('script')).filter((e) => String(e).includes('目录'))
+```
+
+盒装字符串是 String 对象，而 `Array.from` 见到 `length` 就按**字符**摊开 —— 于是 `scripts[0]`
+是 undefined，整条目录落到兜底那一支：**只剩一章**。不报错，只是书的内容变成一章。
+
+把它抓出来的是冒烟第 37 段 —— 那条断言是**第七十六轮刚刚改强**的（当时是为了钉住
+`Symbol.iterator`）。两轮里同一个位置两次抓到同一类「静默给错东西」，这就是那条断言值钱的地方。
+
+**三、第 8 条余量：发现页也接上落库通道**
+
+`exploreBooks` 走的 `booksFromItems` 与搜索**完全一样**，但它既没设 `itemVarSink`、
+也没设 `crossRequestInfoKeys` —— 于是「同一套写法，搜索能用、发现不能用」。补的是：
+
+- `exploreBooks` 里加 `infoVarCrossKeys: crossRequestInfoKeys(source, 'ruleExplore')`
+- 落库通道由调用方注入：`/api/explore/books` 与首页推荐位各建一个 sink
+  （`index.ts` 的 `itemVarSinkFor`，第七十六轮叫 `searchItemVarSink`，现在搜索与发现共用）；
+  `home.ts` 的 `buildHomeSections` 多了一个可选的 `makeSink` 工厂（一页并发，**一个源一个缓冲**）
+
+**实测账（这份导出里 594 条带发现页的源，`live-explore-dump.json`）**：`ruleExplore` 里写
+`java.put` 的共 4 条，其中 **3 条真的跨请求**（读端在别的组）：
+
+| 源         | put 在哪                                       | 读端           | 这一轮   |
+| ---------- | ---------------------------------------------- | -------------- | -------- |
+| 📂阿巴小说 | `ruleExplore.bookUrl` → `bid`                  | `ruleBookInfo` | **修好** |
+| 📂乐乎文章 | `ruleExplore.lastChapter` → `time`             | `ruleToc`      | **修好** |
+| 📂小米书城 | `ruleExplore.kind` → `time`                    | `ruleBookInfo` | **修好** |
+| 🏷七猫小说  | `ruleExplore.bookList` + `bookUrl` → `headers` | `ruleSearch`   | 不适用   |
+
+七猫那条的读端在**搜索**那一趟（不是取书链路），发现页写下的 `headers` 落不到搜索请求里；
+而且它的 `bookList` 是列表脚本，与下面 rezero 同一个架构问题。
+
+**顺手排除了一个「以为要做」的**：🔞Linpx 的 `java.put('key')` / `java.get('key')`
+**都在 `ruleSearch` 组里**，走会话表本来就读得到，根本不需要落库。第七十六轮把它列进
+「剩 2 条源」是**数错了** —— 按「put 写在 `bookList` 里」这个形状数的，没看读端在哪一组。
+于是第 8 条现在只剩一处：`⚡📂rezero` 把 `java.put` 写在整个列表脚本里（一次产出整页条目，
+写的时候无法归属到某一条），要修得让「列表脚本」也能按条目分段，属于架构上的改动。
+
+**四、验证**
+
+- 新靶子两条：`builtin:fixture-img-write`（+ `fixtureImgWriteChapterPage`）与
+  `builtin:fixture-explore-var`（复用现成的发现页）。
+- 图片源那条靶子的真地址**故意放在 `data-real-src`**（`mediaLinks.ts` 的优先表里没有这个名字）：
+  用真源的 `data-original` 的话，改不改 `src` 都能取到真地址，靶子就分辨不出「脚本到底改没改」。
+  换成表外的名字之后，「这一章取不到图」**直接等价于**「写操作（或它的缓存失效）没生效」。
+- 冒烟新增 12i（三张图取到的是脚本写进 `src` 的真地址，顺序还是页序）与
+  12j（每一本的详情读到的都是**它自己**那条发现结果写下的值）。
+- `test/sandboxRun.test.ts` 加一个 describe（9 条）：写操作真改 + 缓存失效 + 数组形态 +
+  `getElement` 的数组形态 + `Array.from(getElement('script'))` 不再按字符摊开 + 取不到给 null。
+- 单测 1019 → **1030**；自建那份冒烟**全绿**（沙箱预置动过，这一条必须跑）。
+
+**五、没做：** 第 8 条剩下的那一处（`⚡📂rezero` 把 put 写在列表脚本里）—— 架构性改动，
+留在 `TODO.md` 里。另外 `test/connectorJsTail.scan.test.ts` 那批扫描里还有几处「写操作」
+形状的写法，本轮没再动（第 10 条已经核实过它们与连接符无关）。
+
 ## 验证
 
 ```bash
 npm install
 npm run db:migrate   # 建本地 D1 表（首次、以及每次新增迁移后）
-npm test             # 单元测试（1019 项，Node 里秒级跑完；另有十九个默认跳过的全量扫描，见下）
+npm test             # 单元测试（1030 项，Node 里秒级跑完；另有十九个默认跳过的全量扫描，见下）
 npm run dev          # 起本地服务，浏览器打开首页即可用；另开一个终端跑下面这条
-npm run smoke        # 端到端：链路 + 书源管理（导入 / 启停 / 批量启停 / 内置源剔掉 / 空 ids 给 400）+ 正文里的 HTML 摊平（@html 取值与 @textNodes 逐字一致）+ jsoup 链式调用（`data()` / `select(...)[0]` / `remove()` 真删）+ 跨请求的会话变量（详情 `java.put` → 目录 `java.get` 拼上前缀）+ 目录脚本返回对象数组（按标记分卷 + `text`/`href`/`volume` 键）+ 脚本死循环仍然会被中断 + 静态资源 + 账号/书架/进度/书签 + 改显示名/改密码 + 导出导入备份 + 书签清单 + 替换净化同步 + 笔记 + 媒体 + 字段模板 + 选择器@js: + 空选择器取值 + 列表标记（+ / 顶格 <js>）+ 沙箱助手 + setContent/digestHex/UI 动作 + 节点级助手/加解密 + 连接式取网与 result.toArray() + 书源变量落库 + 书的上下文与书的变量 + JS 尾段列表规则保留节点 + 连接符切分 + 列表规则（末尾那个词 / CSS 首段的位置后缀 / `!` 排除下标）+ 字段规则（CSS 式多段 `@`）+ 变量指令（`@put:` / `@get:` 含**跨请求**那一半）+ `init`（铺变量与**换根**两种）+ `<js>` 段 + JSONPath 尾段（`$[*]` / `$[:n]`）+ 地址尾部的请求选项（`地址,{选项}` / 排成多行的那份选项块）+ URL 选项里 `body` 写对象（`application/json`）+ 展示用字段的容错与 `warnings` + 单斜杠 XPath（`/a/p[1]/text()` 相对当前条目）+ 防盗链封面走 `/api/media` 代取 + http 封面（混合内容）也代取 + `<script>` / `<style>` 也是元素（`java.getElement("script")` 那条路） + JSOUP 简写 `class.A B`（两个类都要有） + `source.getLoginInfoMap()` 的 Map 语义 + URL 字段 JS + 发现/首页 + cookie 罐（收 / 发 / 按源落库）+ 重定向自己跟（302 上的 `Set-Cookie` 与 `Location`）+ 目录里的 `isVip` / `isPay` / `isVolume` / `updateTime` + 登录态（跑一次 `loginUrl` → 落库 → 之后每趟请求都带上）+ 登录界面（读 `loginUi` → 渲染表单 → 界面上的按钮单独调得到）+ 沙箱里的取网跟着这次求值的预算走（列表规则里 / 搜索地址模板里，含「响应头回了、正文拖很久」那层兜底）+ 搜索 / 发现里的逐条字段走批量求值（批按 jsLib 分开，两源互不串味）+ PWA（`manifest.json` / 四张图标是真 PNG / `/sw.js` 的 JS 类型 / `/js/swPolicy.js` 可取 / head 里的 link）+ 书源列表的协商缓存（首次带 `ETag` / 同一个 `ETag` 回 304 且无正文 / 对不上的照旧回完整列表）+ 版本与更新记录（`/api/version` 带版本号 / 记录非空且最新一条与版本号一致）+ 媒体缓存（换过地址后仍命中 / 命中字节与上游一致 / 带 `Range` 不进缓存）+ 目录脚本按**属性序号**取值（`attributes()` + `Attribute.toString()`，一半条目的书名在第 3 位、一半在第 4 位）+ 搜索里 `java.put` / 详情里 `java.get`（**每一本读到的都是它自己那条写下的值**）
+npm run smoke        # 端到端：链路 + 书源管理（导入 / 启停 / 批量启停 / 内置源剔掉 / 空 ids 给 400）+ 正文里的 HTML 摊平（@html 取值与 @textNodes 逐字一致）+ jsoup 链式调用（`data()` / `select(...)[0]` / `remove()` 真删）+ 跨请求的会话变量（详情 `java.put` → 目录 `java.get` 拼上前缀）+ 目录脚本返回对象数组（按标记分卷 + `text`/`href`/`volume` 键）+ 脚本死循环仍然会被中断 + 静态资源 + 账号/书架/进度/书签 + 改显示名/改密码 + 导出导入备份 + 书签清单 + 替换净化同步 + 笔记 + 媒体 + 字段模板 + 选择器@js: + 空选择器取值 + 列表标记（+ / 顶格 <js>）+ 沙箱助手 + setContent/digestHex/UI 动作 + 节点级助手/加解密 + 连接式取网与 result.toArray() + 书源变量落库 + 书的上下文与书的变量 + JS 尾段列表规则保留节点 + 连接符切分 + 列表规则（末尾那个词 / CSS 首段的位置后缀 / `!` 排除下标）+ 字段规则（CSS 式多段 `@`）+ 变量指令（`@put:` / `@get:` 含**跨请求**那一半）+ `init`（铺变量与**换根**两种）+ `<js>` 段 + JSONPath 尾段（`$[*]` / `$[:n]`）+ 地址尾部的请求选项（`地址,{选项}` / 排成多行的那份选项块）+ URL 选项里 `body` 写对象（`application/json`）+ 展示用字段的容错与 `warnings` + 单斜杠 XPath（`/a/p[1]/text()` 相对当前条目）+ 防盗链封面走 `/api/media` 代取 + http 封面（混合内容）也代取 + `<script>` / `<style>` 也是元素（`java.getElement("script")` 那条路） + JSOUP 简写 `class.A B`（两个类都要有） + `source.getLoginInfoMap()` 的 Map 语义 + URL 字段 JS + 发现/首页 + cookie 罐（收 / 发 / 按源落库）+ 重定向自己跟（302 上的 `Set-Cookie` 与 `Location`）+ 目录里的 `isVip` / `isPay` / `isVolume` / `updateTime` + 登录态（跑一次 `loginUrl` → 落库 → 之后每趟请求都带上）+ 登录界面（读 `loginUi` → 渲染表单 → 界面上的按钮单独调得到）+ 沙箱里的取网跟着这次求值的预算走（列表规则里 / 搜索地址模板里，含「响应头回了、正文拖很久」那层兜底）+ 搜索 / 发现里的逐条字段走批量求值（批按 jsLib 分开，两源互不串味）+ PWA（`manifest.json` / 四张图标是真 PNG / `/sw.js` 的 JS 类型 / `/js/swPolicy.js` 可取 / head 里的 link）+ 书源列表的协商缓存（首次带 `ETag` / 同一个 `ETag` 回 304 且无正文 / 对不上的照旧回完整列表）+ 版本与更新记录（`/api/version` 带版本号 / 记录非空且最新一条与版本号一致）+ 媒体缓存（换过地址后仍命中 / 命中字节与上游一致 / 带 `Range` 不进缓存）+ 目录脚本按**属性序号**取值（`attributes()` + `Attribute.toString()`，一半条目的书名在第 3 位、一半在第 4 位）+ 搜索里 `java.put` / 详情里 `java.get`（**每一本读到的都是它自己那条写下的值**）+ 正文脚本把真地址**写到 `src` 上**再整批返回（`java.getElements(...).forEach(e => e.attr("src", …))` 那一条）+ 发现里 `java.put` / 详情里 `java.get`（发现那一趟也接了落库通道）
 ```
 
 同一条冒烟也用来验收**自建（Node）那份**：它只打 HTTP，所以换个地址就行。
