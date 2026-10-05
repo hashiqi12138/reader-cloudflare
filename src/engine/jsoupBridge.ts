@@ -415,12 +415,24 @@ export class JsoupBridge {
                 return this.value(re ? re.test(normalizeSpace(text)) : false)
             }
             /**
-             * 只读引擎：`remove()` / `attr(k,v)` 这类会改文档的操作**不能实现**，
-             * 因为这里的节点集是宿主侧的共享对象，改它会串到同一份文档的其它句柄上
-             * （jsoup 在 Java 里是深拷贝语义，行为对不上反而更危险）。
-             * 书源里这类调用几乎都是「顺手清理」，直接当无操作处理并说明原因。
+             * `remove()`：**真删**
+             *
+             * 以前它与下面那几个写操作一起被当成「无操作」，理由是「节点集是宿主侧共享
+             * 对象，改它会串到同一份文档的其它句柄上」。那个理由反了：jsoup 里
+             * `a.select(b).remove()` 之后再 `a.html()`，**本来就该**少那一块 ——
+             * 串过去正是书源要的效果。📂少年小说网 的目录规则就是这么写的：
+             * 先从 `<style>` 里把那些 `{display:none}` 的 `li:nth-child(...)` 读出来当选择器，
+             * 删掉它们，剩下的 `ul.row li a` 才是这一页真正的章节。
+             *
+             * 当成无操作的结果是列表里混进一堆本该被删掉的「最新章」——**不报错**，
+             * 只是顺序看着是倒的、章节数还偏多（见 README 第七十三轮）。
+             *
+             * 其余写操作仍按无操作处理：语料里它们只是「顺手清理」，
+             * 没有一条规则依赖改完之后再读回来。
              */
             case 'remove':
+                handle.$(handle.nodes).remove()
+                return this.value(null)
             case 'attrSet':
             case 'addClass':
             case 'removeClass':

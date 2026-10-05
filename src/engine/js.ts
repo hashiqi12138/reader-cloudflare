@@ -51,6 +51,7 @@ import { DEFAULT_TIME_OFFSET_HOURS, formatJavaTime } from '../lib/javatime'
 import { md5Bytes, md5Hex, runHash, sha256Hex, type HashRequest } from '../lib/hash'
 import { runSymmetric, type SymmetricRequest } from '../lib/symmetric'
 import { JsoupBridge } from './jsoupBridge'
+import { persistCrossVar } from './infoVars'
 import { unsupportedPrelude } from './platform'
 
 // WASM 模块从哪来是**构建期**的平台差异，那句 `import '*.wasm'` 挪去了
@@ -141,6 +142,16 @@ export interface SandboxSession {
      * （见 engine/globals.ts 的 bookVars）。
      */
     bookVars: Record<string, string>
+    /**
+     * 本次请求里**已经为跨请求的 `java.put` 落过库**的键（见 `collectSourceVars`）
+     *
+     * 挂在会话上而不是 `ctx` 上：`ctx` 在目录循环里每翻一页都会拷一份
+     * （`{ ...ctx, baseUrl: 新页 }`），记账挂在它上面等于「每页都重新开始算」——
+     * 逐章求值的写法于是会变成几百次 D1 写。会话是按请求活的，正合适。
+     *
+     * 不放进 `vars` 里：那张表会被整份注入沙箱的 `__sourceVars`，脚本会看见莫名的键。
+     */
+    crossVarSaved?: Set<string>
     /**
      * 上一次求值的日志（`java.toast` / `java.log` 那些）
      *
@@ -402,8 +413,28 @@ const JAVA_PRELUDE = `
 //
 // 注意：这一段是模板字符串的一部分，注释里**不能写反引号**。
 var __varsOut = {}
+var __varsDirty = {}
 var __bookVarsOut = {}
 var __bookVarsDirty = {}
+
+/**
+ * 写会话变量
+ *
+ * **必须与读同一张表**：java.put / source.setVariable(k, v) / source.put(k, v)
+ * 三条写法在语料里混着用，各写一份的话「脚本里 put 完、规则里 get(k)」就读不到。
+ *
+ * 除值本身外还记一笔 __varsDirty：宿主靠它知道**这次求值真的写过哪些键**，
+ * 好把其中属于「别的请求会读」的那些落进 book_variables（见 collectSourceVars）。
+ * 不记这一笔的话，宿主只能把整张表都当成「写过的」—— 而这张表里现在还有
+ * 从书的变量垫进来的跨请求值，那样每次目录翻页都要多写一次一模一样的库。
+ *
+ * 注意：这一段是模板字符串的一部分，注释里**不能写反引号**。
+ */
+function __varsPut(key, value) {
+  var name = String(key)
+  __varsOut[name] = value === undefined || value === null ? '' : String(value)
+  __varsDirty[name] = 1
+}
 
 /**
  * 把这一次求值的两张表装进来（第五十九轮）
@@ -416,6 +447,7 @@ function __refreshVars() {
   __varsOut = __tableOf(globalThis.__sourceVars)
   __bookVarsOut = __tableOf(globalThis.__bookVars)
   // 「这次求值写过的名字」每次都是新的：不重置的话上一章写过的会被再回传一次
+  __varsDirty = {}
   __bookVarsDirty = {}
 }
 
@@ -667,7 +699,7 @@ var java = {
   // 存变量。线上 130 处 —— 本引擎以前**根本没有这个函数**，所以每一处都是
   // TypeError: not a function（QuickJS 还说不出是哪一个）。
   put: function (key, value) {
-    __varsOut[String(key)] = value === undefined || value === null ? '' : String(value)
+    __varsPut(key, value)
   },
   // 与 java.get 两参同形：Legado 的 post 也返回 StrResponse（🏷晋江文学 用 .body()）
   post: function (url, body, headers) {
@@ -1155,7 +1187,7 @@ function __buildSource() {
   // 同理按参数个数分派：一参是 Legado 的 setVariable(整串)，两参是会话表（老写法）
   obj.setVariable = function (a, b) {
     if (arguments.length >= 2) {
-      vars[String(a)] = b === undefined || b === null ? '' : String(b)
+      __varsPut(a, b)
       return
     }
     obj.variable = a === undefined || a === null ? '' : String(a)
@@ -1955,6 +1987,18 @@ export interface SandboxLimits {
      */
     persistBookVariable?: (name: string, value: string) => void | Promise<void>
     /**
+     * 「**别的请求会读**」的会话变量键（`@get:{键}` / `java.get("键")`）
+     *
+     * 由 `globals.ts` 从 `RuleContext.infoVarCrossKeys` 转进来。JS 的
+     * `java.put("键", 值)` 平时只写本次请求的会话表（与 `@put:` 同一个取向），
+     * 只有这几个键额外落一次 `book_variables` —— 否则「详情那次 put、目录那次 get」
+     * 这种写法（📂少年小说网 的 `html`、📂传奇中文 的 `page`、📂就去看网 的 8 个键）
+     * 在目录那趟请求里读到的是空串。
+     *
+     * 不传就是不落库，行为与以前一样。见 `collectSourceVars`。
+     */
+    crossRequestInfoKeys?: ReadonlySet<string>
+    /**
      * cookie 罐（书源开着 `enabledCookieJar` 时才有，见 `BookSource.cookieJar`）
      *
      * 沙箱里 `cookie.*` 的起点是它，求值结束后改动由 `collectCookies` 收回并落库。
@@ -2466,7 +2510,7 @@ async function executeInSandbox(
     } finally {
         // 变量要在**销毁 VM 之前**收回：书源里「搜索脚本先 put、后面的规则再 get」
         // 全靠这一步跨过两次求值（见 SandboxSession.vars）
-        collectSourceVars(vm, session)
+        collectSourceVars(vm, session, limits)
         await collectSourceVariable(vm, limits)
         await collectBookVars(vm, session, limits)
         await collectCookies(vm, limits)
@@ -2490,19 +2534,44 @@ async function executeInSandbox(
  * 读取端是预置脚本里的 `globalThis.__varsOut`（一张普通对象表）。
  * 任何一步失败都只能咽掉 —— 这里发生在求值之后，结果或错误都已经定了，
  * 再抛一个「收变量失败」只会把真正的失败原因盖掉。
+ *
+ * 顺带把**跨请求的那些键**落一次库（`__varsDirty` 里记的那几个）：会话表只活这次
+ * 请求，而 `ruleBookInfo` 里 `java.put("html", …)`、`ruleToc` 里 `java.get("html")`
+ * 是两次请求 —— 只靠会话，目录那趟读到的是空串，而书源**不会报错**，
+ * 只是目录安静地少一截（📂少年小说网 少的是开头 100 章，见 README 第七十三轮）。
+ *
+ * 只落 `__varsDirty` 里记过的键，而不是整张 `__varsOut`：那张表里垫着从
+ * `book_variables` 读来的值，整张落等于每次翻页都把同样的东西重写一遍。
  */
-function collectSourceVars(vm: QuickJSAsyncContext, session: SandboxSession): void {
+function collectSourceVars(
+    vm: QuickJSAsyncContext,
+    session: SandboxSession,
+    limits: SandboxLimits,
+): void {
     try {
-        const handle = vm.evalCode('JSON.stringify(globalThis.__varsOut || {})')
+        const handle = vm.evalCode(
+            'JSON.stringify({ all: globalThis.__varsOut || {}, dirty: globalThis.__varsDirty || {} })',
+        )
         if (handle.error) {
             handle.error.dispose()
             return
         }
         const text = String(vm.dump(handle.value) ?? '')
         handle.value.dispose()
-        const parsed = JSON.parse(text) as Record<string, unknown>
-        for (const key of Object.keys(parsed)) {
-            session.vars[key] = String(parsed[key] ?? '')
+        const parsed = JSON.parse(text) as {
+            all?: Record<string, unknown>
+            dirty?: Record<string, unknown>
+        }
+        for (const key of Object.keys(parsed.all ?? {})) {
+            session.vars[key] = String(parsed.all?.[key] ?? '')
+        }
+        const keys = limits.crossRequestInfoKeys
+        const persist = limits.persistBookVariable
+        if (!keys || keys.size === 0 || !persist) return
+        const target = { keys, persist, saved: (session.crossVarSaved ??= new Set<string>()) }
+        for (const key of Object.keys(parsed.dirty ?? {})) {
+            // 值从 `all` 里取：`dirty` 只记「写过这个键」，值仍是 `__varsOut` 里那一份
+            persistCrossVar(target, key, String(parsed.all?.[key] ?? ''))
         }
     } catch {
         /* 收不回来不影响这次求值的结果 */

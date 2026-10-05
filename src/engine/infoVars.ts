@@ -65,23 +65,61 @@ export function writeInfoVar(ctx: RuleContext, key: string, value: string): void
         ;(ctx.vars ??= {})[key] = value
     }
 
-    if (value === '') return
-    if (!ctx.persistBookVariable || !ctx.infoVarCrossKeys?.has(key)) return
-    const saved = (ctx.infoVarSaved ??= new Set<string>())
-    if (saved.has(key)) return
-    saved.add(key)
-    if (ctx.bookVars?.[key] === value) return // 库里已经是这个值，不必再写一次
-    ctx.persistBookVariable(key, value)
-    ;(ctx.bookVars ??= {})[key] = value
+    if (!ctx.persistBookVariable || !ctx.infoVarCrossKeys) return
+    persistCrossVar(
+        {
+            keys: ctx.infoVarCrossKeys,
+            persist: ctx.persistBookVariable,
+            saved: (ctx.infoVarSaved ??= new Set<string>()),
+            known: (ctx.bookVars ??= {}),
+        },
+        key,
+        value,
+    )
 }
 
 /**
- * 这个源里「**别的组**会读的变量键」
+ * 跨请求变量落库（`@put:` 与 JS 的 `java.put` 共用这一段）
+ *
+ * 两条路各写一遍的话，「落哪些键、什么时候不再落、库里已经是这个值就不写」这三条
+ * 迟早会在其中一条上漂移 —— 而漂移的表现是**多写几次 D1**或**少写一次**，
+ * 都不报错，只看得出「有的源偶尔读不到变量」。
+ */
+export function persistCrossVar(target: CrossVarTarget, key: string, value: string): void {
+    if (value === '') return
+    if (!target.keys.has(key)) return
+    if (target.saved.has(key)) return
+    target.saved.add(key)
+    if (target.known?.[key] === value) return // 库里已经是这个值，不必再写一次
+    target.persist(key, value)
+    if (target.known) target.known[key] = value
+}
+
+/** `persistCrossVar` 需要的四样（见上面的说明） */
+export interface CrossVarTarget {
+    /** 「别的组会读」的那些键 */
+    keys: ReadonlySet<string>
+    /** 落库路径（`book_variables`） */
+    persist: (name: string, value: string) => void | Promise<void>
+    /** 本次请求已经落过的键 */
+    saved: Set<string>
+    /** 库里的值：一样就不写。不传就是不比较 */
+    known?: Record<string, string>
+}
+
+/**
+ * 跨请求的键 = **别的组**里被读的键
  *
  * 引擎一次请求只跑一组规则（搜索 → ruleSearch、详情 → ruleBookInfo、目录 → ruleToc、
  * 正文 → ruleContent），所以「读的组 ≠ 当前组」就是**真的跨请求** —— 这类键才需要落库。
- * 线上 12 处跨请求里，8 处是这一路（`ruleBookInfo` 写 `bid`、`ruleToc.chapterUrl` 读），
- * 另有 4 处写在 `ruleSearch` 里（逐条写同一个键、有损），不做。
+ *
+ * 读端**两种写法都算**，因为语料上它们是同一件事的两副面孔：
+ *   - `@get:{键}`（规则文本里的 infoMap 写法）
+ *   - `java.get("键")`（脚本里的写法，一参、字符串字面量）
+ *
+ * 第二条是第七十三轮补的：816 条源里跨组 put→get 共 51 处，其中 **28 处两端都是
+ * `java.put` / `java.get`**、另有 7 处只在一端 —— 老实现只认 `@get:{…}`，
+ * 于是这 35 处全断（📂少年小说网 的目录因此少了开头 100 章，见 README 第七十三轮）。
  *
  * 传入的 `current` 是这次请求跑的组名；只扫**别的组**的规则文本，代价是几次正则。
  */
@@ -95,9 +133,28 @@ export function crossRequestInfoKeys(source: BookSource, current: string): Set<s
         for (const value of Object.values(block)) {
             if (typeof value !== 'string' || value === '') continue
             for (const hit of findGetDirectives(value)) keys.add(hit.key)
+            for (const key of findJsGetKeys(value)) if (key !== '') keys.add(key)
         }
     }
     return keys
+}
+
+/**
+ * `java.get("键")`：**一个**字符串字面量参数
+ *
+ * 只认「右括号紧跟在字符串后面」这一种形状 —— 两参的 `java.get(url, headers)` 是
+ * **取网**（同名重载，见 `js.ts` 的 `java.get`），把它的第一个参数当变量名收进来的话，
+ * 跨请求键集合里会混进一堆 URL，每个都白写一次库。
+ */
+const JS_GET_KEY = /\bjava\s*\.\s*get\s*\(\s*(["'])([^"'\\]*)\1\s*\)/g
+
+/** 找出规则里所有 `java.get("键")` 的键（给跨请求键集合用） */
+export function findJsGetKeys(rule: string): string[] {
+    const out: string[] = []
+    const re = new RegExp(JS_GET_KEY.source, 'g')
+    let m: RegExpExecArray | null
+    while ((m = re.exec(rule)) !== null) out.push(m[2] ?? '')
+    return out
 }
 
 /** `@put:{` 的位置（大小写不敏感）；找不到返回 -1 */

@@ -107,10 +107,11 @@ export interface RuleContext {
     vars?: Record<string, string>
 
     /**
-     * 这次请求里**要落库**的变量键（`@put:` 写、**别的请求**的 `@get:` 读的那些）
+     * 这次请求里**要落库**的变量键（写端 `@put:` / `java.put`、**别的请求**会读的那些）
      *
      * 会话变量只活一次请求，而搜索 / 详情 / 目录 / 正文是四次 —— `ruleBookInfo` 里
-     * `@put:{bid:…}`、`ruleToc.chapterUrl` 里 `@get:{bid}` 这种写法（线上 8 处）就断了。
+     * `java.put("html", …)`、`ruleToc.chapterList` 里 `java.get("html")` 这种写法
+     * （816 条源里跨组 put→get 共 51 处）就断了。
      * 由调用方按源算好放进来（见 `infoVars.ts` 的 `crossRequestInfoKeys`），
      * **只落这几个键**：全量落会把目录那种逐章求值的写法变成几百次 D1 写。
      */

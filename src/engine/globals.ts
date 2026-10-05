@@ -86,7 +86,19 @@ export function sourcePayload(source: BookSource | undefined): Record<string, un
 
 /** 沙箱里与书源有关的全局变量 */
 export function sourceGlobals(ctx: RuleContext): Record<string, unknown> {
-    const variables = { ...sessionVars(ctx), ...(ctx.vars ?? {}) }
+    /**
+     * 会话变量表的起点：**书的变量垫在最底下**，会话表盖中间，`ctx.vars` 盖最上
+     *
+     * 顺序与 `infoVars.readInfoVar` 的三级完全一致（`ctx.vars` > 会话 > 书的变量），
+     * 两处不一致的话 `java.get(k)` 与 `@get:{k}` 会读到不同的值。
+     *
+     * 为什么要把书的变量垫进来：脚本里的 `java.get("键")` 与规则文本里的 `@get:{键}`
+     * 读的是**同一张表**（见 `SandboxSession.vars` 的说明），既然 `@get:` 那条路会
+     * 退到 `book_variables`，`java.get` 也必须退得到 —— 否则 `ruleBookInfo` 里
+     * `java.put("html", …)`、`ruleToc` 里 `java.get("html")` 这种跨请求写法
+     * 在目录那趟读到空串（📂少年小说网 因此少了开头 100 章，见 README 第七十三轮）。
+     */
+    const variables = { ...bookVars(ctx), ...sessionVars(ctx), ...(ctx.vars ?? {}) }
     return {
         __source: sourcePayload(ctx.source),
         __sourceVars: JSON.stringify(variables),
@@ -187,6 +199,8 @@ export function sourceLimits(ctx: RuleContext): SandboxLimits {
         ...(ctx.sandbox ? { session: ctx.sandbox as SandboxSession } : {}),
         ...(ctx.persistSourceVariable ? { persistSourceVariable: ctx.persistSourceVariable } : {}),
         ...(ctx.persistBookVariable ? { persistBookVariable: ctx.persistBookVariable } : {}),
+        // 跨请求的会话变量键：JS 的 `java.put` 只对这几个额外落一次库（见 collectSourceVars）
+        ...(ctx.infoVarCrossKeys ? { crossRequestInfoKeys: ctx.infoVarCrossKeys } : {}),
         // cookie 罐：书源没开 enabledCookieJar 时它压根不存在，沙箱那侧就退回老行为
         ...(ctx.source?.cookieJar ? { cookieJar: ctx.source.cookieJar } : {}),
         ...(ctx.source?.persistCookies ? { persistCookies: ctx.source.persistCookies } : {}),
