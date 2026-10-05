@@ -25,6 +25,11 @@ export interface ReleaseNote {
 
 export const CHANGELOG: ReleaseNote[] = [
     {
+        version: '0.59.0',
+        date: '2026-10-05',
+        note: '正文里的 HTML 摊平成纯文本：`<br>` 与段落标签变成真正的换行，标签不再当字面文字显示（一半以上的书源用 @html 取值）；顺带不再把正文 div 里挂着的 <script> 读进来',
+    },
+    {
         version: '0.58.0',
         date: '2026-10-05',
         note: '书源可以按分组浏览与筛选（名字 / 分组 / 状态 / 能力），还能一次改一批的启用状态；选择书源的地方也都能按分组找；顺带修好了「启用 / 停用」开关（它一直点不动）',
