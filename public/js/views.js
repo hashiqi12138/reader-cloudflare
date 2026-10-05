@@ -22,6 +22,7 @@ import {
     login as doLogin,
     logout,
     paramsOf,
+    patchJson,
     postJson,
     prefs,
     register as doRegister,
@@ -38,11 +39,29 @@ import {
     SEARCH_MIN_PAGE,
     SEARCH_PAGE_SIZE,
     isCpuLimitError,
-    matchSources,
     nextPageSize,
     normalizeSelection,
     searchableSources,
 } from './searchPlan.js'
+import {
+    ABILITY_ALL,
+    ABILITY_EXPLORE,
+    ABILITY_LOGIN,
+    ABILITY_SEARCH,
+    DEFAULT_FILTER,
+    GROUP_ALL,
+    STATUS_ALL,
+    STATUS_OFF,
+    STATUS_ON,
+    filterSources,
+    groupLabel,
+    groupOptions,
+    groupSources,
+    isFiltering,
+    mutableIds,
+    splitGroups,
+    tally,
+} from './sourceFilter.js'
 import { createSourcesCache } from './sourcesCache.js'
 
 /**
@@ -928,6 +947,9 @@ const EXPLORE_PICK_KEY = 'explore.pick'
  * 滚动条被 `scrollbar-width: none` 藏掉了，鼠标滚轮也不会把竖向滚动翻译成横向，
  * 于是「书源列表滚不动」。这里换成一个可搜索的下拉 —— 点开是固定高度的列表，
  * 竖向滚动 + 关键字过滤，几百条也能几秒内找到。
+ *
+ * 这一轮又加了一层**分组**：按名字搜的前提是记得住名字，而「我记得是那本漫画的源」
+ * 这种话只能靠分组答上来。分组下拉与「书源」页用的是同一个（`groupSelect`）。
  */
 function sourcePicker(sources, activeSource, onPick) {
     const label = el('span', { class: 'picker-value', text: activeSource.name })
@@ -945,52 +967,51 @@ function sourcePicker(sources, activeSource, onPick) {
         [label, el('span', { class: 'picker-caret', text: '▾' })],
     )
 
+    const state = { keyword: '', group: GROUP_ALL }
     const search = el('input', {
         type: 'search',
         class: 'picker-search',
         placeholder: `在 ${sources.length} 个书源里搜索…`,
-        oninput: () => renderList(search.value),
+        oninput: () => {
+            state.keyword = search.value
+            renderList()
+        },
         onkeydown: (event) => {
             if (event.key === 'Escape') close()
         },
     })
+    const groupSelectNode = groupSelect(sources, state.group, (value) => {
+        state.group = value
+        renderList()
+    })
 
     const list = el('div', { class: 'picker-list', role: 'listbox' })
-    const panel = el('div', { class: 'picker-panel', hidden: true }, [search, list])
+    const panel = el('div', { class: 'picker-panel', hidden: true }, [
+        search,
+        groupSelectNode,
+        list,
+    ])
     const wrap = el('div', { class: 'picker' }, [button, panel])
 
-    function renderList(keyword = '') {
-        const needle = keyword.trim().toLowerCase()
-        const matched = needle
-            ? sources.filter(
-                  (s) =>
-                      s.name.toLowerCase().includes(needle) ||
-                      (s.group ?? '').toLowerCase().includes(needle),
-              )
-            : sources
-        if (matched.length === 0) {
-            list.replaceChildren(el('p', { class: 'muted tiny center', text: '没有匹配的书源' }))
-            return
-        }
-        list.replaceChildren(
-            ...matched.map((source) =>
-                el(
-                    'button',
-                    {
-                        class: `picker-item ${source.id === activeSource.id ? 'active' : ''}`,
-                        type: 'button',
-                        onclick: () => {
-                            close()
-                            onPick(source)
-                        },
+    function renderList() {
+        fillPickerList(list, sources, state, (source) =>
+            el(
+                'button',
+                {
+                    class: `picker-item ${source.id === activeSource.id ? 'active' : ''}`,
+                    type: 'button',
+                    onclick: () => {
+                        close()
+                        onPick(source)
                     },
-                    [
-                        el('span', { class: 'picker-item-name', text: source.name }),
-                        source.group
-                            ? el('span', { class: 'badge ghost', text: source.group })
-                            : null,
-                    ],
-                ),
+                },
+                [
+                    el('span', { class: 'picker-item-name', text: source.name }),
+                    // 第一个标签已经在分组头里写着，这里只补其余的（见 `sourceRowNode`）
+                    ...splitGroups(source.group)
+                        .slice(1)
+                        .map((name) => el('span', { class: 'badge ghost', text: name })),
+                ],
             ),
         )
     }
@@ -998,7 +1019,7 @@ function sourcePicker(sources, activeSource, onPick) {
     function open() {
         panel.hidden = false
         button.classList.add('open')
-        renderList(search.value)
+        renderList()
         requestAnimationFrame(() => search.focus())
     }
     function close() {
@@ -1021,6 +1042,35 @@ function sourcePicker(sources, activeSource, onPick) {
     document.addEventListener('click', onDocClick)
 
     return wrap
+}
+
+/**
+ * 把书源清单画进一个选择面板：**分组头 + 条目**
+ *
+ * 发现页那个下拉与搜索页的「搜索范围」共用这里 —— 两处的清单形状一样，
+ * 差的只是条目本身：一个是单选的按钮，一个是多选的勾选框。所以 `renderItem`
+ * 由调用方给。
+ *
+ * 分组头用普通 `<div>` 而不是 `<details>`：面板本身就是个定高的滚动浮层，
+ * 再嵌一层折叠只会让人多点一次，而展开的那一列本来就不长。
+ */
+function fillPickerList(host, sources, options, renderItem) {
+    const groups = groupSources(sources, options)
+    if (groups.length === 0) {
+        host.replaceChildren(el('p', { class: 'muted tiny', text: '没有匹配的书源' }))
+        return
+    }
+    const nodes = []
+    for (const group of groups) {
+        nodes.push(
+            el('div', { class: 'picker-group-head' }, [
+                el('span', { class: 'picker-group-name', text: groupLabel(group.name) }),
+                el('span', { class: 'muted tiny', text: `${group.items.length} 条` }),
+            ]),
+        )
+        for (const one of group.items) nodes.push(renderItem(one))
+    }
+    host.replaceChildren(...nodes)
 }
 
 /** 把发现页的失败按原因归类，给一句能落地的下一步，而不是只回显原始错误 */
@@ -1387,6 +1437,9 @@ export async function viewSearch(host) {
      *
      * 面板里改的是**草稿**，点「完成」才生效 —— 勾一个就重搜一次，既费额度，
      * 也让「勾了三个源结果搜了三遍」这种事发生。
+     *
+     * 候选有 800 多个，所以除了关键词还给了**分组**与「全选筛选结果」：
+     * 「只搜快速书源这一组」是一句话的事，而不点这个按钮就得手动勾 227 下。
      */
     function paintPicker() {
         // 复用「换源」那套 `.picker-*` 样式（见 style.css）：书源清单的形状完全一样
@@ -1394,6 +1447,12 @@ export async function viewSearch(host) {
             class: 'picker-search',
             type: 'search',
             placeholder: '按名字或分组筛',
+            oninput: () => paintList(),
+        })
+        const state = { keyword: '', group: GROUP_ALL }
+        const groupSelectNode = groupSelect(pickable, state.group, (value) => {
+            state.group = value
+            paintList()
         })
         const listHost = el('div', { class: 'picker-list' })
         const foot = el('div', { class: 'row picker-foot' })
@@ -1401,12 +1460,26 @@ export async function viewSearch(host) {
         let matched = []
 
         function paintFoot() {
-            foot.replaceChildren(
+            setChildren(foot, [
                 el('span', { class: 'muted tiny', text: `已选 ${draft.length} 个` }),
                 el('div', { class: 'spacer' }),
                 el('button', {
                     class: 'btn sm ghost',
+                    text: `全选这 ${matched.length} 个`,
+                    title: '把当前筛出来的书源全勾上',
+                    hidden: matched.length === 0,
+                    onclick: () => {
+                        for (const one of matched) {
+                            const id = String(one.id)
+                            if (!draft.includes(id)) draft.push(id)
+                        }
+                        paintList()
+                    },
+                }),
+                el('button', {
+                    class: 'btn sm ghost',
                     text: '清空',
+                    hidden: draft.length === 0,
                     onclick: () => {
                         draft = []
                         paintList()
@@ -1421,47 +1494,46 @@ export async function viewSearch(host) {
                         applySelection(draft)
                     },
                 }),
-            )
+            ])
         }
 
         function paintList() {
-            matched = matchSources(pickable, filter.value)
-            listHost.replaceChildren(
-                ...(matched.length === 0
-                    ? [el('p', { class: 'muted tiny', text: '没有匹配的书源。' })]
-                    : matched.map((one) =>
-                          el('label', { class: 'picker-item' }, [
-                              el('input', {
-                                  type: 'checkbox',
-                                  checked: draft.includes(String(one.id)),
-                                  onchange: (event) => {
-                                      const id = String(one.id)
-                                      if (event.target.checked) {
-                                          if (!draft.includes(id)) draft.push(id)
-                                      } else {
-                                          draft = draft.filter((one) => one !== id)
-                                      }
-                                      paintFoot()
-                                  },
-                              }),
-                              el('span', { class: 'picker-item-name', text: one.name }),
-                              one.group
-                                  ? el('span', { class: 'badge ghost', text: one.group })
-                                  : null,
-                          ]),
-                      )),
+            state.keyword = filter.value
+            matched = filterSources(pickable, state)
+            fillPickerList(listHost, pickable, state, (one) =>
+                el('label', { class: 'picker-item' }, [
+                    el('input', {
+                        type: 'checkbox',
+                        checked: draft.includes(String(one.id)),
+                        onchange: (event) => {
+                            const id = String(one.id)
+                            if (event.target.checked) {
+                                if (!draft.includes(id)) draft.push(id)
+                            } else {
+                                draft = draft.filter((item) => item !== id)
+                            }
+                            paintFoot()
+                        },
+                    }),
+                    el('span', { class: 'picker-item-name', text: one.name }),
+                    // 第一个标签已经在分组头里写着，这里只补其余的（见 `sourceRowNode`）
+                    ...splitGroups(one.group)
+                        .slice(1)
+                        .map((name) => el('span', { class: 'badge ghost', text: name })),
+                ]),
             )
             paintFoot()
         }
 
-        filter.addEventListener('input', paintList)
-        pickerHost.replaceChildren(
-            ...(sourcesError !== ''
-                ? [alertBox('warn', '读不到书源清单，只能搜全部', sourcesError)]
-                : pickable.length === 0
-                  ? [el('p', { class: 'muted tiny', text: '没有可搜的书源。' })]
-                  : [filter, listHost, foot]),
-        )
+        if (sourcesError !== '') {
+            setChildren(pickerHost, [alertBox('warn', '读不到书源清单，只能搜全部', sourcesError)])
+            return
+        }
+        if (pickable.length === 0) {
+            setChildren(pickerHost, [el('p', { class: 'muted tiny', text: '没有可搜的书源。' })])
+            return
+        }
+        setChildren(pickerHost, [filter, groupSelectNode, listHost, foot])
         paintList()
     }
 
@@ -1752,6 +1824,15 @@ export async function viewSearch(host) {
 
 // ---------------------------------------------------------------- 书源管理
 
+/**
+ * 一次铺开多少行之内就把分组都展开
+ *
+ * 线上那份语料是 816 条。全展开意味着一次性建八千多个节点，手机上要等几秒才出得来，
+ * 而多数时候用户只想看某一组。超过这个数就先把分组收起来，界面上一开始只有十几个
+ * 分组头（各自带着条数），点哪组展开哪组 —— 行是**点开那一刻才建**的。
+ */
+const SOURCE_EXPAND_LIMIT = 120
+
 export async function viewSources(host) {
     host.replaceChildren(el('h1', { class: 'page-title', text: '书源' }), skeletonList(3))
 
@@ -1766,108 +1847,387 @@ export async function viewSources(host) {
         return
     }
 
-    const sources = data.sources ?? []
-    const importBox = renderImport(host)
-    const list = el('div', { class: 'source-list' })
+    let sources = data.sources ?? []
+    let counts = tally(sources)
 
-    for (const source of sources) {
-        const panel = el('div', { class: 'login-slot', hidden: true })
-        let panelOpen = false
-        // 「现在是不是已登录」—— 面板里按完按钮会就地更新它，不必整页重渲染
-        //（用户常常要连着按两三个：先「获取验证码」，再「登录」）
-        const stateBadge = source.hasLogin
-            ? el('span', {
-                  class: `badge ${source.loggedIn ? 'ok' : 'ghost'}`,
-                  text: source.loggedIn ? '已登录' : '未登录',
-              })
-            : null
-        const row = el('article', { class: 'source-row' }, [
-            el('div', { class: 'source-main' }, [
-                el('h3', { class: 'source-name', text: source.name }),
-                el('p', { class: 'source-meta' }, [
-                    el('span', { class: 'badge', text: typeLabel(source.type) }),
-                    source.group ? el('span', { class: 'badge ghost', text: source.group }) : null,
-                    source.hasSearch ? el('span', { class: 'badge ok', text: '可搜索' }) : null,
-                    source.hasExplore ? el('span', { class: 'badge ok', text: '可发现' }) : null,
-                    stateBadge,
-                    source.builtin ? el('span', { class: 'badge ghost', text: '内置' }) : null,
-                ]),
-            ]),
-            el('div', { class: 'source-actions' }, [
-                source.hasLogin
-                    ? el('button', {
-                          class: 'btn sm ghost',
-                          text: '登录',
-                          onclick: () => {
-                              panelOpen = !panelOpen
-                              panel.hidden = !panelOpen
-                              // 只在第一次展开时读一次界面：每次点都重读会把已经填好的
-                              // 账号密码清掉
-                              if (panelOpen && panel.childElementCount === 0) {
-                                  void renderLoginPanel(panel, source, stateBadge)
-                              }
-                          },
-                      })
-                    : null,
-                el('label', { class: 'switch', title: source.enabled ? '点击停用' : '点击启用' }, [
-                    el('input', {
-                        type: 'checkbox',
-                        checked: source.enabled,
-                        onchange: async (event) => {
-                            const enabled = event.target.checked
-                            try {
-                                await postJson('/api/sources', { id: source.id, enabled })
-                                invalidateSources()
-                                toast(enabled ? `已启用：${source.name}` : `已停用：${source.name}`)
-                            } catch (err) {
-                                event.target.checked = !enabled
-                                toast(`操作失败：${err.message}`, 'error')
-                            }
-                        },
-                    }),
-                    el('span', { class: 'switch-track' }),
-                ]),
-                source.builtin
-                    ? null
-                    : el('button', {
-                          class: 'btn sm danger ghost',
-                          text: '删除',
-                          onclick: async (event) => {
-                              if (!confirm(`删除书源「${source.name}」？`)) return
-                              event.target.disabled = true
-                              try {
-                                  await api(`/api/sources?id=${encodeURIComponent(source.id)}`, {
-                                      method: 'DELETE',
-                                  })
-                                  invalidateSources()
-                                  toast(`已删除：${source.name}`)
-                                  await viewSources(host)
-                              } catch (err) {
-                                  toast(`删除失败：${err.message}`, 'error')
-                                  event.target.disabled = false
-                              }
-                          },
-                      }),
-            ]),
-        ])
-        list.append(el('div', { class: 'source-item' }, [row, panel]))
+    /** 筛选条件就地改，改完只重画列表 —— 整页重来会把刚敲进搜索框的字一起清掉 */
+    const state = { ...DEFAULT_FILTER }
+
+    const listHost = el('div', { class: 'source-groups' })
+    const tallyHost = el('p', { class: 'muted tiny source-tally' })
+    const bulkHost = el('div', { class: 'row tight source-bulk' })
+    const controlsHost = el('div', { class: 'source-controls' })
+    const toolbar = el('div', { class: 'card source-toolbar' }, [controlsHost, tallyHost, bulkHost])
+
+    // 由 `paintControls()` 填，`paint()` 读 —— 书源清单变了（导入 / 删除）要一起重建：
+    // 分组下拉的选项与各档上的条数都跟着变
+    let statusChips = null
+    let abilityChips = null
+    let groupSelectNode = null
+    let resetButton = null
+
+    /**
+     * 重新取一份书源清单，并在**原地**重画
+     *
+     * 为什么不整页重来：导入卡片里刚显示的「新增 N 条，更新 M 条」会被重渲染直接冲掉 ——
+     * 用户什么都看不到（这是原先的实情）。只重画列表与控制条，报告就留得下来。
+     */
+    async function refetch() {
+        invalidateSources()
+        try {
+            sources = (await loadSources()).sources ?? []
+        } catch {
+            /* 读不到就沿用手里这份：界面不至于空掉，下次操作还会再试一次 */
+        }
+        counts = tally(sources)
+        paintControls()
+        paint()
     }
 
-    host.replaceChildren(
-        el('div', { class: 'page-head' }, [
-            el('div', {}, [
-                el('h1', { class: 'page-title', text: '书源' }),
-                el('p', {
-                    class: 'muted',
-                    text: `${sources.length} 条 · 书源是全局的，所有人共用`,
-                }),
+    /** 筛选控件（随清单一起重建，理由见 `refetch`） */
+    function paintControls() {
+        const keywordBox = el('input', {
+            type: 'search',
+            class: 'source-search',
+            placeholder: '按名字或分组筛',
+            value: state.keyword,
+            oninput: (event) => {
+                state.keyword = event.target.value
+                paint()
+            },
+        })
+        groupSelectNode = groupSelect(sources, state.group, (value) => {
+            state.group = value
+            paint()
+        })
+        statusChips = chipRow(
+            [
+                [STATUS_ALL, `全部 ${counts.total}`],
+                [STATUS_ON, `已启用 ${counts.on}`],
+                [STATUS_OFF, `已停用 ${counts.off}`],
+            ],
+            (value) => {
+                state.status = value
+                paint()
+            },
+        )
+        abilityChips = chipRow(
+            [
+                [ABILITY_ALL, '不限能力'],
+                [ABILITY_SEARCH, `可搜索 ${counts.search}`],
+                [ABILITY_EXPLORE, `可发现 ${counts.explore}`],
+                [ABILITY_LOGIN, `可登录 ${counts.login}`],
+            ],
+            (value) => {
+                state.ability = value
+                paint()
+            },
+        )
+        resetButton = el('button', {
+            class: 'btn sm ghost',
+            text: '清空筛选',
+            onclick: () => {
+                Object.assign(state, DEFAULT_FILTER)
+                keywordBox.value = ''
+                paint()
+            },
+        })
+
+        setChildren(controlsHost, [
+            el('div', { class: 'row source-filter-main' }, [
+                keywordBox,
+                groupSelectNode,
+                resetButton,
+            ]),
+            el('div', { class: 'row tight source-filter-sub' }, [
+                statusChips.node,
+                abilityChips.node,
+            ]),
+        ])
+    }
+
+    function paint() {
+        const matched = filterSources(sources, state)
+        const filtering = isFiltering(state)
+
+        tallyHost.textContent = filtering
+            ? `筛出 ${matched.length} 条 / 共 ${sources.length} 条`
+            : `${sources.length} 条 · 已启用 ${counts.on} · 可搜索 ${counts.search} · 书源是全局的，所有人共用`
+
+        statusChips.sync(state.status)
+        abilityChips.sync(state.ability)
+        groupSelectNode.value = state.group
+        resetButton.hidden = !filtering
+        toolbar.hidden = sources.length === 0
+
+        setChildren(
+            listHost,
+            matched.length === 0
+                ? [
+                      emptyState(
+                          filtering ? '没有匹配的书源' : '还没有书源',
+                          filtering
+                              ? '换个关键词，或者把筛选条件清掉。'
+                              : '导入一份 Legado 书源 JSON 就能开始用。',
+                      ),
+                  ]
+                : groupSources(sources, state).map((group) =>
+                      sourceGroupNode(group, matched.length <= SOURCE_EXPAND_LIMIT, refetch),
+                  ),
+        )
+        setChildren(bulkHost, bulkBar(matched, refetch))
+    }
+
+    paintControls()
+    setChildren(host, [
+        el('h1', { class: 'page-title', text: '书源' }),
+        renderImport(refetch),
+        toolbar,
+        listHost,
+    ])
+    paint()
+}
+
+/**
+ * 分组下拉
+ *
+ * 用 `<select>` 而不是一排 chips：分组有十几个（线上语料 16 个 + 未分组），
+ * 铺成 chips 就是一面药丸墙，还会把下面的列表顶下去一大截。
+ *
+ * 条数拿**未筛选**的那份算（`groupOptions` 的注释里有理由）。
+ */
+function groupSelect(sources, value, onChange) {
+    const options = groupOptions(sources)
+    const select = el(
+        'select',
+        {
+            class: 'group-select',
+            title: '按分组筛',
+            onchange: (event) => onChange(event.target.value),
+        },
+        [
+            el('option', { value: GROUP_ALL, text: `全部分组 ${sources.length}` }),
+            ...options.map(({ name, count }) =>
+                el('option', { value: name, text: `${groupLabel(name)} ${count}` }),
+            ),
+        ],
+    )
+    // 选中的那一组可能已经不在清单里了（比如书源被删光了）：落回「全部分组」，
+    // 否则 `<select>` 会停在一个不存在的选项上，`value` 变成空串
+    const known = new Set(options.map((one) => one.name))
+    select.value = value === GROUP_ALL || known.has(value) ? value : GROUP_ALL
+    return select
+}
+
+/**
+ * 一排档位按钮（「全部 / 已启用 / 已停用」这种）
+ *
+ * 就地改 `active` 而不是重建节点：这一排挂在筛选条上，重建会把键盘焦点和 hover
+ * 一起丢掉 —— 输入框那侧更明显，每敲一个字就重来一次。
+ */
+function chipRow(items, onPick) {
+    const buttons = new Map()
+    const row = el('div', { class: 'row tight chip-row' })
+    for (const [value, label] of items) {
+        const button = el('button', {
+            class: 'chip',
+            type: 'button',
+            text: label,
+            onclick: () => onPick(value),
+        })
+        buttons.set(value, button)
+        row.append(button)
+    }
+    const sync = (current) => {
+        for (const [value, button] of buttons) {
+            const active = value === current
+            button.classList.toggle('active', active)
+            button.setAttribute('aria-pressed', active ? 'true' : 'false')
+        }
+    }
+    return { node: row, sync }
+}
+
+/**
+ * 一个分组：分组头 + 这一组的行
+ *
+ * 行**点开才建**（`fill`）。收起的分组一个节点都不建 —— 816 条全铺开是八千多个节点，
+ * 而用户多数时候只看其中一组。
+ */
+function sourceGroupNode({ name, items }, open, reload) {
+    const body = el('div', { class: 'source-list' })
+    const details = el('details', { class: 'source-group', open }, [
+        el('summary', { class: 'source-group-head' }, [
+            el('span', { class: 'source-group-name', text: groupLabel(name) }),
+            el('span', { class: 'badge ghost', text: `${items.length} 条` }),
+        ]),
+        body,
+    ])
+
+    const fill = () => {
+        if (body.childElementCount > 0) return
+        for (const source of items) body.append(sourceRowNode(source, reload))
+    }
+    if (open) fill()
+    details.addEventListener('toggle', () => {
+        if (details.open) fill()
+    })
+    return details
+}
+
+/**
+ * 一行书源 + 它下面的登录面板
+ *
+ * 行上的分组徽章**只显示第一个标签之外的**：第一个标签已经在分组头里写着
+ * （见上方分组渲染），每行再重复一遍就是一片噪音。多值字段的其余标签照样显示，
+ * 信息没丢。筛选时所有标签都参与匹配，那件事在 `sourceFilter.js` 里。
+ */
+function sourceRowNode(source, reload) {
+    const panel = el('div', { class: 'login-slot', hidden: true })
+    let panelOpen = false
+    // 「现在是不是已登录」—— 面板里按完按钮会就地更新它，不必整页重渲染
+    //（用户常常要连着按两三个：先「获取验证码」，再「登录」）
+    const stateBadge = source.hasLogin
+        ? el('span', {
+              class: `badge ${source.loggedIn ? 'ok' : 'ghost'}`,
+              text: source.loggedIn ? '已登录' : '未登录',
+          })
+        : null
+    const extraGroups = splitGroups(source.group).slice(1)
+
+    const row = el('article', { class: 'source-row' }, [
+        el('div', { class: 'source-main' }, [
+            el('h3', { class: 'source-name', text: source.name }),
+            el('p', { class: 'source-meta' }, [
+                el('span', { class: 'badge', text: typeLabel(source.type) }),
+                ...extraGroups.map((name) => el('span', { class: 'badge ghost', text: name })),
+                source.hasSearch ? el('span', { class: 'badge ok', text: '可搜索' }) : null,
+                source.hasExplore ? el('span', { class: 'badge ok', text: '可发现' }) : null,
+                stateBadge,
+                source.builtin ? el('span', { class: 'badge ghost', text: '内置' }) : null,
             ]),
         ]),
-        importBox,
-        sources.length === 0
-            ? emptyState('还没有书源', '导入一份 Legado 书源 JSON 就能开始用。')
-            : list,
-    )
+        el('div', { class: 'source-actions' }, [
+            source.hasLogin
+                ? el('button', {
+                      class: 'btn sm ghost',
+                      text: '登录',
+                      onclick: () => {
+                          panelOpen = !panelOpen
+                          panel.hidden = !panelOpen
+                          // 只在第一次展开时读一次界面：每次点都重读会把已经填好的
+                          // 账号密码清掉
+                          if (panelOpen && panel.childElementCount === 0) {
+                              void renderLoginPanel(panel, source, stateBadge)
+                          }
+                      },
+                  })
+                : null,
+            /**
+             * 开关只在**能改的**源上出现
+             *
+             * 内置测试源是只读的（代码的一部分，库里没有对应行，服务端 `assertUserSource`
+             * 会拒），原先也给它画了个开关 —— 点下去只会弹一句「内置书源不能修改」。
+             * 画一个必然失败的控件比不画更糟。
+             */
+            source.builtin
+                ? null
+                : el(
+                      'label',
+                      { class: 'switch', title: source.enabled ? '点击停用' : '点击启用' },
+                      [
+                          el('input', {
+                              type: 'checkbox',
+                              checked: source.enabled,
+                              onchange: async (event) => {
+                                  const enabled = event.target.checked
+                                  try {
+                                      /**
+                                       * 必须走 **PATCH**
+                                       *
+                                       * `POST /api/sources` 是**导入**那条路由（请求体是书源 JSON），
+                                       * 拿 `{ id, enabled }` 打过去只会得到一句「导入内容必须是书源数组」。
+                                       * 这个开关早先就是这么坏的 —— 看着能点，一点就报一个莫名其妙的错，
+                                       * 于是「书源怎么不能停用」成了一个查不出来的现象。
+                                       */
+                                      await patchJson('/api/sources', { id: source.id, enabled })
+                                      invalidateSources()
+                                      toast(
+                                          enabled
+                                              ? `已启用：${source.name}`
+                                              : `已停用：${source.name}`,
+                                      )
+                                      await reload()
+                                  } catch (err) {
+                                      event.target.checked = !enabled
+                                      toast(`操作失败：${err.message}`, 'error')
+                                  }
+                              },
+                          }),
+                          el('span', { class: 'switch-track' }),
+                      ],
+                  ),
+            source.builtin
+                ? null
+                : el('button', {
+                      class: 'btn sm danger ghost',
+                      text: '删除',
+                      onclick: async (event) => {
+                          if (!confirm(`删除书源「${source.name}」？`)) return
+                          event.target.disabled = true
+                          try {
+                              await api(`/api/sources?id=${encodeURIComponent(source.id)}`, {
+                                  method: 'DELETE',
+                              })
+                              toast(`已删除：${source.name}`)
+                              await reload()
+                          } catch (err) {
+                              toast(`删除失败：${err.message}`, 'error')
+                              event.target.disabled = false
+                          }
+                      },
+                  }),
+        ]),
+    ])
+    return el('div', { class: 'source-item' }, [row, panel])
+}
+
+/**
+ * 批量启用 / 停用（作用于**当前筛出来的那一批**）
+ *
+ * 这是「分组」真正的用处：想只留「快速书源」那 227 条，就得有个一次改一批的办法。
+ * 逐条发请求的话，点一下要等两百多次往返 —— 中途断一次还不知道改到哪儿了。
+ * 所以服务端那条 PATCH 也认 `ids` 数组（见 `src/index.ts`）。
+ */
+function bulkBar(matched, reload) {
+    const ids = mutableIds(matched)
+    if (ids.length === 0) return []
+
+    const action = (label, enabled, style) =>
+        el('button', {
+            class: `btn sm ${style}`,
+            text: label,
+            onclick: async (event) => {
+                const verb = enabled ? '启用' : '停用'
+                if (!confirm(`把当前这 ${ids.length} 条书源全部${verb}？`)) return
+                event.target.disabled = true
+                try {
+                    const report = await patchJson('/api/sources', { ids, enabled })
+                    toast(`已${verb} ${report.changed ?? ids.length} 条`)
+                    await reload()
+                } catch (err) {
+                    toast(`${verb}失败：${err.message}`, 'error')
+                    event.target.disabled = false
+                }
+            },
+        })
+
+    return [
+        el('span', { class: 'muted tiny', text: `当前筛选 ${ids.length} 条` }),
+        el('div', { class: 'spacer' }),
+        action('全部启用', true, 'primary'),
+        action('全部停用', false, 'ghost'),
+    ]
 }
 
 function typeLabel(type) {
@@ -2037,16 +2397,33 @@ async function renderLoginPanel(host, source, stateBadge) {
     )
 }
 
-function renderImport(host) {
+/**
+ * 导入书源
+ *
+ * 四件小事凑起来，就是「能用」与「好用」的差别：
+ *
+ * 1. **一次能选多个文件** —— 社区合集常被拆成好几份（`合集(1).json`、`(2)…`），
+ *    一次一个地选，选完还得自己记住导到第几个了。
+ * 2. **能把文件拖进来** —— 桌面端最顺手的动作，不接就白瞎了。
+ * 3. **分批时报进度** —— 几 MB 的合集要切成好几批提交，中间没有反馈的话，用户会
+ *    以为卡住了，然后再点一次（于是同一份导两遍）。
+ * 4. **导完的报告留得住** —— 报告是画在这张卡片里的，而原先导完会整页重渲染，
+ *    把「新增 N 条，更新 M 条」当场冲掉，用户其实什么都没看见（见 `refetch`）。
+ *
+ * 分组不用在这里操心：Legado 书源自己带着 `bookSourceGroup`，导入之后「书源」页
+ * 自动按它归组（多值字段的拆法见 `sourceFilter.js`）。
+ */
+function renderImport(onDone) {
     const status = el('div', { class: 'import-status' })
+
     const file = el('input', {
         type: 'file',
         accept: '.json,application/json',
+        multiple: true,
         onchange: async (event) => {
-            const chosen = event.target.files?.[0]
-            if (!chosen) return
-            await runImport(await chosen.text(), `文件 ${chosen.name}`)
-            event.target.value = ''
+            const chosen = [...(event.target.files ?? [])]
+            event.target.value = '' // 先清空：选同一个文件两次也要能再触发 change
+            if (chosen.length > 0) await runFiles(chosen)
         },
     })
     const textarea = el('textarea', {
@@ -2054,33 +2431,67 @@ function renderImport(host) {
         placeholder: '把书源 JSON 粘在这里（数组或 {"sources":[…] } 都行）',
     })
 
+    /**
+     * 拖放区
+     *
+     * 只在 `dragover` 上 `preventDefault` 才会收到 `drop` —— 不拦的话浏览器会按
+     * 「用这个文件去导航」处理，整页跳走，这个应用连同正在输入的内容一起没了。
+     */
+    const dropZone = el('label', { class: 'drop-zone' }, [
+        el('span', { class: 'drop-hint', text: '把 .json 文件拖到这里，或点这里选文件（可多选）' }),
+        file,
+    ])
+    dropZone.addEventListener('dragover', (event) => {
+        event.preventDefault()
+        dropZone.classList.add('over')
+    })
+    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('over'))
+    dropZone.addEventListener('drop', async (event) => {
+        event.preventDefault()
+        dropZone.classList.remove('over')
+        const dropped = [...(event.dataTransfer?.files ?? [])]
+        if (dropped.length > 0) await runFiles(dropped)
+    })
+
+    /** 读一批文件，一个接一个地导 —— 并发导只会让进度条变成一团乱麻 */
+    async function runFiles(files) {
+        for (const [index, one] of files.entries()) {
+            const label =
+                files.length > 1
+                    ? `${one.name}（${index + 1}/${files.length}）`
+                    : `文件 ${one.name}`
+            const ok = await runImport(await one.text(), label)
+            // 一个文件坏了就停下：接着导只会把同一条错误刷上好几遍
+            if (!ok) return
+        }
+        await onDone()
+    }
+
+    /** 导一份；成功返回 true（失败时错误已经画在 `status` 上） */
     async function runImport(raw, label) {
-        status.replaceChildren(el('p', { class: 'muted', text: `正在导入 ${label}…` }))
+        setChildren(status, [el('p', { class: 'muted', text: `正在导入 ${label}…` })])
         try {
-            const report = await importChunked(raw)
-            status.replaceChildren(
-                alertBox(
-                    'ok',
-                    `导入完成：新增 ${report.imported} 条，更新 ${report.updated} 条`,
-                    report.rejected?.length
-                        ? `${report.rejected.length} 条被拒：${report.rejected
-                              .slice(0, 3)
-                              .map((r) => r.reason ?? r.name ?? '')
-                              .join('；')}`
-                        : '',
-                ),
-            )
-            invalidateSources()
-            await viewSources(host)
+            const report = await importChunked(raw, (done, total) => {
+                if (total < 2) return
+                setChildren(status, [
+                    el('p', {
+                        class: 'muted',
+                        text: `正在导入 ${label}…（第 ${done}/${total} 批）`,
+                    }),
+                ])
+            })
+            setChildren(status, [importReport(report)])
+            return true
         } catch (err) {
-            status.replaceChildren(alertBox('error', '导入失败', err.message))
+            setChildren(status, [alertBox('error', '导入失败', err.message)])
+            return false
         }
     }
 
     return el('details', { class: 'card import-card' }, [
         el('summary', { text: '导入书源' }),
         el('div', { class: 'import-body' }, [
-            el('div', { class: 'row' }, [file]),
+            el('div', { class: 'row drop-row' }, [dropZone]),
             el('label', { class: 'field' }, [
                 el('span', { class: 'field-label', text: '或直接粘贴 JSON' }),
                 textarea,
@@ -2089,13 +2500,13 @@ function renderImport(host) {
                 el('button', {
                     class: 'btn primary',
                     text: '导入粘贴的内容',
-                    onclick: () => {
+                    onclick: async () => {
                         const raw = textarea.value.trim()
                         if (raw === '') {
-                            status.replaceChildren(alertBox('warn', '先粘贴书源 JSON'))
+                            setChildren(status, [alertBox('warn', '先粘贴书源 JSON')])
                             return
                         }
-                        void runImport(raw, '粘贴的内容')
+                        if (await runImport(raw, '粘贴的内容')) await onDone()
                     },
                 }),
                 el('div', { class: 'spacer' }),
@@ -2105,19 +2516,19 @@ function renderImport(host) {
                     onclick: async () => {
                         const url = prompt('书源 JSON 的网址：', '')
                         if (!url) return
-                        status.replaceChildren(el('p', { class: 'muted', text: '正在下载…' }))
+                        setChildren(status, [el('p', { class: 'muted', text: '正在下载…' })])
                         try {
                             const response = await fetch(url, { credentials: 'omit' })
                             if (!response.ok) throw new Error(`HTTP ${response.status}`)
-                            await runImport(await response.text(), url)
+                            if (await runImport(await response.text(), url)) await onDone()
                         } catch (err) {
-                            status.replaceChildren(
+                            setChildren(status, [
                                 alertBox(
                                     'error',
                                     '下载失败',
                                     `${err.message}。如果是跨域限制，请先把文件下载到本地再用上面的文件选择。`,
                                 ),
-                            )
+                            ])
                         }
                     },
                 }),
@@ -2127,13 +2538,40 @@ function renderImport(host) {
     ])
 }
 
+/** 导入结果：一句话 + 被拒的那些（点开才看原因，正常导入时它不占地方） */
+function importReport(report) {
+    const rejected = report.rejected ?? []
+    const box = alertBox('ok', `导入完成：新增 ${report.imported} 条，更新 ${report.updated} 条`)
+    append(box, [
+        rejected.length === 0
+            ? el('div', {
+                  class: 'alert-extra',
+                  text: '分组取自书源自带的 bookSourceGroup，已经自动归好组。',
+              })
+            : el('details', { class: 'failures' }, [
+                  el('summary', { text: `${rejected.length} 条被拒（点开看原因）` }),
+                  el(
+                      'ul',
+                      {},
+                      rejected
+                          .slice(0, 20)
+                          .map((one) => el('li', { text: one.reason ?? one.name ?? '未知原因' })),
+                  ),
+              ]),
+    ])
+    return box
+}
+
 /**
  * 分批导入
  *
  * 导入接口对单次请求体有上限（护住 Worker 内存），而社区合集动辄好几 MB，
  * 一次传不进去。所以按大小切片分批提交，再把结果合并。
+ *
+ * `onProgress(第几批, 共几批)` 只在真的要分批时才回调 —— 一份 200 KB 的书源
+ * 用不着报「第 1/1 批」，那是句废话。
  */
-async function importChunked(raw) {
+async function importChunked(raw, onProgress) {
     const CHUNK_BYTES = 1.5 * 1024 * 1024
     const totals = { imported: 0, updated: 0, rejected: [] }
 
@@ -2159,7 +2597,11 @@ async function importChunked(raw) {
 
     const batches = Math.max(1, Math.ceil(raw.length / CHUNK_BYTES))
     const perBatch = Math.ceil(list.length / batches)
+    const total = Math.ceil(list.length / perBatch)
+    let done = 0
     for (let start = 0; start < list.length; start += perBatch) {
+        done += 1
+        onProgress?.(done, total)
         const slice = list.slice(start, start + perBatch)
         const report = await api('/api/sources', {
             method: 'POST',

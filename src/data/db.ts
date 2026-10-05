@@ -605,6 +605,62 @@ export async function setSourceEnabled(
     }
 }
 
+/**
+ * 一次批量改启用状态最多带几个 id
+ *
+ * D1 对**单条语句的绑定参数**有个数上限（100），而这条 SQL 除了 id 还要绑
+ * `enabled` 与 `updated_at`，所以留出余量。语料里最大的分组是 242 条 ——
+ * 分成三批发，而不是让整整一批回一个参数超限的错。
+ */
+const SOURCE_ID_BATCH = 90
+
+/**
+ * 批量启用 / 停用
+ *
+ * 为什么要有它：「按分组停用」是真实需求 —— 816 条书源里挑几条启用，
+ * 总得有个一次勾掉一整组的办法，一条一条点不是个事（真的点起来是几百次请求）。
+ *
+ * 两个细节：
+ *
+ * 1. **内置源先剔掉**，而不是碰上了就整批报错。`assertUserSource` 会抛，
+ *    而一条只读的 id 足以把同批里另外 89 条一起拖下水 —— 这里改「过滤」。
+ *    剔完一条不剩时返回 0，语义是「这批里没有可改的」，不是出错。
+ * 2. 每批都带上版本号自增，与 `setSourceEnabled` 一样：数据改了而 ETag 没变，
+ *    浏览器会抱着 304 里那份旧列表不放。
+ *
+ * 返回值是**实际改动的行数**给调用方回显（它可能小于 id 个数：不存在的 id 不算）。
+ */
+export async function setSourcesEnabled(
+    db: PlatformDb,
+    ids: string[],
+    enabled: boolean,
+): Promise<number> {
+    const usable = [
+        ...new Set(
+            (Array.isArray(ids) ? ids : []).filter(
+                (id) => typeof id === 'string' && id !== '' && !id.startsWith(BUILTIN_ID_PREFIX),
+            ),
+        ),
+    ]
+    if (usable.length === 0) return 0
+
+    const now = Date.now()
+    let changed = 0
+    for (let start = 0; start < usable.length; start += SOURCE_ID_BATCH) {
+        const slice = usable.slice(start, start + SOURCE_ID_BATCH)
+        const holes = slice.map(() => '?').join(', ')
+        const [result] = await db.batch([
+            db
+                .prepare(`UPDATE sources SET enabled = ?, updated_at = ? WHERE id IN (${holes})`)
+                .bind(enabled ? 1 : 0, now, ...slice),
+            sourcesRevStatement(db),
+        ])
+        changed += result?.meta.changes ?? 0
+    }
+    return changed
+}
+
+/** 删除一个用户书源。内置源由代码管理，不能在这里删 */
 export async function deleteUserSource(db: PlatformDb, id: string): Promise<void> {
     assertUserSource(id)
     const [result] = await db.batch([

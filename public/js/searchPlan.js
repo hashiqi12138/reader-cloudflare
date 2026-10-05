@@ -29,6 +29,9 @@
  * 真出路只有两条 —— 换一个**没有 10 ms 上限**的宿主（付费计划是 30 s，
  * 自建部署没有这个限制，见 `src/platform/`），或者不再抓页面解析。
  * 这一段留着不删：免得下次又有人照着「再拆小一点」去试。
+ *
+ * 本轮改动：「按名字 / 分组筛」那个纯函数搬去了 `sourceFilter.js`（与「书源」页
+ * 的分组筛选共用同一套判据），这里不再有 `matchSources`。
  */
 
 /** 一页默认搜几个书源 */
@@ -64,20 +67,6 @@ export function searchableSources(sources) {
     return (Array.isArray(sources) ? sources : []).filter(
         (one) => one && one.enabled !== false && one.hasSearch === true,
     )
-}
-
-/** 在候选里按关键词筛（名字或分组，去空白、不区分大小写）；关键词为空就全给 */
-export function matchSources(list, keyword) {
-    const all = Array.isArray(list) ? list : []
-    const needle = String(keyword ?? '')
-        .trim()
-        .toLowerCase()
-    if (needle === '') return all.slice()
-    return all.filter((one) => {
-        const name = String(one?.name ?? '').toLowerCase()
-        const group = String(one?.group ?? '').toLowerCase()
-        return name.includes(needle) || group.includes(needle)
-    })
 }
 
 /**

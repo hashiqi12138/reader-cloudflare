@@ -17,6 +17,7 @@ import {
     readSourcesRev,
     recordSourceHealth,
     setSourceEnabled,
+    setSourcesEnabled,
     type SourceOutcome,
 } from './data/db'
 import {
@@ -507,27 +508,50 @@ app.post('/api/sources', async (c) => {
  * id 走请求体而不是路径参数：用户书源的 id 里嵌着站点 URL（`user:https://...`），
  * 放进路径就要处理 `%2F` 这类转义，而中间层（代理、CDN、日志）对编码路径的
  * 处理并不一致，很容易在某一跳被拆开。放进 body 就没有这个问题。
+ *
+ * 两种形状都收：
+ *
+ *   `{ id, enabled }`        —— 单条（书源行上那个开关）
+ *   `{ ids: [...], enabled }` —— 批量（「书源」页按分组筛完之后一次改一批）
+ *
+ * 批量那条不是「省几个请求」的优化，而是**没法用单条替代**：最大的分组有 242 条，
+ * 逐条发就是 242 次请求，用户点一下要等半分钟，中间断一次还不知道改到哪儿了。
  */
 app.patch('/api/sources', async (c) => {
-    let body: { id?: unknown; enabled?: unknown }
+    let body: { id?: unknown; ids?: unknown; enabled?: unknown }
     try {
         body = await c.req.json()
     } catch {
         return c.json(
-            { error: '请求体必须是 JSON，形如 {"id":"user:https://...","enabled":false}' },
+            {
+                error: '请求体必须是 JSON，形如 {"id":"user:https://...","enabled":false} 或 {"ids":[...],"enabled":false}',
+            },
             400,
         )
     }
 
-    const id = typeof body.id === 'string' ? body.id : ''
-    if (id === '') return c.json({ error: '缺少 id' }, 400)
     if (typeof body.enabled !== 'boolean') {
         return c.json({ error: 'enabled 必须是布尔值' }, 400)
     }
 
+    // 批量：优先认 ids，但它必须是个真的数组（给了 `ids: "x"` 这种不算）
+    if (Array.isArray(body.ids)) {
+        const ids = body.ids.filter((one): one is string => typeof one === 'string' && one !== '')
+        if (ids.length === 0) return c.json({ error: 'ids 是空数组，没有要改的书源' }, 400)
+        try {
+            const changed = await setSourcesEnabled(c.env.DB, ids, body.enabled)
+            return c.json({ ids, enabled: body.enabled, changed })
+        } catch (err) {
+            return fail(c, err)
+        }
+    }
+
+    const id = typeof body.id === 'string' ? body.id : ''
+    if (id === '') return c.json({ error: '缺少 id（批量请用 ids 数组）' }, 400)
+
     try {
         await setSourceEnabled(c.env.DB, id, body.enabled)
-        return c.json({ id, enabled: body.enabled })
+        return c.json({ id, enabled: body.enabled, changed: 1 })
     } catch (err) {
         return fail(c, err)
     }

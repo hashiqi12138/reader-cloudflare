@@ -618,6 +618,38 @@ main#view {
     text-overflow: ellipsis;
     white-space: nowrap;
 }
+/* 分组下拉在选择面板里独占一行：面板本来就窄，跟搜索框挤一起两个都用不成 */
+.picker-panel .group-select {
+    width: 100%;
+    max-width: none;
+    margin-bottom: var(--sp-2);
+}
+/*
+ * 面板里的分组头
+ *
+ * 粘住不动：面板是 46vh 的滚动区，几百条滚到一半时得知道自己在哪一组。
+ * 背景必须不透明，否则从它底下滚过去的条目会透出来。
+ */
+.picker-group-head {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    padding: 6px 10px 4px;
+    background: var(--surface);
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--ink-faint);
+}
+.picker-group-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
 
 /*
  * 搜索范围：那一行字 + 选择面板
@@ -1033,6 +1065,170 @@ textarea {
     display: flex;
     flex-direction: column;
     gap: var(--sp-2);
+}
+
+/*
+ * 「书源」页的筛选条
+ *
+ * 816 条书源平铺就是一堵墙，所以这一条才是页面的**主入口**：先按名字 / 分组 /
+ * 状态 / 能力把范围收到看得见的量，再挑具体哪一条。
+ *
+ * 粘在顶栏下面 —— 翻到某一组的深处时还能改筛选，不用一路滚回去。
+ * 背景要带一点透明度并做毛玻璃，否则从它底下滚过去的行会透出来。
+ */
+.source-toolbar {
+    position: sticky;
+    top: calc(var(--topbar-h) + var(--sp-2));
+    z-index: 20;
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-3);
+    padding: var(--sp-3) var(--sp-4);
+    background: color-mix(in srgb, var(--surface) 92%, transparent);
+    backdrop-filter: saturate(1.4) blur(12px);
+}
+.source-toolbar[hidden] {
+    display: none;
+}
+.source-controls {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-3);
+}
+/* 关键词框吃掉剩下的宽度；分组下拉与按钮都不许被压变形 */
+.source-filter-main {
+    flex-wrap: nowrap;
+    gap: var(--sp-2);
+}
+.source-search {
+    flex: 1;
+    min-width: 0;
+}
+.group-select {
+    flex: none;
+    max-width: 46vw;
+}
+.source-filter-sub {
+    gap: var(--sp-2);
+}
+.source-tally {
+    margin: 0;
+}
+.source-bulk {
+    gap: var(--sp-2);
+}
+.source-bulk:empty {
+    display: none;
+}
+
+/*
+ * 分组：一个 `<details>` 一张卡
+ *
+ * 收起时**一行都不建**（见 `viewSources` 的 `sourceGroupNode`）—— 所以「收起」
+ * 不只是视觉上的，是真的不占 DOM。816 条全铺开是八千多个节点。
+ */
+.source-groups {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-3);
+}
+.source-group {
+    border: 1px solid var(--line);
+    border-radius: var(--radius-md);
+    background: var(--surface);
+    overflow: hidden;
+}
+.source-group-head {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    padding: var(--sp-3) var(--sp-4);
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--ink);
+    list-style: none;
+}
+.source-group-head::-webkit-details-marker {
+    display: none;
+}
+.source-group-head:hover {
+    background: var(--surface-2);
+}
+.source-group[open] > .source-group-head {
+    border-bottom: 1px solid var(--line);
+}
+/* 自己画那个三角：原生 marker 在 Chrome / Safari 里位置与大小都不一致 */
+.source-group-head::before {
+    content: '▸';
+    flex: none;
+    font-size: 11px;
+    color: var(--ink-faint);
+    transition: transform 0.15s var(--ease);
+}
+.source-group[open] > .source-group-head::before {
+    transform: rotate(90deg);
+}
+.source-group-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+/* 整组已经是一个框了，组内的行不再各圈一道边 */
+.source-group .source-list {
+    padding: var(--sp-2);
+    gap: var(--sp-1);
+}
+.source-group .source-row {
+    border: 0;
+    background: transparent;
+}
+.source-group .source-row:hover {
+    background: var(--surface-2);
+}
+
+/*
+ * 拖放区
+ *
+ * 原生那个「选择文件」按钮各家浏览器长得完全不一样，所以把 `input` 藏了、
+ * 整块变成 `<label>` —— 点哪儿都能触发选择。拖进来的文件走同一条导入路径。
+ */
+.drop-row {
+    gap: 0;
+}
+.drop-zone {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    padding: var(--sp-4);
+    border: 1px dashed var(--line-strong);
+    border-radius: var(--radius-md);
+    background: var(--surface-2);
+    color: var(--ink-soft);
+    font-size: 13px;
+    text-align: center;
+    cursor: pointer;
+    transition: all 0.18s var(--ease);
+}
+.drop-zone:hover,
+.drop-zone.over {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+    color: var(--accent);
+}
+/* 视觉上藏起来但仍可聚焦：键盘用户也能用它选文件 */
+.drop-zone input[type='file'] {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    opacity: 0;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
 }
 .login-slot[hidden] {
     display: none;
@@ -2128,6 +2324,22 @@ body[data-reader='1'] main#view {
     }
     .claim-banner {
         flex-wrap: wrap;
+    }
+
+    /* 「书源」页那条筛选：窄屏下一行放不下「搜索框 + 分组下拉 + 清空」三样，
+       挤在一起三样都会变得难点。搜索框独占一行，下面一行留给下拉与清空。 */
+    .source-filter-main {
+        flex-wrap: wrap;
+    }
+    .source-search {
+        flex: 1 1 100%;
+    }
+    .group-select {
+        flex: 1 1 auto;
+        max-width: none;
+    }
+    .source-toolbar {
+        padding: var(--sp-3);
     }
 
     /* 阅读顶栏现在有六个图标（返回 / 收藏 / 搜索 / 书签 / 目录 / 设置）。
