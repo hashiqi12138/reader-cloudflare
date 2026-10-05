@@ -48,12 +48,22 @@ describe('平台边界', () => {
         expect(leaked).toEqual([])
     })
 
-    it('`import … from "*.wasm"` 只有一处，就是 platform/wasm.ts', () => {
-        const importing = FILES.filter((one) => /from '[^']*\.wasm'/.test(one.text)).map(
+    it('静态 `.wasm` import 只留在 platform/ 的接缝文件里', () => {
+        // 这条盯的是「业务代码不要去 import .wasm」：那个机制只有打包器认
+        // （wrangler 把 .wasm 编成 `WebAssembly.Module` 交进来）。
+        // 允许存在的只有**同名的两份实现** —— `wasm.ts` 给 Workers、
+        // `wasm.node.ts` 给 Node（自己 `readFile`），由 `scripts/build-node.mjs`
+        // 的替换插件在打包时二选一。
+        const leaked = BUSINESS.filter((one) => /from '[^']*\.wasm'/.test(one.text)).map(
             (one) => one.path,
         )
+        expect(leaked).toEqual([])
 
-        expect(importing).toEqual(['platform/wasm.ts'])
+        // 正面那半条：Workers 那份接缝得还在，别把生产用的那一条顺手删了
+        const seams = FILES.filter((one) => /from '[^']*\.wasm'/.test(one.text)).map(
+            (one) => one.path,
+        )
+        expect(seams).toContain('platform/wasm.ts')
     })
 
     it('那五个接口只在一处定义 —— platform/types.ts', () => {
