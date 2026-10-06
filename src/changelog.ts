@@ -25,6 +25,11 @@ export interface ReleaseNote {
 
 export const CHANGELOG: ReleaseNote[] = [
     {
+        version: '0.68.0',
+        date: '2026-10-06',
+        note: '两件事：一是**换源** —— 读到一半发现这个源的错字多、缺章，可以换到别的源接着读，书架上的记录与阅读位置一起搬过去（落点按章名对，对不上会如实说「从第一章开始」，而不是假装对上了）；二是自建与容器那份**一次搜索就把全部启用的书源搜完**，不用再挑源（`SEARCH_ALL_SOURCES` 控制，写 `false` 回到「一页几个」的老样子；线上那份本来就是 false）',
+    },
+    {
         version: '0.67.0',
         date: '2026-10-05',
         note: '多了容器这一份：`docker compose up -d --build` 就能把整套东西跑在自己的 Docker 里（不经过 Cloudflare，也就没有每请求 10 毫秒的 CPU 上限），数据落在命名卷里、重启不丢；用法与参数写在单独的 DOCKER.md',
