@@ -6,6 +6,8 @@ dist/
 build/
 # 自建（Node）那份产物 —— 由 `npm run build:node` 生成，不入库
 dist-node/
+# 页面（Pages）那一份要上传的目录 —— 由 `npm run build:pages` 拼出来（`public/` + Pages 的两个约定文件）
+dist-pages/
 # 自建模式默认落在这里的 SQLite 与它的 WAL 文件。
 # **必须写成 /data/ 而不是 data/** —— 后者会连 `src/data/`（数据层源码）一起忽略，
 # 于是那个目录里**新建**的文件会被静默吞掉（已跟踪的不受影响，所以这坑很难自己露头）。

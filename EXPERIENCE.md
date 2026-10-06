@@ -7161,13 +7161,14 @@ Pages 只要带了 Function，**所有**请求默认都会进 Function；而静�
 
 **三、几个容易写错、但都不会当场报错的地方**
 
-| 坑                                  | 症状                                                          | 处理                                             |
-| ----------------------------------- | ------------------------------------------------------------- | ------------------------------------------------ |
-| 转发时「顺手」把响应头挑几个拼一拼  | `Set-Cookie` 丢了 → 登录「提交成功却还是没登录」              | 整份 `upstream.headers` 交回，测试里禁止手拼     |
-| 204 / 304 / HEAD 照抄响应体         | `Response` 构造直接抛错 → 「接口好好的，一经过 Pages 就 500」 | 那三种情况回 `null` 体                           |
-| 用 Functions 的写法写高级模式       | 编译得过、每个转发请求都 500                                  | `export default { async fetch }`，测试里也钉住   |
-| 默认接口源写错 Worker 名            | 页面看起来正常、一用就报错                                    | 默认值里必须出现 `wrangler.jsonc` 那个 Worker 名 |
-| `_worker.js` 位置放错（放进子目录） | Pages 找不到它，`/api/*` 全 404                               | 就放在静态目录**根**上（`public/_worker.js`）    |
+| 坑                                  | 症状                                                                                    | 处理                                                                                    |
+| ----------------------------------- | --------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| 转发时「顺手」把响应头挑几个拼一拼  | `Set-Cookie` 丢了 → 登录「提交成功却还是没登录」                                        | 整份 `upstream.headers` 交回，测试里禁止手拼                                            |
+| 204 / 304 / HEAD 照抄响应体         | `Response` 构造直接抛错 → 「接口好好的，一经过 Pages 就 500」                           | 那三种情况回 `null` 体                                                                  |
+| 用 Functions 的写法写高级模式       | 编译得过、每个转发请求都 500                                                            | `export default { async fetch }`，测试里也钉住                                          |
+| 默认接口源写错 Worker 名            | 页面看起来正常、一用就报错                                                              | 默认值里必须出现 `wrangler.jsonc` 那个 Worker 名                                        |
+| 把 `_worker.js` 放进 `public/`      | **接口那一份直接发不出去**（`Uploading a Pages _worker.js file as an asset`，实测踩过） | 两个约定文件放 `pages/`，部署时拼一份 `dist-pages/`                                     |
+| `_worker.js` 位置放错（放进子目录） | Pages 找不到它，`/api/*` 全 404                                                         | 就放在**要上传的那个目录**的根上（现在是 `pages/_worker.js`，部署时拼进 `dist-pages/`） |
 
 **四、没做**
 
@@ -7181,15 +7182,16 @@ Pages 只要带了 Function，**所有**请求默认都会进 Function；而静�
   （`<分支>.<项目>.pages.dev`），但预览环境里接口那一份仍是同一个生产 Worker、同一个库，
   没想清楚要不要给它一套独立环境
 
-**五、测试**：1105 → **1116**（`test/pages.test.ts` 那 11 条：反代那一层的前缀对账、
-转发不能丢头、空体状态码、部署入口的项目名与分支）。
+**五、测试**：1105 → **1119**（`test/pages.test.ts` 那 14 条：反代那一层的前缀对账、
+转发不能丢头、空体状态码、部署入口的项目名与分支、以及「`public/` 里不许出现
+`_worker.js`」这条实测踩出来的硬失败）。
 
 ## 验证
 
 ```bash
 npm install
 npm run db:migrate   # 建本地 D1 表（首次、以及每次新增迁移后）
-npm test             # 单元测试（1116 项，Node 里秒级跑完；另有十九个默认跳过的全量扫描，见下）
+npm test             # 单元测试（1119 项，Node 里秒级跑完；另有十九个默认跳过的全量扫描，见下）
 npm run dev          # 起本地服务，浏览器打开首页即可用；另开一个终端跑下面这条
 npm run smoke        # 端到端：链路 + 书源管理（导入 / 启停 / 批量启停 / 内置源剔掉 / 空 ids 给 400）+ 搜索范围（按 `/api/version` 说的两条路都验：一次搜完全部源时带 offset/limit 也不许漏源 / 否则一页几个）+ 换源（书架搬家 + 章节落点 + 三条底线）+ 正文里的 HTML 摊平（@html 取值与 @textNodes 逐字一致）+ jsoup 链式调用（`data()` / `select(...)[0]` / `remove()` 真删）+ 跨请求的会话变量（详情 `java.put` → 目录 `java.get` 拼上前缀）+ 目录脚本返回对象数组（按标记分卷 + `text`/`href`/`volume` 键）+ 脚本死循环仍然会被中断 + 静态资源 + 账号/书架/进度/书签 + 改显示名/改密码 + 导出导入备份 + 书签清单 + 替换净化同步 + 笔记 + 媒体 + 字段模板 + 选择器@js: + 空选择器取值 + 列表标记（+ / 顶格 <js>）+ 沙箱助手 + setContent/digestHex/UI 动作 + 节点级助手/加解密 + 连接式取网与 result.toArray() + 书源变量落库 + 书的上下文与书的变量 + JS 尾段列表规则保留节点 + 连接符切分 + 列表规则（末尾那个词 / CSS 首段的位置后缀 / `!` 排除下标）+ 字段规则（CSS 式多段 `@`）+ 变量指令（`@put:` / `@get:` 含**跨请求**那一半）+ `init`（铺变量与**换根**两种）+ `<js>` 段 + JSONPath 尾段（`$[*]` / `$[:n]`）+ 地址尾部的请求选项（`地址,{选项}` / 排成多行的那份选项块）+ URL 选项里 `body` 写对象（`application/json`）+ 展示用字段的容错与 `warnings` + 单斜杠 XPath（`/a/p[1]/text()` 相对当前条目）+ 防盗链封面走 `/api/media` 代取 + http 封面（混合内容）也代取 + `<script>` / `<style>` 也是元素（`java.getElement("script")` 那条路） + JSOUP 简写 `class.A B`（两个类都要有） + `source.getLoginInfoMap()` 的 Map 语义 + URL 字段 JS + 发现/首页 + cookie 罐（收 / 发 / 按源落库）+ 重定向自己跟（302 上的 `Set-Cookie` 与 `Location`）+ 目录里的 `isVip` / `isPay` / `isVolume` / `updateTime` + 登录态（跑一次 `loginUrl` → 落库 → 之后每趟请求都带上）+ 登录界面（读 `loginUi` → 渲染表单 → 界面上的按钮单独调得到）+ 沙箱里的取网跟着这次求值的预算走（列表规则里 / 搜索地址模板里，含「响应头回了、正文拖很久」那层兜底）+ 搜索 / 发现里的逐条字段走批量求值（批按 jsLib 分开，两源互不串味）+ PWA（`manifest.json` / 四张图标是真 PNG / `/sw.js` 的 JS 类型 / `/js/swPolicy.js` 可取 / head 里的 link）+ 书源列表的协商缓存（首次带 `ETag` / 同一个 `ETag` 回 304 且无正文 / 对不上的照旧回完整列表）+ 版本与更新记录（`/api/version` 带版本号 / 记录非空且最新一条与版本号一致 / `features.searchAllSources` 是个布尔）+ 媒体缓存（换过地址后仍命中 / 命中字节与上游一致 / 带 `Range` 不进缓存）+ 目录脚本按**属性序号**取值（`attributes()` + `Attribute.toString()`，一半条目的书名在第 3 位、一半在第 4 位）+ 搜索里 `java.put` / 详情里 `java.get`（**每一本读到的都是它自己那条写下的值**）+ 正文脚本把真地址**写到 `src` 上**再整批返回（`java.getElements(...).forEach(e => e.attr("src", …))` 那一条）+ 发现里 `java.put` / 详情里 `java.get`（发现那一趟也接了落库通道）
 ```
@@ -7774,7 +7776,7 @@ curl.exe -sS -o NUL -w "%{http_code}" https://www.digitalocean.com/
 - 页面：<https://reader-cloudflare.pages.dev>
 - 接口：<https://reader-api.liujieahu.workers.dev>（这个地址**仍然带着一份页面**，理由见下）
 
-**为什么要一层反代（`public/_worker.js`）**
+**为什么要一层反代（`pages/_worker.js`）**
 
 页面在 `*.pages.dev`、接口在 `*.workers.dev`，是两个源。而前端里：所有请求都是相对地址
 （`/api/...`）、会话是 **HttpOnly + SameSite=Lax** 的 cookie、封面与音频用的是服务端下发的
@@ -7787,6 +7789,20 @@ curl.exe -sS -o NUL -w "%{http_code}" https://www.digitalocean.com/
 （静态请求在 Pages 上不计费也不限量；一旦所有请求都进 Function，那点免费额度会被页面自己
 吃光，所以 `_routes.json` 把范围钉死在那两条前缀上）。
 
+**那两个约定文件为什么不放在 `public/` 里**
+
+第一版就是放进去的 —— 结果 `npm run deploy`（接口那一份）在**上传资产**那一步直接失败：
+
+```
+✘ [ERROR] Uploading a Pages _worker.js file as an asset.
+```
+
+`_worker.js` 在 Pages 里是**保留名**，而 `public/` 同时是接口那一份的静态资源目录。所以这
+两份单独住在 `pages/`：`npm run deploy:page` 先跑 `scripts/build-pages.mjs` 拼一份
+`dist-pages/`（= `public/` 原样 + 那两个文件）再上传。`public/` 于是保持「就是前端静态资源」
+这一件事，Worker / 自建 / 容器三份照旧原样用它。这条也进了测试：`public/` 里出现
+`_worker.js` 就直接红。
+
 **这套分工实测过的几件事**（2026-10-06，第一次部署当天）：
 
 | 验的东西                           | 结果                                                                                                     |
@@ -7798,7 +7814,7 @@ curl.exe -sS -o NUL -w "%{http_code}" https://www.digitalocean.com/
 | 不存在的路径                       | 200 + `index.html`（Pages 自己的 SPA 回退），与接口那一份的 `not_found_handling` 行为一致                |
 | 不存在的接口                       | 接口那一份的 JSON 404 —— 说明 `/api/*` 确实进了 Function，没被回退吃掉                                   |
 
-**换账号 / 改 Worker 名字时要动的地方**：`public/_worker.js` 顶部的 `DEFAULT_API_ORIGIN`，
+**换账号 / 改 Worker 名字时要动的地方**：`pages/_worker.js` 顶部的 `DEFAULT_API_ORIGIN`，
 或者在 Pages 项目里设一个 `API_ORIGIN` 环境变量覆盖它（Pages 那侧的环境变量只能在 Dashboard
 里设 —— 仓库里没有 Pages 的配置文件，见那条「没做」）。`test/pages.test.ts` 钉着这一条：
 默认接口源里必须出现 `wrangler.jsonc` 那个 Worker 名。

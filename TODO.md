@@ -536,6 +536,6 @@ Pages 侧的 `API_ORIGIN`（改接口地址用的那个覆盖开关）只能在 
 里加一条即可（账号里另外两个 Pages 项目绑的是 `hashiqi12138.ccwu.cc`）。
 
 **怎么算做完**：改 `wrangler.jsonc` 里的 Worker 名字之后，`npm run deploy:page` 发出去的
-那一份仍然指向新名字（现在得手动改 `public/_worker.js` 的默认值，或者去 Dashboard 改环境变量）。
+那一份仍然指向新名字（现在得手动改 `pages/_worker.js` 的默认值，或者去 Dashboard 改环境变量）。
 
 ---

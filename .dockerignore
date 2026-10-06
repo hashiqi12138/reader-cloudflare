@@ -17,6 +17,8 @@ src/engine/*.wasm
 node_modules
 dist
 dist-node
+# 页面（Pages）那一份的临时产物：只有 `npm run deploy:page` 用得上，容器里一行都不读
+dist-pages
 
 # 本地状态与密钥
 .wrangler

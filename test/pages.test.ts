@@ -1,7 +1,7 @@
 /*
  * 「页面与接口分开部署」（Pages + Worker）这条路上的防漂移测试
  *
- * 分工是：**Pages 发页面**（`public/` + 一个把接口接回来的 `_worker.js`），
+ * 分工是：**Pages 发页面**（`public/` 拼上 Pages 的两个约定文件，见 `scripts/build-pages.mjs`），
  * **Worker 发接口**（`src/index.ts` + D1）。两边各发各的，所以中间那条缝全靠几个
  * 名字与几个前缀对齐 —— 而它们对不齐时**都不会当场报错**：
  *
@@ -14,6 +14,9 @@
  *     就是「提交成功、却还是没登录」
  *   - 用 Functions 的写法（`export function onRequest`）写高级模式的文件：Pages 编译得
  *     过，但没有 fetch 入口，每个转发请求都 500
+ *   - 那两个约定文件**放进 `public/`**：`public/` 同时是接口那一份的静态资源目录，
+ *     而 `_worker.js` 这个名字在 Pages 里是保留的 —— `npm run deploy` 会在上传资产那一步
+ *     直接失败（`Uploading a Pages _worker.js file as an asset`）。这一条是实测踩出来的
  *
  * 所以这里直接读仓库里那几份真文件对账，不另抄一份清单。
  */
@@ -23,13 +26,22 @@ import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 
 const read = (name: string) => readFileSync(new URL(`../${name}`, import.meta.url), 'utf8')
+const exists = (name: string) => {
+    try {
+        readFileSync(new URL(`../${name}`, import.meta.url))
+        return true
+    } catch {
+        return false
+    }
+}
 
-const worker = read('public/_worker.js')
-const routes = JSON.parse(read('public/_routes.json')) as {
+const worker = read('pages/_worker.js')
+const routes = JSON.parse(read('pages/_routes.json')) as {
     version: number
     include: string[]
     exclude: string[]
 }
+const buildPages = read('scripts/build-pages.mjs')
 const wrangler = read('wrangler.jsonc')
 const pkg = JSON.parse(read('package.json').replace(/^\uFEFF/, '')) as {
     name: string
@@ -104,9 +116,10 @@ describe('Pages 与 Worker 的分工：转发的那几行', () => {
 })
 
 describe('Pages 与 Worker 的分工：部署入口', () => {
-    it('`deploy:page` 指名道姓发到同一个项目与分支', () => {
+    it('`deploy:page` 先拼目录、再指名道姓发到同一个项目与分支', () => {
         const script = pkg.scripts['deploy:page'] ?? ''
-        expect(script).toContain('wrangler pages deploy public')
+        expect(script).toContain('build-pages.mjs')
+        expect(script).toContain('wrangler pages deploy dist-pages')
         const project = /--project-name (\S+)/.exec(script)?.[1] ?? ''
         const branch = /--branch (\S+)/.exec(script)?.[1] ?? ''
         expect(project).not.toBe('')
@@ -118,5 +131,35 @@ describe('Pages 与 Worker 的分工：部署入口', () => {
     it('接口那一份仍是 `npm run deploy`（`deploy:all` 把两步串起来）', () => {
         expect(pkg.scripts.deploy).toContain('wrangler deploy')
         expect(pkg.scripts['deploy:all']).toContain('deploy:page')
+    })
+})
+
+/*
+ * Pages 那两个约定文件**不能住在 `public/` 里**
+ *
+ * 这一条是真踩出来的：`_worker.js` 在 Pages 里是保留名，而 `public/` 同时是接口那一份
+ * 的静态资源目录 —— 放进去之后 `npm run deploy` 在上传资产那一步直接失败
+ * （`Uploading a Pages _worker.js file as an asset`），也就是说**接口那一份发不出去**。
+ * 所以两份约定文件单独住在 `pages/`，部署时由 `scripts/build-pages.mjs` 拼进 `dist-pages/`。
+ */
+describe('Pages 那两个约定文件不进 `public/`', () => {
+    it('`public/` 里一个都不许有（有的话接口那一份就发不出去了）', () => {
+        expect(exists('public/_worker.js')).toBe(false)
+        expect(exists('public/_routes.json')).toBe(false)
+        expect(exists('pages/_worker.js')).toBe(true)
+        expect(exists('pages/_routes.json')).toBe(true)
+    })
+
+    it('拼目录的脚本把两份都摆进 `dist-pages/`（每次重建，不留上一次的旧文件）', () => {
+        for (const name of ['_worker.js', '_routes.json']) expect(buildPages).toContain(name)
+        expect(buildPages).toContain("join(root, 'public')")
+        expect(buildPages).toContain("join(root, 'pages')")
+        expect(buildPages).toContain("join(root, 'dist-pages')")
+        expect(buildPages).toContain('rmSync(out')
+    })
+
+    it('拼出来的目录不进仓库、也不进容器镜像', () => {
+        expect(read('.gitignore')).toContain('dist-pages/')
+        expect(read('.dockerignore')).toContain('dist-pages')
     })
 })
