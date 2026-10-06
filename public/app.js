@@ -57,10 +57,15 @@ function parseRoute() {
     return { path: path === '' ? 'home' : path, query: query ?? '' }
 }
 
-/** 会话失效（401）时把界面切到登录页，而不是让每个视图各自处理 */
+/**
+ * 会话失效（401）时把界面切到登录页，而不是让每个视图各自处理
+ *
+ * `replace`：这是**换个界面**，不是又往前走一页。压历史的话，返回键会退回那个
+ * 已经 401 的页面、它再 401、再被送到登录页 —— 返回键就成了原地打转。
+ */
 setUnauthorizedHandler(() => {
     toast('登录状态已失效，请重新登录', 'error')
-    go('#/login')
+    go('#/login', { replace: true })
 })
 
 function renderTabs(active) {
@@ -226,7 +231,9 @@ async function render() {
     }
 
     if (path === 'login') {
-        go('#/home')
+        // 已经登录的人落到登录页 = 一次**重定向**，不是一次跳转：用 `replace`，
+        // 免得历史里留下「登录页 ←→ 首页」这一对互相弹的入口，返回键按不动
+        go('#/home', { replace: true })
         return
     }
 

@@ -6,6 +6,8 @@
  *    用 innerHTML 等于把外部内容当代码执行。所有外部文本都走 textContent（见 el()）。
  * 2. 路由用 hash 而不是 History API：hash 不需要服务端配合回退，
  *    少一处「刷新页面 404」的坑，也省掉一份 SPA 回退配置的维护。
+ *    （唯一的例外是 `go(hash, { replace: true })` 里的那句 `replaceState` ——
+ *    它只用来**换掉**当前这条记录、不压新的，见那个函数的说明。）
  * 3. **子节点一律走 `el()` / `append()` / `setChildren()`**，不要直接调原生
  *    `replaceChildren()` / `append()`。`null` 与 `undefined` 在原生方法里会被
  *    `String()` 成文本 —— 于是页面上真的渲染出一个 `null`（详情页出现过一次）。
@@ -94,9 +96,41 @@ export const contextParams = (book, chapter) => {
     return out
 }
 
-export const go = (hash) => {
+/**
+ * 跳到某个 hash。默认**压一条**历史，返回键就回到刚才那一页。
+ *
+ * `replace: true` 给的是另一类跳转：「还在一页上，只是换了个位置」。同一个阅读界面里的
+ * 换章、从目录或书签跳章，都走它。压历史的话读十章就压十条 —— 用户按一次返回只退一章，
+ * 得连按十次才回得到进来之前那一页（这正是「读了几章后返回要一章一章退」的由来）。
+ * `replace` 之后，读多少章整个阅读过程都只占**一条**记录。
+ *
+ * `replaceState` **不派发 `hashchange`**，所以这里自己补一次 —— 而且**异步**补：
+ * 路由收到这个事件会把当前视图整个换掉，同步跑等于在事件处理函数里把脚下这块 DOM
+ * 拆了（那些按钮恰好都在自己的处理函数里调它）。
+ */
+export const go = (hash, { replace = false } = {}) => {
     if (location.hash === hash) return
+    if (replace) {
+        history.replaceState(null, '', hash)
+        setTimeout(() => window.dispatchEvent(new Event('hashchange')), 0)
+        return
+    }
     location.hash = hash
+}
+
+/**
+ * 返回上一页；本页不是从应用里点进来的（直接打开或刷新一个分享链接）时退到 `fallback`
+ *
+ * 光调 `history.back()` 在这条路上是**没反应或者直接走出应用**的：历史里只有当前这一条
+ * （没有上一页），或者上一条根本不是本站的页面。两种情况都比「点了没有任何反应」好办 ——
+ * 退到这本书的详情页就是了。
+ */
+export const goBack = (fallback) => {
+    if (history.length > 1) {
+        history.back()
+        return
+    }
+    if (fallback) go(fallback)
 }
 
 export function alertBox(kind, message, extra) {

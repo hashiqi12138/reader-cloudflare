@@ -16,6 +16,7 @@ import {
     currentUser,
     el,
     go,
+    goBack,
     importBackupFile,
     loadSession,
     loadVersion,
@@ -215,7 +216,9 @@ export async function viewLogin(host, notice) {
                     if (mode.value === 'login') await doLogin(user, pass)
                     else await doRegister(user, pass)
                     toast(`欢迎，${currentUser()?.displayName ?? user}`)
-                    go('#/home')
+                    // 登录是「换个界面」，不是又往前走了一页：压历史的话返回键会退回登录页，
+                    // 而登录页发现已经有会话又会把你送回首页 —— 返回键于是彻底失效
+                    go('#/home', { replace: true })
                 } catch (err) {
                     errorHost.replaceChildren(alertBox('error', '没能登录', err.message))
                 } finally {
@@ -514,7 +517,9 @@ export async function viewAccount(host) {
                         // 搜索结果与换源索引都是上一个人的数据，同页换账号会串味
                         forgetSearch()
                         toast('已退出登录')
-                        go('#/login')
+                        // 同上：登录页是「换个界面」。留着一条已登出的页面在历史里，
+                        // 返回过去只会再被弹回登录页
+                        go('#/login', { replace: true })
                     },
                 }),
             ]),
@@ -1156,7 +1161,9 @@ export async function viewExplore(host) {
 
     const picker = sourcePicker(sources, activeSource, (source) => {
         localStorage.setItem(EXPLORE_PICK_KEY, source.id)
-        go(`#/explore?${paramsOf({ sourceId: source.id })}`)
+        // 换一个源看它的发现页 = 这一页换了个内容（和搜索页挑书源同一种事），
+        // 所以**换掉**当前这条历史 —— 压的话，逛十个源就要按十次返回才出得去
+        go(`#/explore?${paramsOf({ sourceId: source.id })}`, { replace: true })
     })
 
     const categoryBar = el('div', { class: 'chips wrap' })
@@ -2961,7 +2968,12 @@ export async function viewBook(host) {
         host.replaceChildren(
             alertBox('error', '打不开这本书', err.message),
             el('div', { class: 'row' }, [
-                el('button', { class: 'btn ghost', text: '返回', onclick: () => history.back() }),
+                el('button', {
+                    class: 'btn ghost',
+                    text: '返回',
+                    // 直接打开一个分享的详情链接时历史里没有上一页，退回首页（见 `goBack`）
+                    onclick: () => goBack('#/home'),
+                }),
             ]),
         )
         return
@@ -3089,8 +3101,12 @@ export async function viewBook(host) {
                          * 却是旧源那份详情，再点「开始阅读」又走回旧源 —— 换源这件事
                          * 做了等于没做。所以直接跳到新源的详情页（参数从面板给的那条
                          * 候选里来，书名作者也都是新源那边取回来的）。
+                         *
+                         * 用 `replace`：这是**同一本书换了个地方**，不是又往前走了一页。
+                         * 压历史的话，返回键会退到老源那份已经失效的详情页上。
                          */
-                        onSwitched: (item) => go(bookUrl(item.sourceId, item.book)),
+                        onSwitched: (item) =>
+                            go(bookUrl(item.sourceId, item.book), { replace: true }),
                     }),
             }),
         ]),

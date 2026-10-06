@@ -24,6 +24,7 @@ import {
     currentUser,
     el,
     go,
+    goBack,
     isOffline,
     contextParams,
     PAPERS,
@@ -45,7 +46,10 @@ import {
     syncState,
 } from './replaceSync.js'
 import { excerptAround, normalizeQuery, splitByQuery } from './search.js'
-import { addBook, inShelf, loadShelf } from './views.js'
+// `bookUrl` 这个名字在这个文件里已经给了「这本书的地址」（从路由读出来的那个字符串），
+// 所以详情页地址的构造函数改名导入，免得 import 被局部变量遮住（真踩过：运行时报
+// 「bookUrl is not a function」）
+import { addBook, bookUrl as bookDetailUrl, inShelf, loadShelf } from './views.js'
 import {
     DEFAULT_FONT_SIZE,
     clampFontSize,
@@ -114,7 +118,8 @@ export async function viewRead(host) {
                     el('button', {
                         class: 'btn ghost',
                         text: '返回',
-                        onclick: () => history.back(),
+                        // 直接打开/刷新一个阅读链接时历史里没有上一页，退回首页（见 `goBack`）
+                        onclick: () => goBack('#/home'),
                     }),
                 ]),
             )
@@ -221,12 +226,21 @@ export async function viewRead(host) {
         onclick: () => openSearch(),
     })
 
+    /**
+     * 返回上一页（这一本书的详情页作为兜底，见 `goBack`）
+     *
+     * 用 `goBack` 而不是直接 `history.back()`：直接从分享链接打开或刷新时，
+     * 历史里没有「上一页」，`history.back()` 点了**毫无反应** —— 而这一颗按钮
+     * 是阅读界面上唯一的出口，没反应就等于把人困在这一页里。
+     */
+    const backHref = bookDetailUrl(sourceId, book)
+
     const topBar = el('header', { class: 'reader-top' }, [
         el('button', {
             class: 'icon-btn',
             text: '‹',
             title: '返回',
-            onclick: () => history.back(),
+            onclick: () => goBack(backHref),
         }),
         titleNode,
         el('div', { class: 'spacer' }),
@@ -280,6 +294,12 @@ export async function viewRead(host) {
 
     host.replaceChildren(shell)
 
+    /**
+     * 换章 = **换掉**当前那条历史，不压新的
+     *
+     * 阅读界面是「一页」：读十章还是这一页，只是内容变了。压历史的话返回键要连按十次
+     * 才回得到进来之前那一页（见 `core.js` 的 `go`）。
+     */
     function openChapter(next, where = 'first') {
         if (next < 0 || next >= book.chapters.length) return
         go(
@@ -291,6 +311,7 @@ export async function viewRead(host) {
                 index: next,
                 page: where === 'last' ? 'last' : '',
             })}`,
+            { replace: true },
         )
     }
 
@@ -1228,6 +1249,7 @@ export async function viewRead(host) {
      */
     function jumpTo(chapterIndex, { pageIndex = 0, percent = 0 } = {}) {
         if (chapterIndex < 0 || chapterIndex >= book.chapters.length) return
+        // 与换章同一条规矩：跳章是这一页换了个位置，不该在历史里留下一条（见 `openChapter`）
         go(
             `#/read?${paramsOf({
                 sourceId,
@@ -1238,6 +1260,7 @@ export async function viewRead(host) {
                 page: pageIndex,
                 pos: percent > 0 ? percent.toFixed(4) : '',
             })}`,
+            { replace: true },
         )
     }
 
