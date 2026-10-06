@@ -25,6 +25,11 @@ export interface ReleaseNote {
 
 export const CHANGELOG: ReleaseNote[] = [
     {
+        version: '0.69.0',
+        date: '2026-10-06',
+        note: 'Cloudflare 上那份拆成了**页面**与**接口**两次独立部署：页面发到 Cloudflare Pages（`npm run deploy:page`），接口仍是那个 Worker（`npm run deploy`）—— 改界面不必碰接口，改接口不必重发页面。浏览器看到的还是同一个源（Pages 上带了一层把 `/api` 接回去的同源反代），所以会话、封面代取、离线缓存全都照旧；两个入口都能打开：`reader-cloudflare.pages.dev` 与 `reader-api.…workers.dev`',
+    },
+    {
         version: '0.68.1',
         date: '2026-10-06',
         note: '返回键的手感：在阅读界面里读了十几章，按一次返回就回到进来之前那一页（以前得一章一章地退）；登录、退出、换源、发现页换源这些「换个界面」的跳转也不再压历史 —— 顺带修掉「登录后返回键在登录页与首页之间来回弹」；直接打开一个分享的阅读链接时，「‹ 返回」现在有去处（退回这本书的详情页），而不是点了没反应',
