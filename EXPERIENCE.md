@@ -7186,12 +7186,71 @@ Pages 只要带了 Function，**所有**请求默认都会进 Function；而静�
 转发不能丢头、空体状态码、部署入口的项目名与分支、以及「`public/` 里不许出现
 `_worker.js`」这条实测踩出来的硬失败）。
 
+### 第八十三轮：容器那份也拆成两个（页面 nginx + 接口 node）
+
+上一轮把 Cloudflare 那份拆成了页面（Pages）与接口（Worker）。这一轮做同一件事的容器版本：
+`docker-compose.yml` 里两个服务 ——
+
+| 服务   | 里面是什么                                                           | 对外                |
+| ------ | -------------------------------------------------------------------- | ------------------- |
+| `page` | `nginx:alpine` + `public/`，并把 `/api/*` 与 `/fixture/*` 转给 `api` | 发端口（默认 8787） |
+| `api`  | `src/index.ts` + 本机 SQLite，`SERVE_STATIC=false`                   | 只在 compose 内网里 |
+
+浏览器看到的仍是一个源，所以前端一行没改；`page` 会等 `api` 健康了再起
+（`depends_on: service_healthy`），打开就是好的。用法与实测都在 [DOCKER.md](./DOCKER.md)。
+
+**一、为什么加一个「不发页面」的开关，而不是让接口那份顺手也发**
+
+两个容器都发页面技术上无碍（同一份 `public/`），但那样「分开」就只是摆设：接口那个容器
+仍然背着前端资源、也仍然在它自己的端口上提供一份界面。所以 `src/server/node.ts` 多了
+`SERVE_STATIC`（**默认 `true`**）—— 默认值保住「一条命令起一整套」的两种用法
+（`npm run start:node` 与只跑一个容器），compose 里只把 `api` 那个服务设成 `false`。
+启动日志会写明它在不在发页面（`静态资源 不发（SERVE_STATIC=false，页面由另一份发）`），
+一眼能确认分工对不对。
+
+**二、反代的三个数字（都不是照抄模板）**
+
+| 设置                               | 不设会怎样                                                                                                                       |
+| ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `proxy_read_timeout 600s`          | 接口那份默认**一次搜完全部书源**，实测 924 个源要 184.5 秒；nginx 默认 60 秒就断 —— 表现是「搜索转一会儿 504」，而接口本身是好的 |
+| `client_max_body_size 64m`         | nginx 默认上限 1 MB，而书源语料约 4.5 MB —— 不改就是导入直接 413（接口那边根本没收到）                                           |
+| `proxy_set_header Host $http_host` | 接口那份是**用 Host 推请求源**的：夹具地址与会话 cookie 的 `Secure` 判断都跟着它，少了这行两处一起错                             |
+
+`64m` 只是安全阀：应用自己还有更小的限制（请求体 4 MB、单条书源 256 KB、一次最多 1000 条），
+超了回的是**说得清的** 413，不是 nginx 那种空白错误页。实测：1.96 MB 的请求体经 nginx 到达应用，
+按应用自己的规则逐条回绝（默认上限下这一步会 413）。
+
+**三、这一轮实测踩到的两件事**
+
+1. **compose 复用容器时不会灌进新的环境变量**。`$env:ENABLE_FIXTURE='true'; docker compose up -d`
+   之后 `printenv` 里仍是 `false`，表现是「内置测试书源一条都没有」（第一次跑冒烟就红在这条上）。
+   要 `--force-recreate api`。DOCKER.md 里那几条改环境变量的命令都补上了它。
+2. **端口被占时 `page` 容器会留在半起状态**：`docker ps` 里只有 `80/tcp`、宿主机打不通，
+   清掉占用者之后要 `--force-recreate page` 才接得上（第一次拆两个容器时踩到）。
+
+**第一次跑冒烟还红了另外两条**（首页推荐位），但那是**已知的环境噪声**，不是这一轮的改动：
+那两条断言用的是「启用书源里带发现页的那几个」的**外网站点**，而这台容器的书源列表里是
+用户自己导入的 900 多条真实源 —— 站点通不通直接决定红绿（`scripts/smoke.mjs` 里那段注释
+自己写了「四次里有一次四个源全超时」）。当场再打一次 `/api/home?refresh=1`：`耗时 8.1 秒、
+sections=1、failures=3（全是「发现页超时」）`，也就是同一条断言几秒后就绿了。
+**与反代无关**：那几个取网是接口那一侧发往外网站点的，nginx 改不了谁超时。
+
+**四、测试**：1119 → **1135**。新增 `test/proxyPrefixes.test.ts`（7 条）：把「哪些路径归接口」
+这一组前缀在**五个地方**做对账 —— 自建那份的 `WORKER_PREFIXES`、`wrangler.jsonc` 的
+`run_worker_first`、`pages/_routes.json`、`pages/_worker.js` 的 `PROXY_PREFIXES`、以及
+nginx 的 location。`test/docker.test.ts` 从 12 条加到 21 条（分工、端口归属、卷归属、
+`SERVE_STATIC` 的默认值与 compose 值、nginx 那三个数字、上游要按请求解析、以及
+「`proxy_pass` 打的就是接口的监听端口」）。
+
+**五、没做的**：接口那一份仍是 `node:22-slim`（没试 alpine）；页面那份是 `nginx:alpine`，
+**没有钉版本**（会跟着上游走）。
+
 ## 验证
 
 ```bash
 npm install
 npm run db:migrate   # 建本地 D1 表（首次、以及每次新增迁移后）
-npm test             # 单元测试（1119 项，Node 里秒级跑完；另有十九个默认跳过的全量扫描，见下）
+npm test             # 单元测试（1135 项，Node 里秒级跑完；另有十九个默认跳过的全量扫描，见下）
 npm run dev          # 起本地服务，浏览器打开首页即可用；另开一个终端跑下面这条
 npm run smoke        # 端到端：链路 + 书源管理（导入 / 启停 / 批量启停 / 内置源剔掉 / 空 ids 给 400）+ 搜索范围（按 `/api/version` 说的两条路都验：一次搜完全部源时带 offset/limit 也不许漏源 / 否则一页几个）+ 换源（书架搬家 + 章节落点 + 三条底线）+ 正文里的 HTML 摊平（@html 取值与 @textNodes 逐字一致）+ jsoup 链式调用（`data()` / `select(...)[0]` / `remove()` 真删）+ 跨请求的会话变量（详情 `java.put` → 目录 `java.get` 拼上前缀）+ 目录脚本返回对象数组（按标记分卷 + `text`/`href`/`volume` 键）+ 脚本死循环仍然会被中断 + 静态资源 + 账号/书架/进度/书签 + 改显示名/改密码 + 导出导入备份 + 书签清单 + 替换净化同步 + 笔记 + 媒体 + 字段模板 + 选择器@js: + 空选择器取值 + 列表标记（+ / 顶格 <js>）+ 沙箱助手 + setContent/digestHex/UI 动作 + 节点级助手/加解密 + 连接式取网与 result.toArray() + 书源变量落库 + 书的上下文与书的变量 + JS 尾段列表规则保留节点 + 连接符切分 + 列表规则（末尾那个词 / CSS 首段的位置后缀 / `!` 排除下标）+ 字段规则（CSS 式多段 `@`）+ 变量指令（`@put:` / `@get:` 含**跨请求**那一半）+ `init`（铺变量与**换根**两种）+ `<js>` 段 + JSONPath 尾段（`$[*]` / `$[:n]`）+ 地址尾部的请求选项（`地址,{选项}` / 排成多行的那份选项块）+ URL 选项里 `body` 写对象（`application/json`）+ 展示用字段的容错与 `warnings` + 单斜杠 XPath（`/a/p[1]/text()` 相对当前条目）+ 防盗链封面走 `/api/media` 代取 + http 封面（混合内容）也代取 + `<script>` / `<style>` 也是元素（`java.getElement("script")` 那条路） + JSOUP 简写 `class.A B`（两个类都要有） + `source.getLoginInfoMap()` 的 Map 语义 + URL 字段 JS + 发现/首页 + cookie 罐（收 / 发 / 按源落库）+ 重定向自己跟（302 上的 `Set-Cookie` 与 `Location`）+ 目录里的 `isVip` / `isPay` / `isVolume` / `updateTime` + 登录态（跑一次 `loginUrl` → 落库 → 之后每趟请求都带上）+ 登录界面（读 `loginUi` → 渲染表单 → 界面上的按钮单独调得到）+ 沙箱里的取网跟着这次求值的预算走（列表规则里 / 搜索地址模板里，含「响应头回了、正文拖很久」那层兜底）+ 搜索 / 发现里的逐条字段走批量求值（批按 jsLib 分开，两源互不串味）+ PWA（`manifest.json` / 四张图标是真 PNG / `/sw.js` 的 JS 类型 / `/js/swPolicy.js` 可取 / head 里的 link）+ 书源列表的协商缓存（首次带 `ETag` / 同一个 `ETag` 回 304 且无正文 / 对不上的照旧回完整列表）+ 版本与更新记录（`/api/version` 带版本号 / 记录非空且最新一条与版本号一致 / `features.searchAllSources` 是个布尔）+ 媒体缓存（换过地址后仍命中 / 命中字节与上游一致 / 带 `Range` 不进缓存）+ 目录脚本按**属性序号**取值（`attributes()` + `Attribute.toString()`，一半条目的书名在第 3 位、一半在第 4 位）+ 搜索里 `java.put` / 详情里 `java.get`（**每一本读到的都是它自己那条写下的值**）+ 正文脚本把真地址**写到 `src` 上**再整批返回（`java.getElements(...).forEach(e => e.attr("src", …))` 那一条）+ 发现里 `java.put` / 详情里 `java.get`（发现那一趟也接了落库通道）
 ```
@@ -7851,7 +7910,8 @@ node src/server/node.ts                                  # 开发时也可以直
 - 缓存是**进程内的内存 Map**，不是按机房分布的 Cache API —— 重启就没了，单机够用。
   它有总量上限（64 MB，按插入顺序丢最老的），因为这个进程是长驻的。
 
-**还有容器那一份**（第七十九轮）：`Dockerfile` + `docker-compose.yml` 都在仓库根目录，
+**还有容器那一份**（第七十九轮起；**第八十三轮改成两个容器**）：`Dockerfile`（接口）、
+`Dockerfile.page` + `page.nginx.conf`（页面）、`docker-compose.yml` 都在仓库根目录，
 `docker compose up -d --build` 就能起。部署、数据与备份、参数、与 Cloudflare 那份的差异
 都写在单独的 [DOCKER.md](./DOCKER.md) 里。
 

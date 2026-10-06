@@ -76,7 +76,7 @@ npm run dev           # 打开 http://127.0.0.1:8787
 在那之前书架与搜索都是空的，这是对的。
 
 ```bash
-npm test              # 单元测试（1119 项，Node 里秒级跑完）
+npm test              # 单元测试（1135 项，Node 里秒级跑完）
 npm run smoke         # 端到端冒烟（要另开终端，且本地服务开着；它只打真实 HTTP）
 npm run typecheck     # 类型检查
 npm run format:check  # 格式检查
@@ -88,7 +88,7 @@ npm run format:check  # 格式检查
 | --------------- | ------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Cloudflare 两份 | 想要一个公网地址，不想自己维护进程                           | `npm run deploy:all` —— **页面发 Pages、接口发 Worker**，两次独立部署；首次要建 D1 并跑远端迁移，步骤见 [EXPERIENCE.md](./EXPERIENCE.md) 的「部署」 |
 | 自建 Node       | 不想依赖 Cloudflare，或者嫌免费计划每请求 10 毫秒的 CPU 太紧 | `npm run start:node`（本机 SQLite，没有 CPU 上限）                                                                                                  |
-| Docker          | 想把依赖、Node 版本、数据目录封在一起                        | `docker compose up -d --build`，见 [DOCKER.md](./DOCKER.md)                                                                                         |
+| Docker          | 想把依赖、Node 版本、数据目录封在一起                        | `docker compose up -d --build` —— 也是两份（页面 nginx + 接口 node），见 [DOCKER.md](./DOCKER.md)                                                   |
 
 Cloudflare 上那两份是**页面**（Pages：`public/` 的静态资源 + 一层把 `/api` 接回去的同源反代）
 与**接口**（Worker：`src/index.ts` + D1）。分开部署的好处是改界面不必碰接口、改接口不必重发
@@ -106,8 +106,10 @@ Cloudflare 上那两份是**页面**（Pages：`public/` 的静态资源 + 一�
 ## 目录结构
 
 ```
-Dockerfile / docker-compose.yml   容器那一份（用法见 DOCKER.md）
+Dockerfile / Dockerfile.page       容器那两份：接口（node）与页面（nginx）
+docker-compose.yml / page.nginx.conf  两个容器怎么拼起来、页面那层反代（用法见 DOCKER.md）
 DOCKER.md                         容器部署：起法与参数、数据与备份、与 Cloudflare 那份的差异
+pages/                            Cloudflare Pages 的两个约定文件（_worker.js / _routes.json）
 EXPERIENCE.md                     实现细节与踩坑记录：能力总表、规则语义、沙箱、每轮改了什么、验证、接口
 migrations/                       D1 迁移（按序号递增，不可回改已应用的）
 public/                           前端（零依赖、无构建步骤）
