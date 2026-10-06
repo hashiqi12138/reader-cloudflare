@@ -34,6 +34,14 @@ import { nodeEnv, type NodeAppEnv } from '../platform/node'
 
 /** 进应用（而不是当静态资源）的路径前缀 —— 与 wrangler.jsonc 的 `run_worker_first` 保持一致 */
 const WORKER_PREFIXES = ['/api/', '/fixture/']
+/**
+ * 这个进程要不要发页面（静态资源）
+ *
+ * 容器那份拆成了两个服务（见 DOCKER.md）：页面由前面那个 nginx 发，接口这一侧设
+ * `SERVE_STATIC=false`，两边各管一件事。默认 `true` —— 保持「一条命令起一整套」的用法
+ * 不变（`npm run start:node` 与单容器那份都靠它）。
+ */
+const SERVE_STATIC = process.env.SERVE_STATIC !== 'false'
 /** SQLite 文件 */
 const DB_PATH = process.env.DB_PATH ?? 'data/reader.sqlite'
 /** 监听端口 */
@@ -188,6 +196,21 @@ async function main(): Promise<void> {
                 let response: Response
                 if (isWorkerPath) {
                     response = await handleRequest(request, env, ctx)
+                } else if (!SERVE_STATIC) {
+                    /**
+                     * 这一侧不发页面（容器里由 page 那一份的 nginx 发）。
+                     * 回一个说得清的 404 —— 否则「是不是我部署错了」得翻日志才知道
+                     */
+                    response = new Response(
+                        JSON.stringify({
+                            error: '这个进程只发接口（/api/* 与 /fixture/*）',
+                            hint: '页面在另一个容器上：浏览器打开那个端口（见 DOCKER.md）',
+                        }),
+                        {
+                            status: 404,
+                            headers: { 'content-type': 'application/json; charset=utf-8' },
+                        },
+                    )
                 } else {
                     response = await env.ASSETS.fetch(request)
                     // 找不到就回退 index.html —— 与 wrangler.jsonc 的
@@ -213,7 +236,9 @@ async function main(): Promise<void> {
     server.listen(PORT, () => {
         console.log(`reader-cloudflare 自建模式：http://127.0.0.1:${PORT}`)
         console.log(
-            `  数据库 ${DB_PATH} · 静态资源 ${publicRoot} · 版本 ${env.ENGINE_VERSION ?? '?'}`,
+            `  数据库 ${DB_PATH} · 版本 ${env.ENGINE_VERSION ?? '?'} · 静态资源 ${
+                SERVE_STATIC ? publicRoot : '不发（SERVE_STATIC=false，页面由另一份发）'
+            }`,
         )
         console.log(
             `  内置测试站点 ${env.ENABLE_FIXTURE === 'true' ? '开' : '关'}（ENABLE_FIXTURE 控制）`,

@@ -1,7 +1,14 @@
-# `docker compose up -d` 就能起的一份默认配置（细节见 DOCKER.md）。
+# `docker compose up -d` 就能起的一整套（细节见 DOCKER.md）。
 #
-# 只做了三件事：把端口放出去、把数据库挂到命名卷上、失败了自己重启。
-# 三个值可以从环境变量覆盖 —— 用法见 DOCKER.md 的「两种起法」：
+# **两个服务，各管一件事**（与 Cloudflare 上那份「页面发 Pages、接口发 Worker」同一个分工）：
+#
+#   page   页面：nginx 发 public/ 里的静态资源，并把 /api/* 与 /fixture/* 转给 api
+#   api    接口：src/index.ts + D1 的等价物（本机 SQLite），只发接口，不发页面
+#
+# 对外**只有 page 那个端口**；api 只在 compose 的内网里，浏览器看不到它。这样浏览器
+# 从头到尾只看到一个源 —— 会话 cookie、相对地址的请求、`/api/media/<签名>` 都照旧。
+#
+# 三个值可以从环境变量覆盖 —— 用法见 DOCKER.md：
 #
 #   READER_PORT          宿主端口（默认 8787）。8787 被别人占了是很常见的（比如本项目的
 #                        `npm run dev` 自己就在用），所以留了个把手。
@@ -10,14 +17,12 @@
 #   SEARCH_ALL_SOURCES   一次搜索覆盖全部书源（默认 true）。与线上那份相反 —— 见下面
 #                        environment 里那段说明。
 #
-# 没有它也能跑 —— `docker run` 那一条命令行等价。
+# 这两套起法与它等价：`docker run` 那两条命令行（见 DOCKER.md），
+# 以及不用容器的 `npm run start:node`（那一个进程同时发页面与接口）。
 services:
-    reader:
+    api:
         build: .
         image: reader-cloudflare:local
-        ports:
-            # 冒号左边是宿主机、右边是容器。容器里那个 8787 不用动（Dockerfile 里 EXPOSE 的）。
-            - '${READER_PORT:-8787}:8787'
         environment:
             # 内置测试书源（fixture）：默认关，与线上 wrangler.jsonc 那份一致
             ENABLE_FIXTURE: '${ENABLE_FIXTURE:-false}'
@@ -25,11 +30,30 @@ services:
             # 10 ms 的 CPU 上限，「一次把全部书源搜完」是这条路上本来就该有的事。
             # 书源特别多（几百条）时想回到「一页几个」的老样子，就写 false。
             SEARCH_ALL_SOURCES: '${SEARCH_ALL_SOURCES:-true}'
+            # 只发接口：页面由 page 那一份的 nginx 发（见 DOCKER.md）。
+            # 想只起这一个容器、浏览器直接打它也行 —— 那就把它改成 true。
+            SERVE_STATIC: 'false'
         volumes:
             # 命名卷比 bind mount 省事：Windows / macOS 上不用操心目录权限。
             # 数据全在里面 —— 书源、账号、书架、进度、书签、笔记、媒体缓存，
-            # 以及给代取地址签名用的那个密钥（存在库里，见 DOCKER.md「备份与迁移」）。
+            # 以及给代取地址签名用的那个密钥（存在库里，见 DOCKER.md「数据放在哪」）。
+            # **只有这一份挂它**：页面容器是无状态的。
             - reader-data:/data
+        restart: unless-stopped
+
+    page:
+        build:
+            context: .
+            dockerfile: Dockerfile.page
+        image: reader-cloudflare-page:local
+        ports:
+            # 冒号左边是宿主机、右边是容器。容器里那个 80 不用动（见 Dockerfile.page）。
+            - '${READER_PORT:-8787}:80'
+        depends_on:
+            # 等接口那一份**健康**了再起页面：否则头几秒打开的页面会拿到 502，
+            # 看起来像「部署坏了」。健康检查在接口那个镜像里（打 /api/version）。
+            api:
+                condition: service_healthy
         restart: unless-stopped
 
 volumes:

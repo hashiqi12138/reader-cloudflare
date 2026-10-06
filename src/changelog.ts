@@ -25,6 +25,11 @@ export interface ReleaseNote {
 
 export const CHANGELOG: ReleaseNote[] = [
     {
+        version: '0.70.0',
+        date: '2026-10-06',
+        note: '容器那份也拆成了**页面**与**接口**两个容器（一条 `docker compose up -d --build` 一起起）：页面那个是 nginx，发静态资源并把 `/api` 转给接口；接口那个仍是一个 Node 进程，但只发接口（`SERVE_STATIC=false`）。与 Cloudflare 上「页面发 Pages、接口发 Worker」是同一个分工 —— 对外只开一个端口，浏览器看到的还是同一个源，所以会话、封面代取、离线缓存全都照旧',
+    },
+    {
         version: '0.69.0',
         date: '2026-10-06',
         note: 'Cloudflare 上那份拆成了**页面**与**接口**两次独立部署：页面发到 Cloudflare Pages（`npm run deploy:page`），接口仍是那个 Worker（`npm run deploy`）—— 改界面不必碰接口，改接口不必重发页面。浏览器看到的还是同一个源（Pages 上带了一层把 `/api` 接回去的同源反代），所以会话、封面代取、离线缓存全都照旧；两个入口都能打开：`reader-cloudflare.pages.dev` 与 `reader-api.…workers.dev`',

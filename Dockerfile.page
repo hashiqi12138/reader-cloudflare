@@ -1,0 +1,20 @@
+# 「页面」那一份的镜像 —— nginx + 静态资源，就这两样
+#
+# 与根目录那个 `Dockerfile`（接口那一份）配对：compose 里是两个服务，`page` 对外发端口，
+# 把 `/api/*` 与 `/fixture/*` 转给 `api`；接口那一侧设 `SERVE_STATIC=false` 只管发接口。
+# 为什么这么拆、以及反代那三个数字的来由，见 DOCKER.md 与 page.nginx.conf。
+#
+# 三个「就这么办」的选择：
+#
+#   1. **用 nginx，不再起一个 Node。** 这一份的全部工作就是「发文件 + 转发两个前缀」，
+#      nginx 两行就够；再起一个 Node 进程等于为了发静态文件装一整套 Node 运行时。
+#   2. **只拷 `public/`。** 前端零构建步骤（见 README 的目录结构），原样进镜像 ——
+#      这一份里没有 `src/`、没有依赖、没有 Node。
+#   3. **不挂 `/data`、不接数据库。** 数据只属于 api 那一侧（卷也挂在它身上），
+#      页面容器是无状态的：删掉重建随时可以。
+FROM nginx:alpine
+
+COPY public /usr/share/nginx/html
+COPY page.nginx.conf /etc/nginx/conf.d/default.conf
+
+EXPOSE 80

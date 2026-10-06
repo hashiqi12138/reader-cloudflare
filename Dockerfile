@@ -1,4 +1,4 @@
-# 自建模式（Node）的容器镜像 —— 给「不想依赖 Cloudflare」那条路用的。
+# 自建模式（Node）的容器镜像 —— 「接口」那一份（页面那一份是 `Dockerfile.page`）。
 #
 # 用法与参数见仓库根目录的 DOCKER.md；这里只留四件在文件里看得见的事：
 #
@@ -12,7 +12,11 @@
 #      依赖，所以 musl 理论上也行），但这一条**没有实测过**，而 slim 是官方 Node 镜像里最
 #      接近「本机 `node dist-node/server.mjs`」的那一种 —— 文档里写的必须是我真跑过的。
 #   4. **不以 root 跑**。基础镜像里本来就有 uid 1000 的 `node` 用户；`/data` 先建好并改成
-#      它的，于是**命名卷第一次创建**时会带着这个属主（见 DOCKER.md 的「数据」那一节）。
+#      它的，于是**命名卷第一次创建**时会带着这个属主（见 DOCKER.md 的「数据放在哪」）。
+#
+# 这个镜像里同时有 `dist-node/public/`（打包时一起产出的），但 compose 里那个 api 服务
+# 用 `SERVE_STATIC=false` 把它关掉了 —— 页面归另一份发。想只跑这一个容器（浏览器直接打它）
+# 就把那个开关去掉，默认是发的。
 
 # ---------- 构建阶段 ----------
 FROM node:22-slim AS build
@@ -64,6 +68,9 @@ ENV PORT=8787
 ENV DB_PATH=/data/reader.sqlite
 # 内置测试站点（那十几条 fixture 书源）默认关掉，与 wrangler.jsonc 线上那份一致
 ENV ENABLE_FIXTURE=false
+# 这个进程要不要发页面。默认发（单容器 / `npm run start:node` 都靠它）；
+# compose 里的 api 服务改成 false —— 页面由 page 那一份的 nginx 发（见 DOCKER.md）
+ENV SERVE_STATIC=true
 
 # /data 的属主要在建镜像时就定好：命名卷第一次创建时**复制**镜像里那个目录的属主，
 # 之后再改这里就没用了（老卷已经存在，不会被重新初始化）。
