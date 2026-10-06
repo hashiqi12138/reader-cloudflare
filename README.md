@@ -76,7 +76,7 @@ npm run dev           # 打开 http://127.0.0.1:8787
 在那之前书架与搜索都是空的，这是对的。
 
 ```bash
-npm test              # 单元测试（1077 项，Node 里秒级跑完）
+npm test              # 单元测试（1105 项，Node 里秒级跑完）
 npm run smoke         # 端到端冒烟（要另开终端，且本地服务开着；它只打真实 HTTP）
 npm run typecheck     # 类型检查
 npm run format:check  # 格式检查
