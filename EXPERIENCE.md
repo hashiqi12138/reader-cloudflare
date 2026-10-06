@@ -7133,12 +7133,63 @@ DOCKER.md 的「换个宿主机端口」那一节写了这个症状与查法。
 **没做：** 底部导航栏的标签之间仍是压历史（点四个标签要按四次返回）—— 那是另一种取舍，
 很多 App 就这么做，先留着；导航栏在阅读界面里本来也是收起来的。
 
+### 第八十二轮：页面与接口分开部署（Pages + Worker）
+
+要求是「部署 Cloudflare 时把 page 和 api 分别部署」。做法与实测见「部署」那一节的
+「页面与接口分开部署（Pages + Worker）」；这一节记的是**为什么这么选**，以及几个
+写错了也不会当场报错的地方。
+
+**一、为什么不是「前端直连接口」**
+
+最省事的「分开部署」是：页面放 Pages、前端把请求打到 `reader-api.…workers.dev`。它不成立，
+而且不是风格问题：
+
+| 要被改的东西 | 代价                                                                                                                       |
+| ------------ | -------------------------------------------------------------------------------------------------------------------------- |
+| CORS         | 每个接口都要放行 Pages 源、放行 `x-reader-user` 这个自定义头、再加 `Access-Control-Allow-Credentials`                      |
+| 会话 cookie  | `SameSite=Lax` 在跨源请求上**根本不发**，只能降级成 `SameSite=None` —— 那就是第三方 cookie，Safari 默认拦、Chrome 正在淘汰 |
+| 媒体地址     | `/api/media/<签名>` 是服务端下发的相对地址，跨源就得把封面 / 音频 / 下载三条路全部改成绝对地址                             |
+
+同源反代把这三条一起免掉：浏览器看到的仍然是**一个源**，前端一行都不用改。
+
+**二、`_routes.json` 不是可有可无的**
+
+Pages 只要带了 Function，**所有**请求默认都会进 Function；而静态请求在 Pages 上是不计费、
+不限量的。不把范围钉住，页面自己的访问量就会去吃那份免费额度（免费档每天 10 万次）。
+所以 `_routes.json` 的 `include` 只有 `/api/*` 与 `/fixture/*`，`test/pages.test.ts` 钉住
+它与 `_worker.js` 里代理的前缀是**同一组**。
+
+**三、几个容易写错、但都不会当场报错的地方**
+
+| 坑                                  | 症状                                                          | 处理                                             |
+| ----------------------------------- | ------------------------------------------------------------- | ------------------------------------------------ |
+| 转发时「顺手」把响应头挑几个拼一拼  | `Set-Cookie` 丢了 → 登录「提交成功却还是没登录」              | 整份 `upstream.headers` 交回，测试里禁止手拼     |
+| 204 / 304 / HEAD 照抄响应体         | `Response` 构造直接抛错 → 「接口好好的，一经过 Pages 就 500」 | 那三种情况回 `null` 体                           |
+| 用 Functions 的写法写高级模式       | 编译得过、每个转发请求都 500                                  | `export default { async fetch }`，测试里也钉住   |
+| 默认接口源写错 Worker 名            | 页面看起来正常、一用就报错                                    | 默认值里必须出现 `wrangler.jsonc` 那个 Worker 名 |
+| `_worker.js` 位置放错（放进子目录） | Pages 找不到它，`/api/*` 全 404                               | 就放在静态目录**根**上（`public/_worker.js`）    |
+
+**四、没做**
+
+- 仓库里**没有 Pages 的配置文件**（`wrangler.jsonc` 是接口那一份的；Pages 那条命令把目录
+  直接传进去）。所以 Pages 侧的环境变量（`API_ORIGIN`）只能在 Dashboard 里设。要把它也
+  纳入仓库，得单独开一份带 `pages_build_output_dir` 的配置 —— 现在这样少一层配置，
+  代价是那个覆盖开关不在代码里
+- Pages 那份**还挂在默认的 `pages.dev` 域名**上，没绑自定义域名。绑的话是 Dashboard 里
+  一步的事（账号里另外两个项目绑的是 `hashiqi12138.ccwu.cc`）
+- **预览分支没试**：`deploy:page` 固定发 `main`；`--branch <名字>` 能出预览地址
+  （`<分支>.<项目>.pages.dev`），但预览环境里接口那一份仍是同一个生产 Worker、同一个库，
+  没想清楚要不要给它一套独立环境
+
+**五、测试**：1105 → **1116**（`test/pages.test.ts` 那 11 条：反代那一层的前缀对账、
+转发不能丢头、空体状态码、部署入口的项目名与分支）。
+
 ## 验证
 
 ```bash
 npm install
 npm run db:migrate   # 建本地 D1 表（首次、以及每次新增迁移后）
-npm test             # 单元测试（1105 项，Node 里秒级跑完；另有十九个默认跳过的全量扫描，见下）
+npm test             # 单元测试（1116 项，Node 里秒级跑完；另有十九个默认跳过的全量扫描，见下）
 npm run dev          # 起本地服务，浏览器打开首页即可用；另开一个终端跑下面这条
 npm run smoke        # 端到端：链路 + 书源管理（导入 / 启停 / 批量启停 / 内置源剔掉 / 空 ids 给 400）+ 搜索范围（按 `/api/version` 说的两条路都验：一次搜完全部源时带 offset/limit 也不许漏源 / 否则一页几个）+ 换源（书架搬家 + 章节落点 + 三条底线）+ 正文里的 HTML 摊平（@html 取值与 @textNodes 逐字一致）+ jsoup 链式调用（`data()` / `select(...)[0]` / `remove()` 真删）+ 跨请求的会话变量（详情 `java.put` → 目录 `java.get` 拼上前缀）+ 目录脚本返回对象数组（按标记分卷 + `text`/`href`/`volume` 键）+ 脚本死循环仍然会被中断 + 静态资源 + 账号/书架/进度/书签 + 改显示名/改密码 + 导出导入备份 + 书签清单 + 替换净化同步 + 笔记 + 媒体 + 字段模板 + 选择器@js: + 空选择器取值 + 列表标记（+ / 顶格 <js>）+ 沙箱助手 + setContent/digestHex/UI 动作 + 节点级助手/加解密 + 连接式取网与 result.toArray() + 书源变量落库 + 书的上下文与书的变量 + JS 尾段列表规则保留节点 + 连接符切分 + 列表规则（末尾那个词 / CSS 首段的位置后缀 / `!` 排除下标）+ 字段规则（CSS 式多段 `@`）+ 变量指令（`@put:` / `@get:` 含**跨请求**那一半）+ `init`（铺变量与**换根**两种）+ `<js>` 段 + JSONPath 尾段（`$[*]` / `$[:n]`）+ 地址尾部的请求选项（`地址,{选项}` / 排成多行的那份选项块）+ URL 选项里 `body` 写对象（`application/json`）+ 展示用字段的容错与 `warnings` + 单斜杠 XPath（`/a/p[1]/text()` 相对当前条目）+ 防盗链封面走 `/api/media` 代取 + http 封面（混合内容）也代取 + `<script>` / `<style>` 也是元素（`java.getElement("script")` 那条路） + JSOUP 简写 `class.A B`（两个类都要有） + `source.getLoginInfoMap()` 的 Map 语义 + URL 字段 JS + 发现/首页 + cookie 罐（收 / 发 / 按源落库）+ 重定向自己跟（302 上的 `Set-Cookie` 与 `Location`）+ 目录里的 `isVip` / `isPay` / `isVolume` / `updateTime` + 登录态（跑一次 `loginUrl` → 落库 → 之后每趟请求都带上）+ 登录界面（读 `loginUi` → 渲染表单 → 界面上的按钮单独调得到）+ 沙箱里的取网跟着这次求值的预算走（列表规则里 / 搜索地址模板里，含「响应头回了、正文拖很久」那层兜底）+ 搜索 / 发现里的逐条字段走批量求值（批按 jsLib 分开，两源互不串味）+ PWA（`manifest.json` / 四张图标是真 PNG / `/sw.js` 的 JS 类型 / `/js/swPolicy.js` 可取 / head 里的 link）+ 书源列表的协商缓存（首次带 `ETag` / 同一个 `ETag` 回 304 且无正文 / 对不上的照旧回完整列表）+ 版本与更新记录（`/api/version` 带版本号 / 记录非空且最新一条与版本号一致 / `features.searchAllSources` 是个布尔）+ 媒体缓存（换过地址后仍命中 / 命中字节与上游一致 / 带 `Range` 不进缓存）+ 目录脚本按**属性序号**取值（`attributes()` + `Attribute.toString()`，一半条目的书名在第 3 位、一半在第 4 位）+ 搜索里 `java.put` / 详情里 `java.get`（**每一本读到的都是它自己那条写下的值**）+ 正文脚本把真地址**写到 `src` 上**再整批返回（`java.getElements(...).forEach(e => e.attr("src", …))` 那一条）+ 发现里 `java.put` / 详情里 `java.get`（发现那一趟也接了落库通道）
 ```
@@ -7630,8 +7681,12 @@ step 结束时它可能被连带杀掉，于是冒烟打不到服务。所以一
 
 ```bash
 npm run db:migrate:remote   # 建线上表
-npm run deploy              # 需要先 npx wrangler login
+npm run deploy              # 接口那一份（Worker + D1）—— 需要先 npx wrangler login
+npm run deploy:page         # 页面那一份（Pages：静态资源 + 把接口接回来的反代）
+npm run deploy:all          # 两步一起（发版时用这个）
 ```
+
+两份怎么分工、为什么还要一层反代，见下面「页面与接口分开部署（Pages + Worker）」那一节。
 
 **顺序不能反。** 先部署、后迁移的话，新代码会打到还不存在的表上 ——
 表现不是「启动失败」，而是那几个接口在线上**直接 500**，而本地（表早就建好了）一切正常。
@@ -7704,6 +7759,54 @@ curl.exe -sS -o NUL -w "%{http_code}" https://www.digitalocean.com/
    `http://<本机局域网 IP>:8787` —— 公网一时打不通时最快能继续用的办法。
    一个坑：网络被 Windows 识别成「公用」时，程序级入站规则里的 Block 会盖过 Allow
    （`Get-NetFirewallRule` 里的 `action=Block` 那两条），表现是电脑自己能开、手机连不上
+
+### 页面与接口分开部署（Pages + Worker）
+
+第八十二轮起，「页面」和「接口」是**两次独立的部署**：
+
+| 那一份 | 部署到                       | 内容                                                     | 命令                  |
+| ------ | ---------------------------- | -------------------------------------------------------- | --------------------- |
+| 接口   | Worker（`reader-api`）       | `src/index.ts` + D1 + 全部 `/api/*`                      | `npm run deploy`      |
+| 页面   | Pages（`reader-cloudflare`） | `public/` 里的静态资源 + 一个把接口接回来的 `_worker.js` | `npm run deploy:page` |
+
+两处入口（**同一份应用的两个门**）：
+
+- 页面：<https://reader-cloudflare.pages.dev>
+- 接口：<https://reader-api.liujieahu.workers.dev>（这个地址**仍然带着一份页面**，理由见下）
+
+**为什么要一层反代（`public/_worker.js`）**
+
+页面在 `*.pages.dev`、接口在 `*.workers.dev`，是两个源。而前端里：所有请求都是相对地址
+（`/api/...`）、会话是 **HttpOnly + SameSite=Lax** 的 cookie、封面与音频用的是服务端下发的
+相对地址（`/api/media/<签名>`）。直接跨源调接口的话这三样全得动：CORS、把 cookie 降级成
+`SameSite=None`（即第三方 cookie，浏览器正在淘汰它）、以及把每一条媒体地址都拼成绝对地址。
+
+所以 Pages 那一份带一个高级模式的 `_worker.js`：`/api/*` 与 `/fixture/*` **整份转发**给接口
+那一份（方法 / 请求头 / 请求体都跟着走），回来时状态码与**全部响应头原样交回** ——
+`Set-Cookie` 必须逐字过，会话就是它。其余路径直接由 Pages 的静态资源层发出去
+（静态请求在 Pages 上不计费也不限量；一旦所有请求都进 Function，那点免费额度会被页面自己
+吃光，所以 `_routes.json` 把范围钉死在那两条前缀上）。
+
+**这套分工实测过的几件事**（2026-10-06，第一次部署当天）：
+
+| 验的东西                           | 结果                                                                                                     |
+| ---------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `GET /api/version` 经 Pages        | 200，返回的就是接口那一份的版本号                                                                        |
+| `POST /api/auth/register` 经 Pages | 201，且 `Set-Cookie: rc_session=…; HttpOnly; Secure; SameSite=Lax` **逐字透传**                          |
+| 浏览器里注册 → 打开书架            | 「书架还是空的」—— 带会话的接口调用在 Pages 源上正常（cookie 仍是第一方）                                |
+| 静态资源                           | `/`、`/app.js`、`/js/*`、`/style.css`、`/sw.js`、`/manifest.json`、图标全 200；Service Worker 注册并接管 |
+| 不存在的路径                       | 200 + `index.html`（Pages 自己的 SPA 回退），与接口那一份的 `not_found_handling` 行为一致                |
+| 不存在的接口                       | 接口那一份的 JSON 404 —— 说明 `/api/*` 确实进了 Function，没被回退吃掉                                   |
+
+**换账号 / 改 Worker 名字时要动的地方**：`public/_worker.js` 顶部的 `DEFAULT_API_ORIGIN`，
+或者在 Pages 项目里设一个 `API_ORIGIN` 环境变量覆盖它（Pages 那侧的环境变量只能在 Dashboard
+里设 —— 仓库里没有 Pages 的配置文件，见那条「没做」）。`test/pages.test.ts` 钉着这一条：
+默认接口源里必须出现 `wrangler.jsonc` 那个 Worker 名。
+
+**接口那一份仍然带着一份静态资源**（`wrangler.jsonc` 的 `assets` 没动），理由有两条：
+本地 `npm run dev` 靠它一行命令把前后端一起起来（去掉它，开发要开两个进程）；以及
+`reader-api.…workers.dev` 这个老地址还能照旧打开整个应用 —— 已有的书签不会因为这次拆分失效。
+想做成「接口那一份彻底不带页面」，把 `wrangler.jsonc` 的 `assets` 块删掉即可，代价就是上面两条。
 
 ### 自建：跑在自己的一台机器上（不用 Cloudflare）
 

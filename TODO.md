@@ -3,7 +3,7 @@
 按「现在就能动手」排序。每条都写清四件事：**为什么**、**已经到哪一步**、**下一步做什么**、
 **怎么算做完**（能验的都要能验）。做完就删掉，别留在这里当装饰。
 
-最后更新：2026-10-06（v0.68.1，第八十一轮之后）
+最后更新：2026-10-06（v0.69.0，第八十二轮之后）
 
 ---
 
@@ -521,5 +521,21 @@ Array.from(java.getElement('script')).filter((e) => String(e).includes('目录')
 
 **要定的是**：想让返回键「一次出应用」还是「一格格退标签」。定了再改，改的是
 `public/app.js` 里 `renderTabs` 的两处 `go(#/${tab.route})`。
+
+---
+
+## 17. Pages 那份的两点余量（覆盖开关不在仓库里、没绑域名）
+
+**现状**（第八十二轮）：页面部署在 `reader-cloudflare.pages.dev`，接口部署在 Worker；
+Pages 侧的 `API_ORIGIN`（改接口地址用的那个覆盖开关）只能在 Dashboard 里设 ——
+仓库里没有 Pages 的配置文件。
+
+**要做**：① 想让那个开关跟着代码走，就得单独开一份带 `pages_build_output_dir` 的配置
+（注意别和 `wrangler.jsonc` 混用：那个是接口那一份的 Workers 配置，`wrangler pages deploy`
+在它缺 `pages_build_output_dir` 时只警告一句、然后忽略它）；② 想绑自定义域名，在 Dashboard
+里加一条即可（账号里另外两个 Pages 项目绑的是 `hashiqi12138.ccwu.cc`）。
+
+**怎么算做完**：改 `wrangler.jsonc` 里的 Worker 名字之后，`npm run deploy:page` 发出去的
+那一份仍然指向新名字（现在得手动改 `public/_worker.js` 的默认值，或者去 Dashboard 改环境变量）。
 
 ---

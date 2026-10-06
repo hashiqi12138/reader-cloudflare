@@ -76,7 +76,7 @@ npm run dev           # 打开 http://127.0.0.1:8787
 在那之前书架与搜索都是空的，这是对的。
 
 ```bash
-npm test              # 单元测试（1105 项，Node 里秒级跑完）
+npm test              # 单元测试（1116 项，Node 里秒级跑完）
 npm run smoke         # 端到端冒烟（要另开终端，且本地服务开着；它只打真实 HTTP）
 npm run typecheck     # 类型检查
 npm run format:check  # 格式检查
@@ -84,11 +84,15 @@ npm run format:check  # 格式检查
 
 ### 三种跑法
 
-| 方式               | 适合                                                         | 入口                                                                                                |
-| ------------------ | ------------------------------------------------------------ | --------------------------------------------------------------------------------------------------- |
-| Cloudflare Workers | 想要一个公网地址，不想自己维护进程                           | `npx wrangler deploy`；首次要建 D1 并跑远端迁移，步骤见 [EXPERIENCE.md](./EXPERIENCE.md) 的「部署」 |
-| 自建 Node          | 不想依赖 Cloudflare，或者嫌免费计划每请求 10 毫秒的 CPU 太紧 | `npm run start:node`（本机 SQLite，没有 CPU 上限）                                                  |
-| Docker             | 想把依赖、Node 版本、数据目录封在一起                        | `docker compose up -d --build`，见 [DOCKER.md](./DOCKER.md)                                         |
+| 方式            | 适合                                                         | 入口                                                                                                                                                |
+| --------------- | ------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Cloudflare 两份 | 想要一个公网地址，不想自己维护进程                           | `npm run deploy:all` —— **页面发 Pages、接口发 Worker**，两次独立部署；首次要建 D1 并跑远端迁移，步骤见 [EXPERIENCE.md](./EXPERIENCE.md) 的「部署」 |
+| 自建 Node       | 不想依赖 Cloudflare，或者嫌免费计划每请求 10 毫秒的 CPU 太紧 | `npm run start:node`（本机 SQLite，没有 CPU 上限）                                                                                                  |
+| Docker          | 想把依赖、Node 版本、数据目录封在一起                        | `docker compose up -d --build`，见 [DOCKER.md](./DOCKER.md)                                                                                         |
+
+Cloudflare 上那两份是**页面**（Pages，`public/` 里的静态资源 + 一个把接口接回来的
+`_worker.js`）与**接口**（Worker，`src/index.ts` + D1）。分开部署的好处是改界面不必碰接口、
+改接口不必重发页面；代价是两者之间多了一层同源反代（见 EXPERIENCE.md 里那一节）。
 
 ## 书源
 
