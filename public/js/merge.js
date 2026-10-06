@@ -40,6 +40,20 @@ const norm = (value) =>
         .replace(/[\s\u3000]+/g, '')
         .toLowerCase()
 
+/**
+ * 两本书是不是同一本：书名归一化后相等，且作者不冲突
+ *
+ * 判据与上面合并时那条**完全一致**（作者缺失算「对得上」）。单独导出它，是为了让
+ * 详情页的「换源」用同一把尺子 —— 各写一套的话会出现「搜索结果里合并成一条了，
+ * 换源时却认不出这是同一本书」这种自相矛盾的事。
+ */
+export function sameBook(a, b) {
+    if (norm(a?.name) !== norm(b?.name)) return false
+    const one = norm(a?.author)
+    const two = norm(b?.author)
+    return one === '' || two === '' || one === two
+}
+
 /** 一个 (书源, 书) 对的标识，用来在详情页里认出「这条卡片里的某一源」 */
 export const sourceBookKey = (sourceId, bookUrl) => `${sourceId}\u0000${bookUrl}`
 
@@ -65,10 +79,8 @@ export function mergeBooks(results, options = {}) {
             const siblings = byName.get(nameKey) ?? []
             if (!byName.has(nameKey)) byName.set(nameKey, siblings)
 
-            // 作者相等、或有一侧没写作者 → 视为同一本
-            let entry = siblings.find(
-                (item) => item.authorKey === '' || authorKey === '' || item.authorKey === authorKey,
-            )
+            // 作者相等、或有一侧没写作者 → 视为同一本（判据见 `sameBook`）
+            let entry = siblings.find((item) => sameBook(item, book))
             if (!entry) {
                 entry = {
                     name: String(book?.name ?? ''),

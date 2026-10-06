@@ -433,6 +433,17 @@ export async function loadVersion() {
     return versionInfo
 }
 
+/**
+ * 这个部署的能力开关（`/api/version` 的 `features`）
+ *
+ * 读不到（还没加载、离线、老服务端）时给一份**保守**的默认 —— 空对象，各开关都按关处理。
+ * 宁可界面上少一个便利，也不要在「一次搜不完」的部署上夸这个口：
+ * 那种「界面说一次全搜、实际被掐成 503」的谎最难查。
+ */
+export function versionFeatures() {
+    return versionInfo?.features ?? {}
+}
+
 // ---------------------------------------------------------------- 登录态
 
 /**

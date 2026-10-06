@@ -7,7 +7,8 @@
  *   1. `PlatformDb`    → Node 22 内置的 `node:sqlite`（不需要任何原生依赖）
  *   2. `PlatformAssets`→ 直接读 `public/` 目录
  *   3. `PlatformCache` → 一张内存表（够本机自用；边缘那份见 cloudflare 适配器）
- *   4. `ENGINE_VERSION` / `ENABLE_FIXTURE` → 从环境变量读
+ *   4. `ENGINE_VERSION` / `ENABLE_FIXTURE` / `SEARCH_ALL_SOURCES` → 从环境变量读
+ *      （第三个是「一次搜索覆盖全部书源」那条开关，自建这份**默认开**）
  *
  * 存在的意义不只是「能跑在别处」：**Workers 免费计划那个 CPU 上限（见 TODO.md 第 1 条）
  * 会把重一点的目录规则掐成 503**，而自建这一条路没有那个上限 —— 这是「换宿主」
@@ -277,6 +278,13 @@ export interface NodeEnvOptions {
     engineVersion?: string
     /** 内置测试站点开关，默认取 `ENABLE_FIXTURE` 环境变量 */
     enableFixture?: boolean
+    /**
+     * 一次搜索是否覆盖全部书源，默认取 `SEARCH_ALL_SOURCES` —— **不写就是开**
+     *
+     * 这是自建这条路与线上那份最主要的差别：没有每请求 10 ms 的 CPU 上限，
+     * 所以「一次把全部书源跑一遍」在这里是能成的。要关得写显式的 `false`。
+     */
+    searchAllSources?: boolean
 }
 
 /** Node 侧的环境：除了 `AppEnv` 那几样，另给两个服务器要用的把手（迁移与关库） */
@@ -291,12 +299,16 @@ export function nodeEnv(options: NodeEnvOptions = {}): NodeAppEnv {
     // WAL：自建这台机器上读写并发好一些
     db.exec('PRAGMA journal_mode = WAL')
     const enableFixture = options.enableFixture ?? process.env.ENABLE_FIXTURE === 'true'
+    // 与 `ENABLE_FIXTURE` 的判据**方向相反**：那个要显式 `true` 才开（测试站点不该误开），
+    // 这个要显式 `false` 才关 —— 自建那份默认就该能一次搜完，见 NodeEnvOptions
+    const searchAllSources = options.searchAllSources ?? process.env.SEARCH_ALL_SOURCES !== 'false'
     return {
         DB: db,
         ASSETS: new NodeAssets(options.publicRoot ?? 'public'),
         CACHE: new NodeCache(),
         ENGINE_VERSION: options.engineVersion ?? process.env.ENGINE_VERSION ?? '0.0.0-node',
         ENABLE_FIXTURE: enableFixture ? 'true' : 'false',
+        SEARCH_ALL_SOURCES: searchAllSources ? 'true' : 'false',
         exec: (sql) => db.exec(sql),
         close: () => db.close(),
     }

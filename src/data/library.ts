@@ -195,6 +195,116 @@ export async function removeFromShelf(
     return existing
 }
 
+export interface SwitchShelfSourceInput {
+    fromSourceId: string
+    fromBookUrl: string
+    toSourceId: string
+    toBookUrl: string
+    name: string
+    author?: string
+    coverUrl?: string
+    /** 换过去之后落在哪一章。对不上就别给 —— 宁可从头开始 */
+    chapter?: { url: string; name: string; index: number; pageIndex?: number }
+}
+
+/**
+ * 换源：把书架上的这本书挪到另一个书源上
+ *
+ * 最要紧的一件事是**主键会变** —— 书架行与进度行的主键都是 `bookKey(sourceId, bookUrl)`
+ * （见 data/types.ts），所以换源不是改一个字段，而是「新的那行插进去、旧的那行连同进度删掉」。
+ * 这几步必须在**一个事务**里做完，否则中途断了会留下两行同一本书、或者一行都没有。
+ *
+ * 三处刻意的决定：
+ *
+ * 1. **`created_at` 沿用旧行**。它记的是「什么时候加入书架」，换源不改变这件事；
+ *    跟着改成现在的话，书架的排序会莫名其妙地把这本书顶到最前面。
+ * 2. **落在哪一章由调用方给**（`chapter`）。章节名对应新书源上哪一条，只有拿得到新目录的
+ *    人算得出来 —— 那是前端拿着 `/api/toc` 去对的事，这一层只负责落库。给不出来
+ *    （对不上、或者新目录读不到）就**不写进度**，让这本书从第一章开始，而不是把旧地址
+ *    硬塞进去（那个地址在新源上根本不存在，点进去就是 404）。
+ * 3. **目标源上已经有这本书时**（用户把两个源都加过书架）：不新增第二行，而是并进已有那行，
+ *    并按调用方给的位置覆盖进度 —— 「换过去接着读」是这一步的意图，留着目标那行自己的
+ *    位置会变成「换了源，结果还停在原地」。
+ *
+ * 书签与笔记**不跟着走**：它们各自带着 `chapter_url`，换了源那些地址在新源上不存在，
+ * 搬过去只会变成一堆点了报错的条目。它们仍挂在原来那一源的书下（见 TODO.md）。
+ */
+export async function switchShelfSource(
+    db: PlatformDb,
+    owner: string,
+    input: SwitchShelfSourceInput,
+): Promise<{ entry: ShelfEntry; movedProgress: boolean }> {
+    const fromSourceId = requireShortString(input.fromSourceId, 'fromSourceId', MAX_URL_LENGTH)
+    const fromBookUrl = requireShortString(input.fromBookUrl, 'fromBookUrl', MAX_URL_LENGTH)
+    const toSourceId = requireShortString(input.toSourceId, 'toSourceId', MAX_URL_LENGTH)
+    const toBookUrl = requireShortString(input.toBookUrl, 'toBookUrl', MAX_URL_LENGTH)
+    const name = requireShortString(input.name, 'name', MAX_NAME_LENGTH)
+    const author = typeof input.author === 'string' ? input.author.trim() : ''
+    const coverUrl = typeof input.coverUrl === 'string' ? input.coverUrl.trim() : ''
+
+    const fromKey = bookKey(fromSourceId, fromBookUrl)
+    const toKey = bookKey(toSourceId, toBookUrl)
+    if (fromKey === toKey) {
+        throw new DataError('换源前后是同一个地址', 400, 'shelf_switch_same_target')
+    }
+
+    const old = await getShelfEntry(db, owner, fromKey)
+    if (!old) throw new DataError(`书架里没有这本书：${fromKey}`, 404, 'shelf_entry_not_found')
+
+    const now = Date.now()
+    const chapter = input.chapter
+    const statements = [
+        db
+            .prepare(
+                `INSERT INTO shelf (owner, book_key, source_id, book_url, name, author, cover_url, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(owner, book_key) DO UPDATE SET
+                     name = excluded.name,
+                     author = excluded.author,
+                     cover_url = excluded.cover_url,
+                     updated_at = excluded.updated_at`,
+            )
+            .bind(owner, toKey, toSourceId, toBookUrl, name, author, coverUrl, old.createdAt, now),
+        db.prepare('DELETE FROM shelf WHERE owner = ? AND book_key = ?').bind(owner, fromKey),
+        // 旧进度跟着旧行一起走：留着它就成了「一条读不到书的进度」
+        db
+            .prepare('DELETE FROM reading_progress WHERE owner = ? AND book_key = ?')
+            .bind(owner, fromKey),
+    ]
+    if (chapter) {
+        statements.push(
+            db
+                .prepare(
+                    `INSERT INTO reading_progress (owner, book_key, chapter_url, chapter_name, chapter_index, page_index, updated_at)
+                     VALUES (?, ?, ?, ?, ?, ?, ?)
+                     ON CONFLICT(owner, book_key) DO UPDATE SET
+                         chapter_url = excluded.chapter_url,
+                         chapter_name = excluded.chapter_name,
+                         chapter_index = excluded.chapter_index,
+                         page_index = excluded.page_index,
+                         updated_at = excluded.updated_at`,
+                )
+                .bind(
+                    owner,
+                    toKey,
+                    requireShortString(chapter.url, 'chapter.url', MAX_URL_LENGTH),
+                    chapter.name,
+                    chapter.index,
+                    chapter.pageIndex ?? 0,
+                    now,
+                ),
+        )
+    }
+    await db.batch(statements)
+
+    const entry = await getShelfEntry(db, owner, toKey)
+    if (!entry) {
+        // 写进去了却读不出来 = 存储层出了问题，不能当成「换好了」返回
+        throw new DataError('换源后读不回这条记录', 500, 'shelf_write_failed')
+    }
+    return { entry, movedProgress: chapter !== undefined }
+}
+
 export async function getProgress(
     db: PlatformDb,
     owner: string,

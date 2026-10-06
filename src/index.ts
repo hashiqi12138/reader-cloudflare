@@ -29,8 +29,15 @@ import {
     persistSourceVariable,
 } from './data/sources'
 import type { RegistryOptions, RegisteredSource } from './data/sources'
-import { addToShelf, getProgress, listShelf, removeFromShelf, saveProgress } from './data/library'
-import type { AddToShelfInput, SaveProgressInput } from './data/library'
+import {
+    addToShelf,
+    getProgress,
+    listShelf,
+    removeFromShelf,
+    saveProgress,
+    switchShelfSource,
+} from './data/library'
+import type { AddToShelfInput, SaveProgressInput, SwitchShelfSourceInput } from './data/library'
 import { addBookmark, listBookmarks, removeBookmark, updateBookmarkNote } from './data/bookmarks'
 import type { BookmarkInput } from './data/bookmarks'
 import { addNote, listNotes, removeNote, updateNoteText } from './data/notes'
@@ -158,6 +165,20 @@ function fail(
 /** 本次请求的注册表选项 */
 function registryOf(env: AppEnv): RegistryOptions {
     return { includeFixture: env.ENABLE_FIXTURE === 'true' }
+}
+
+/**
+ * 一次搜索要不要把**全部**启用的书源跑一遍
+ *
+ * 这条判据只依赖部署级配置（`AppEnv.SEARCH_ALL_SOURCES`），不依赖请求 ——
+ * 它回答的是「这个宿主能不能在一个请求里把几百个源的规则求值跑完」：
+ * Workers 免费计划每请求只有 10 毫秒 CPU，不能（见 wrangler.jsonc）；
+ * 自建与容器那份没有这个上限，能（见 platform/node.ts，那边默认就是开的）。
+ *
+ * 前端从 `/api/version` 读到同一个值，用来决定文案与「继续加载」按钮去留。
+ */
+function searchAllSources(env: AppEnv): boolean {
+    return env.SEARCH_ALL_SOURCES === 'true'
 }
 
 /**
@@ -422,7 +443,7 @@ app.get('/api/probe', async (c) => {
 app.get('/api/health', (c) => c.json({ ok: true }))
 
 /**
- * 版本号与更新记录（前端「关于」页与页脚读它）
+ * 版本号、更新记录与**这个部署怎么搜**（前端「关于」页、页脚与搜索页读它）
  *
  * 单独一个接口，而不是塞进 `/api/probe`：那个接口为了探活会真的跑一次 cheerio、
  * 一次 QuickJS 求值和一次 D1 查询，前端为了显示一行版本号去调它太贵了。
@@ -430,11 +451,22 @@ app.get('/api/health', (c) => c.json({ ok: true }))
  *
  * `version` 只从 `ENGINE_VERSION` 出，**不在前端再抄一份**：抄了就会漂，
  * 而「界面显示 0.53、实际跑 0.52」这种故障不会报错，只会让人对着错版本排查。
+ * `features` 同理 —— 它由 `searchAllSources()` 从部署配置算出来，前端只读不猜。
  */
 app.get('/api/version', (c) =>
     c.json({
         version: c.env.ENGINE_VERSION ?? 'unknown',
         changelog: CHANGELOG,
+        /**
+         * 这个部署的能力开关，前端照着改界面
+         *
+         * `searchAllSources`：不挑书源时**一个请求**就把全部启用的书源搜完，
+         * 还是只能一页几个（见 `searchAllSources()`）。前者没有「继续加载」那套分片，
+         * 后者有 —— 两种界面上差得不多，但差得最要命的是一句文案骗人。
+         */
+        features: {
+            searchAllSources: searchAllSources(c.env),
+        },
     }),
 )
 
@@ -932,6 +964,50 @@ app.delete('/api/shelf', async (c) => {
     try {
         const removed = await removeFromShelf(c.env.DB, owner, key)
         return c.json({ removed: removed.bookKey, name: removed.name })
+    } catch (err) {
+        return fail(c, err)
+    }
+})
+
+/**
+ * 换源：把书架上的这本书挪到另一个书源上（细节见 `data/library.ts` 的 `switchShelfSource`）
+ *
+ * 只在「这本书已经在书架上」时有意义 —— 不在书架的书，详情页直接换到新源打开即可，
+ * 没有任何东西要搬（也就不用为它写一条书架行）。
+ */
+app.post('/api/shelf/switch', async (c) => {
+    let owner: string
+    try {
+        owner = await ownerOf(c)
+    } catch (err) {
+        return fail(c, err)
+    }
+
+    let body: SwitchShelfSourceInput
+    try {
+        body = await c.req.json()
+    } catch {
+        return c.json({ error: '请求体必须是 JSON' }, 400)
+    }
+
+    /**
+     * 目标源得真的在
+     *
+     * 不校验的话会落下一行指向不存在书源的书架行 —— 界面上是一本点进去什么都读不到的书，
+     * 而且不会报错。这一类「静默的半坏数据」正是这个项目一直在躲的东西。
+     */
+    try {
+        const origin = new URL(c.req.url).origin
+        const id = String(body?.toSourceId ?? '')
+        const target = await findSource(c.env.DB, origin, id, registryOf(c.env))
+        if (!target) return c.json({ error: `找不到书源：${id}` }, 404)
+    } catch (err) {
+        return fail(c, err)
+    }
+
+    try {
+        const { entry, movedProgress } = await switchShelfSource(c.env.DB, owner, body)
+        return c.json({ entry, movedProgress })
     } catch (err) {
         return fail(c, err)
     }
@@ -1646,13 +1722,30 @@ app.post('/api/search', async (c) => {
     const limit = clampPage(Math.floor(Number(body.limit) || SEARCH_PAGE_SIZE))
     const offset = Math.max(0, Math.floor(Number(body.offset) || 0))
 
-    const page = body.sourceIds?.length
-        ? await listEnabledSourcesByIds(c.env.DB, origin, body.sourceIds, registryOf(c.env)).then(
-              (sources) => ({ sources, total: sources.length }),
-          )
-        : await listEnabledSourcePage(c.env.DB, origin, registryOf(c.env), { offset, limit })
-    const wanted = page.sources
-    const total = page.total
+    /**
+     * 这一趟搜哪些书源
+     *
+     * 三种情形：请求里点了书源 → 只搜那些；这个部署一次搜得完（自建 / 容器那份）
+     * → 全部启用的；剩下的才是**按页**来 —— 那是线上唯一可行的形状，
+     * 一页几个由 `offset` / `limit` 定，界面上对应「继续加载」（见 `searchAllSources`）。
+     */
+    let wanted: RegisteredSource[]
+    let total: number
+    if (body.sourceIds?.length) {
+        wanted = await listEnabledSourcesByIds(c.env.DB, origin, body.sourceIds, registryOf(c.env))
+        total = wanted.length
+    } else if (searchAllSources(c.env)) {
+        // 一次全量：`offset` / `limit` 在这条路上没有意义，不算它（回给前端只是回声）
+        wanted = await listEnabledSources(c.env.DB, origin, registryOf(c.env))
+        total = wanted.length
+    } else {
+        const page = await listEnabledSourcePage(c.env.DB, origin, registryOf(c.env), {
+            offset,
+            limit,
+        })
+        wanted = page.sources
+        total = page.total
+    }
 
     /**
      * 全部书源共用**一个** session

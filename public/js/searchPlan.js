@@ -32,6 +32,11 @@
  *
  * 本轮改动：「按名字 / 分组筛」那个纯函数搬去了 `sourceFilter.js`（与「书源」页
  * 的分组筛选共用同一套判据），这里不再有 `matchSources`。
+ *
+ * **第八十轮补一条出口**：上面这套「一页几个、失败就折半」只在**有 CPU 上限的宿主**上
+ * 才是出路。自建与容器那份没有这个上限（见 `src/platform/node.ts`），一次请求就能
+ * 把全部书源跑完 —— 那条路上这个文件里的分页与折半都不该出场，判据是服务端给的
+ * `features.searchAllSources`（见下面的 `searchAllAtOnce`）。
  */
 
 /** 一页默认搜几个书源 */
@@ -52,6 +57,21 @@ export function isCpuLimitError(err) {
     if (err.status === 503) return true
     const text = String(err.message ?? err)
     return text.includes('exceeded') || text.includes('CPU')
+}
+
+/**
+ * 这个部署能不能「一次把全部书源搜完」
+ *
+ * 判据来自服务端（`/api/version` 的 `features.searchAllSources`），前端**不猜** ——
+ * 它取决于宿主有没有每请求的 CPU 上限，那是部署时的事：自建与容器那份默认开着，
+ * 线上那份关着（见 `src/platform/node.ts` 与 `wrangler.jsonc`）。
+ *
+ * 开着的时候，下面那套「页大小折半」用不上：一次请求本来就该搜完，被掐就不会是
+ * 预算不够，而是真出了别的问题；界面上也不会出现「继续加载」，因为第一次回来的
+ * `searched` 就等于 `totalSources`。
+ */
+export function searchAllAtOnce(features) {
+    return features?.searchAllSources === true
 }
 
 // ---------------------------------------------------------------- 搜索范围（指定书源）

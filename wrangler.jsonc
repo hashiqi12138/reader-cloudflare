@@ -31,6 +31,12 @@
         "ENGINE_VERSION": "0.67.0",
         // 内置测试站点默认关闭，只在本地与 CI 打开
         "ENABLE_FIXTURE": "false",
+        // 线上这一条**必须**是 false：不带 sourceIds 的搜索会一次求值全部启用的书源，
+        // 而免费计划每请求只有 10 ms CPU（见本文件顶部那段），必然被掐成 503。
+        // 自建与容器那份（`src/platform/node.ts`）默认是 true —— 那里没有这个上限，
+        // 所以「一次把全部书源搜完」在那条路上是能成的。升到付费计划（CPU 上限 30 s）
+        // 之后这里也可以改成 true。
+        "SEARCH_ALL_SOURCES": "false",
     },
     // 书源、书架、阅读进度都落在这里。本地 wrangler dev 会自动用一份
     // 独立的 SQLite，不碰线上数据；迁移用 `npm run db:migrate` 应用。

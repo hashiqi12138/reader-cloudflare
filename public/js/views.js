@@ -33,6 +33,7 @@ import {
     skeletonBlock,
     skeletonList,
     toast,
+    versionFeatures,
 } from './core.js'
 import { mergeBooks, sourceBookKey } from './merge.js'
 import {
@@ -41,8 +42,10 @@ import {
     isCpuLimitError,
     nextPageSize,
     normalizeSelection,
+    searchAllAtOnce,
     searchableSources,
 } from './searchPlan.js'
+import { candidatesFor, matchChapter, progressPosition } from './switchSource.js'
 import {
     ABILITY_ALL,
     ABILITY_EXPLORE,
@@ -126,6 +129,19 @@ export async function removeBook(entry) {
     await api(`/api/shelf?key=${encodeURIComponent(entry.bookKey)}`, { method: 'DELETE' })
     invalidateShelf()
     toast(`已移出书架：${entry.name}`)
+}
+
+/**
+ * 换源：把书架上的这本书挪到另一个书源（`POST /api/shelf/switch`）
+ *
+ * `chapter` 必须是**在新目录里真的存在**的那一章（见 `switchSource.js` 的 `matchChapter`）。
+ * 对不出来就别传 —— 服务端那边「不给就不写进度」，于是这本书从第一章开始，
+ * 而不是把旧书源的章节地址塞进新书源里（那个地址在新源上点开就是 404）。
+ */
+export async function switchBookSource(input) {
+    const result = await postJson('/api/shelf/switch', input)
+    invalidateShelf()
+    return result
 }
 
 // ---------------------------------------------------------------- 登录
@@ -1385,6 +1401,21 @@ export async function viewSearch(host) {
     let busy = false
 
     /**
+     * 这个部署怎么搜（见 `searchPlan.js` 的 `searchAllAtOnce`）
+     *
+     * 值来自服务端 `/api/version` 的 `features` —— 前端不猜「能不能一次搜完」，
+     * 那是部署时定的事。读不到就按**保守**的那条来（分页 + 折半），
+     * 因为那条在两种部署上都安全：一次搜得完的部署里，第一趟回来
+     * `searched` 就等于 `totalSources`，「继续加载」自己就不会出现。
+     */
+    let allAtOnce = false
+    try {
+        allAtOnce = searchAllAtOnce((await loadVersion())?.features)
+    } catch {
+        /* 读不到版本信息不影响搜索，按保守的那条走 */
+    }
+
+    /**
      * 能搜的书源 —— 选范围时的候选
      *
      * 用 `loadSources()`（「书源」页那份缓存），切过来不会多打一次请求。
@@ -1409,7 +1440,12 @@ export async function viewSearch(host) {
             el('span', { class: 'muted tiny', text: '搜索范围：' }),
             el('strong', {
                 class: 'scope-value',
-                text: selected.length > 0 ? `指定 ${selected.length} 个书源` : '全部书源',
+                text:
+                    selected.length > 0
+                        ? `指定 ${selected.length} 个书源`
+                        : allAtOnce && pickable.length > 0
+                          ? `全部书源（${pickable.length} 个）`
+                          : '全部书源',
             }),
             el('div', { class: 'spacer' }),
             el('button', {
@@ -1559,7 +1595,9 @@ export async function viewSearch(host) {
             ]),
             el('p', {
                 class: 'muted tiny',
-                text: '默认一次搜一批书源（先从最可能出结果的开始），要更多就点「继续加载」；也可以指定几个书源，只搜它们。',
+                text: allAtOnce
+                    ? '这份部署一次就把全部启用的书源都搜一遍（它没有每个请求的 CPU 上限），慢一些，但不用挑源；也可以指定几个书源，只搜它们。'
+                    : '默认一次搜一批书源（先从最可能出结果的开始），要更多就点「继续加载」；也可以指定几个书源，只搜它们。',
             }),
             scopeHost,
             pickerHost,
@@ -1576,25 +1614,32 @@ export async function viewSearch(host) {
     }
 
     /**
-     * 拉一页
+     * 拉一趟
      *
-     * 一个请求只搜一页（`SEARCH_PAGE_SIZE` 个源）：免费计划每个请求只有 10 ms CPU，
-     * 一次把全部书源读出来再求值必然被掐（见 searchPlan.js 与 EXPERIENCE.md「第二十六轮」）。
-     * 被掐时**不换时刻重试** —— 线上实测额度恢复得很慢，紧接着再发照样被掐 ——
-     * 而是把这一页**折半**再试，一路折到 1 个源。
+     * 有 CPU 上限的部署（线上那份）一次只搜一页（`SEARCH_PAGE_SIZE` 个源）：免费计划
+     * 每个请求只有 10 ms CPU，一次把全部书源读出来再求值必然被掐（见 searchPlan.js 与
+     * EXPERIENCE.md「第二十六轮」）。被掐时**不换时刻重试** —— 线上实测额度恢复得很慢，
+     * 紧接着再发照样被掐 —— 而是把这一页**折半**再试，一路折到 1 个源。
+     *
+     * 自建与容器那份没有这个上限（`allAtOnce`，见上面那段）：**不带分页字段**发过去，
+     * 一个请求就把全部启用的书源搜完。那条路上不该有折半这回事 —— 被掐只可能是真出了
+     * 别的问题，把页折小是治错了病。
      *
      * **指定了书源就换一条路**：一次把用户选的那几个发过去（`sourceIds`），
      * 而且**不折半** —— 范围是用户定的，少搜一个就不是他要的结果了，宁可报错让他重来。
      */
     async function loadPage() {
         const scoped = selected.length > 0
+        const whole = !scoped && allAtOnce
         for (;;) {
             try {
                 const data = await postJson(
                     '/api/search',
                     scoped
                         ? { keyword, sourceIds: [...selected] }
-                        : { keyword, offset: searched, limit: pageLimit },
+                        : whole
+                          ? { keyword }
+                          : { keyword, offset: searched, limit: pageLimit },
                 )
                 totalSources = data.totalSources ?? searched + (data.searched ?? 0)
                 perSource.push(...(data.sources ?? []))
@@ -1602,7 +1647,7 @@ export async function viewSearch(host) {
                 remember()
                 return
             } catch (err) {
-                if (!scoped && isCpuLimitError(err) && pageLimit > SEARCH_MIN_PAGE) {
+                if (!scoped && !whole && isCpuLimitError(err) && pageLimit > SEARCH_MIN_PAGE) {
                     pageLimit = nextPageSize(pageLimit)
                     continue
                 }
@@ -2617,6 +2662,263 @@ async function importChunked(raw, onProgress) {
 
 // ---------------------------------------------------------------- 书籍详情
 
+/**
+ * 换源面板
+ *
+ * 「这本书在别的地方有没有」这件事，本质上是**拿书名去别的书源上搜一遍**
+ * （`/api/search` 的 `keyword` 就是书名），所以面板打开时就去搜 —— 而不是像早先那样
+ * 只能靠「上一次搜索恰好搜到过这本书、且还没刷新页面」。
+ *
+ * 搜索这一趟的形状跟着部署走（见 `searchPlan.js` 的 `searchAllAtOnce`）：能一次搜完的
+ * 部署一个请求就结束；不能的（线上那份）一批一批来，面板上如实写「已看 X / Y 个书源」
+ * 并留一个「再看一批」。**不假装搜完了全部** —— 那一页没搜到的源里可能正有更好的版本。
+ *
+ * 选中之后真正要算的只有一件事：**落在哪一章**。这需要新书源的目录
+ * （`/api/book` 拿 `tocUrl`、再 `/api/toc`），然后按章名对（`switchSource.js` 的
+ * `matchChapter`）。对不上就如实说「从第一章开始」，并且**不写进度** ——
+ * 换个源之后停在错的章节，比从头开始更难发现。
+ */
+function openSwitchPanel({ current, position, known, entries, onShelf, onSwitched }) {
+    /**
+     * 候选表：键是「书源 + 书籍地址」
+     *
+     * `known` 是「上一次搜索的合并结果里已知的那几个源」（可能为空：直接分享链接进来
+     * 就没搜过），它先摆上，接着被这趟搜索的结果补齐 —— 用同一个键去重，
+     * 所以同一个来源不会因为两条路都提到它而出现两次。
+     */
+    const found = new Map()
+    let busy = false
+    let picking = false
+    let state = '正在按书名搜索别的书源…'
+    let more = null
+
+    const stateHost = el('p', { class: 'muted tiny switch-state' })
+    const listHost = el('div', { class: 'switch-list' })
+    const moreHost = el('div', { class: 'row switch-more' })
+
+    const host = el('div', { class: 'switch-host' }, [
+        el('div', { class: 'switch-backdrop', onclick: () => close() }),
+        el('section', { class: 'switch-panel', role: 'dialog', 'aria-label': '换源' }, [
+            el('header', {}, [
+                el('h2', { text: `换源：${current.name}` }),
+                el('div', { class: 'spacer' }),
+                el('button', { class: 'btn sm ghost', text: '关闭', onclick: () => close() }),
+            ]),
+            el('div', { class: 'switch-body' }, [
+                el('p', {
+                    class: 'muted tiny',
+                    text: onShelf
+                        ? '挑一个来源换过去，书架的记录与阅读位置会一起跟过去。'
+                        : '挑一个来源打开这本书。它不在书架上，所以没有记录要搬。',
+                }),
+                stateHost,
+                listHost,
+                moreHost,
+            ]),
+        ]),
+    ])
+
+    const close = () => {
+        document.removeEventListener('keydown', onKey)
+        host.remove()
+    }
+    const onKey = (event) => {
+        if (event.key === 'Escape') close()
+    }
+    document.addEventListener('keydown', onKey)
+    document.body.append(host)
+
+    function add(sourceId, sourceName, book, authorDiffers) {
+        found.set(sourceBookKey(sourceId, book.bookUrl), {
+            sourceId,
+            sourceName,
+            book,
+            authorDiffers,
+        })
+    }
+
+    for (const one of known ?? []) add(one.sourceId, one.sourceName, one.book, false)
+
+    function paintState() {
+        setChildren(stateHost, [el('span', { text: state })])
+        setChildren(moreHost, [
+            more === null
+                ? null
+                : el('button', {
+                      class: 'btn sm ghost',
+                      text: more,
+                      disabled: busy || picking,
+                      onclick: () => void searchMore(),
+                  }),
+        ])
+    }
+
+    function row(item) {
+        const saved = inShelf(entries, item.sourceId, item.book.bookUrl)
+        const meta = [
+            item.book.author ? `作者 ${item.book.author}` : '',
+            item.book.lastChapter ? `最新 ${item.book.lastChapter}` : '',
+            item.authorDiffers ? '作者与手上这本不同，可能是同名的另一本' : '',
+        ].filter((one) => one !== '')
+
+        return el('div', { class: 'switch-item' }, [
+            el('div', { class: 'switch-item-main' }, [
+                el('div', { class: 'switch-item-title' }, [
+                    el('span', {
+                        class: 'switch-item-name',
+                        text: item.sourceName || '未命名书源',
+                    }),
+                    saved ? el('span', { class: 'badge ghost', text: '已在书架' }) : null,
+                ]),
+                meta.length > 0
+                    ? el('div', { class: 'switch-item-meta muted tiny', text: meta.join(' · ') })
+                    : null,
+            ]),
+            el('button', {
+                class: 'btn sm',
+                text: '换到这一源',
+                disabled: picking,
+                onclick: () => void pick(item),
+            }),
+        ])
+    }
+
+    function paintList() {
+        const items = [...found.values()]
+        if (items.length === 0) {
+            setChildren(listHost, [
+                el('p', {
+                    class: 'muted tiny',
+                    text: busy ? '还没找到别的来源…' : '没找到别的来源。',
+                }),
+            ])
+            return
+        }
+        setChildren(listHost, items.map(row))
+    }
+
+    async function searchMore() {
+        if (busy || picking) return
+        busy = true
+        more = null
+        state = '正在按书名搜索别的书源…'
+        paintState()
+        paintList()
+        try {
+            const data = await postJson(
+                '/api/search',
+                // 一次搜得完的部署不带分页字段（见 searchPlan.js）；否则一页一页来
+                allAtOnceForSearch()
+                    ? { keyword: current.name }
+                    : { keyword: current.name, offset: searchedCount, limit: SEARCH_PAGE_SIZE },
+            )
+            const total = data.totalSources ?? searchedCount + (data.searched ?? 0)
+            searchedCount += data.searched ?? 0
+            for (const item of candidatesFor(data.sources ?? [], current)) {
+                add(item.sourceId, item.sourceName, item.book, item.authorDiffers)
+            }
+            state =
+                searchedCount >= total
+                    ? `已搜完 ${searchedCount} 个书源，找到 ${found.size} 个别的来源。`
+                    : `已看 ${searchedCount} / ${total} 个书源，找到 ${found.size} 个别的来源。`
+            more = searchedCount < total ? `再看一批（还有 ${total - searchedCount} 个书源）` : null
+        } catch (err) {
+            state = `搜索失败：${err.message}`
+            more = '重试'
+        } finally {
+            busy = false
+            paintState()
+            paintList()
+        }
+    }
+
+    /** 这一趟搜索要不要一次搜完 —— 与搜索页读的是同一个开关（见 `searchPlan.js`） */
+    function allAtOnceForSearch() {
+        return searchAllAtOnce(versionFeatures())
+    }
+    let searchedCount = 0
+
+    async function pick(item) {
+        if (picking) return
+        picking = true
+        state = `正在换到「${item.sourceName}」…`
+        paintState()
+        paintList()
+
+        let chapter = null
+        let how = 'none'
+        try {
+            if (position) {
+                // 目录读不到不是致命错误：那本书照样能打开，只是位置得从头开始
+                try {
+                    const hint = {
+                        name: item.book.name ?? current.name,
+                        author: item.book.author ?? current.author,
+                        bookUrl: item.book.bookUrl,
+                    }
+                    const info = await api(
+                        `/api/book?${paramsOf({ sourceId: item.sourceId, url: item.book.bookUrl, ...contextParams(hint) })}`,
+                    )
+                    if (info.tocUrl) {
+                        const toc = await api(
+                            `/api/toc?${paramsOf({ sourceId: item.sourceId, url: info.tocUrl, ...contextParams(hint) })}`,
+                        )
+                        const at = matchChapter(toc.chapters, position)
+                        if (at.index >= 0) {
+                            const one = toc.chapters[at.index]
+                            chapter = { url: one.url, name: one.name ?? '', index: at.index }
+                            how = at.how
+                        }
+                    }
+                } catch {
+                    /* 按下面的「没找到」文案处理 */
+                }
+            }
+
+            if (onShelf) {
+                await switchBookSource({
+                    fromSourceId: current.sourceId,
+                    fromBookUrl: current.bookUrl,
+                    toSourceId: item.sourceId,
+                    toBookUrl: item.book.bookUrl,
+                    name: item.book.name || current.name,
+                    author: item.book.author || current.author,
+                    coverUrl: item.book.coverUrl ?? '',
+                    ...(chapter ? { chapter } : {}),
+                })
+            }
+
+            close()
+            toast(switchMessage(item, { onShelf, chapter, how }))
+            onSwitched?.(item)
+        } catch (err) {
+            picking = false
+            state = `换源失败：${err.message}`
+            paintState()
+            paintList()
+        }
+    }
+
+    paintState()
+    paintList()
+    void searchMore()
+}
+
+/**
+ * 换源之后那句话
+ *
+ * 三种落点要说得不一样 —— 「接着读第 N 章」「章名对不上、按序号落在第 N 章」
+ * 「没找到那一章，从第一章开始」是三件不同的事，含糊成一句「换源成功」就等于
+ * 把「读者下次翻页发现跳了」这件事藏起来了。
+ */
+function switchMessage(item, { onShelf, chapter, how }) {
+    const where = `「${item.sourceName}」`
+    if (!onShelf) return `已换到 ${where} 打开这本书。`
+    if (!chapter) return `已换到 ${where}；没在新来源的目录里找到刚才那一章，从第一章开始。`
+    if (how === 'name') return `已换到 ${where}，接着读第 ${chapter.index + 1} 章。`
+    return `已换到 ${where}；章名对不上，按序号落在第 ${chapter.index + 1} 章。`
+}
+
 export async function viewBook(host) {
     const route = new URLSearchParams(location.hash.split('?')[1] ?? '')
     const sourceId = route.get('sourceId') ?? ''
@@ -2732,32 +3034,67 @@ export async function viewBook(host) {
             : null
 
     /**
-     * 换源：别的书源上也有这本书时，列一排按钮
+     * 换源入口
      *
-     * 搜索结果是按书合并的，所以「这本书在哪些源上有」这件事只有这里能回答 ——
-     * 换了源之后同一个页面重新走一遍，地址换成那一源的地址，其余一切照旧。
-     * 缓存来自最近一次搜索；直接分享链接进来（没搜过）时这一排不出现，不影响读书。
+     * 早先这一排只在「上一次搜索恰好搜到过这本书」时才出现（候选来自那次搜索的合并结果，
+     * 刷新页面就没了）。而「别的书源上有没有这本」本来就能**按需问出来** —— 拿书名搜一遍
+     * 就是答案，所以现在是一颗按钮 + 面板（见 `openSwitchPanel`）。
+     * 上一次搜索的合并结果仍然有用：它让面板一打开就先有几个候选，不必干等那一趟搜索。
      */
     const group = mergedIndex.get(sourceBookKey(sourceId, target))
-    const others = (group?.sources ?? []).filter((item) => item.sourceId !== sourceId)
-    const switchRow =
-        others.length > 0
-            ? el('section', { class: 'card switch-sources' }, [
-                  el('h2', { text: `换源（还有 ${others.length} 个书源有这本书）` }),
-                  el(
-                      'div',
-                      { class: 'row' },
-                      others.map((item) =>
-                          el('button', {
-                              class: 'btn sm ghost',
-                              text: item.sourceName,
-                              title: `用「${item.sourceName}」打开这本书`,
-                              onclick: () => go(bookUrl(item.sourceId, item.book)),
-                          }),
-                      ),
-                  ),
-              ])
-            : null
+    const known = (group?.sources ?? []).filter((item) => item.sourceId !== sourceId)
+
+    /**
+     * 换源要用的那个「读到哪儿了」—— 问 `/api/progress`，不信书架缓存
+     *
+     * 书架列表是模块级缓存（见 `loadShelf`），**只有 `invalidateShelf()` 之后才重取**，
+     * 而阅读页每换一章都会写进度、却不刷新它。于是「刚读完第二章，回详情页换源」
+     * 这条路拿到的是 `chapterName: null` 的旧数据 —— 换源照做，但阅读位置被**静默
+     * 降级成「从头开始」**，界面上还说「已换到 X」，用户读到那儿才发现。
+     *
+     * `/api/progress` 是这件事的权威来源，一次请求就换掉这个静默故障。
+     * 读不到（没登录、离线）就退回书架缓存那一份 —— 换源不该因为读不到位置而失败。
+     */
+    const mine = entries.find((one) => one.sourceId === sourceId && one.bookUrl === target)
+    let position = progressPosition(mine)
+    try {
+        const data = await api(`/api/progress?${paramsOf({ sourceId, bookUrl: target })}`)
+        position = progressPosition(data.progress)
+    } catch {
+        /* 用上面那份书架缓存里的 */
+    }
+    const switchRow = el('section', { class: 'card switch-sources' }, [
+        el('h2', { text: '换源' }),
+        el('p', {
+            class: 'muted tiny',
+            text: position
+                ? '换个书源接着读，阅读位置会尽量跟着过去。'
+                : '别的书源上也有这本书时，可以换过去。',
+        }),
+        el('div', { class: 'row' }, [
+            el('button', {
+                class: 'btn',
+                text: '找找别的来源',
+                onclick: () =>
+                    openSwitchPanel({
+                        current: { sourceId, bookUrl: target, name, author },
+                        position,
+                        known,
+                        entries,
+                        onShelf: saved,
+                        /**
+                         * 换完**跟着过去**
+                         *
+                         * 不跟的话页面还停在老源上：书架上的记录已经是新源了，眼睛看的
+                         * 却是旧源那份详情，再点「开始阅读」又走回旧源 —— 换源这件事
+                         * 做了等于没做。所以直接跳到新源的详情页（参数从面板给的那条
+                         * 候选里来，书名作者也都是新源那边取回来的）。
+                         */
+                        onSwitched: (item) => go(bookUrl(item.sourceId, item.book)),
+                    }),
+            }),
+        ]),
+    ])
 
     setChildren(host, [
         el('article', { class: 'book-detail card' }, [

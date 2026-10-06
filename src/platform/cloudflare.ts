@@ -33,5 +33,7 @@ export function cloudflareEnv(env: Env): AppEnv {
         CACHE: defaultCache(),
         ENGINE_VERSION: env.ENGINE_VERSION,
         ENABLE_FIXTURE: env.ENABLE_FIXTURE,
+        // 线上固定 `false`：免费计划每请求 10 ms CPU 跑不动一次全量搜索（见 wrangler.jsonc）
+        SEARCH_ALL_SOURCES: env.SEARCH_ALL_SOURCES,
     }
 }

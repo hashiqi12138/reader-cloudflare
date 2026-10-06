@@ -1846,6 +1846,105 @@ body[data-reader='1'] main#view {
     overflow: auto;
     padding: var(--sp-3) var(--sp-4) var(--sp-6);
 }
+
+/* 换源面板（详情页那颗「找找别的来源」）—— 居中一张卡片，与 `.sheet` 是同一族味道 */
+.switch-host {
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: var(--sp-4);
+}
+.switch-backdrop {
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.4);
+    animation: fade-in 0.2s var(--ease);
+}
+.switch-panel {
+    position: relative;
+    width: min(560px, 100%);
+    max-height: min(660px, 100%);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    background: var(--surface);
+    color: var(--ink);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-3);
+    animation: switch-in 0.2s var(--ease);
+}
+@keyframes switch-in {
+    from {
+        transform: translateY(10px);
+        opacity: 0;
+    }
+}
+.switch-panel header {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    padding: var(--sp-3) var(--sp-4);
+    border-bottom: 1px solid var(--line);
+}
+.switch-panel header h2 {
+    margin: 0;
+    font-size: 15px;
+}
+.switch-body {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-2);
+    padding: var(--sp-3) var(--sp-4) var(--sp-5);
+}
+.switch-state {
+    margin: 0;
+}
+.switch-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    overscroll-behavior: contain;
+}
+.switch-item {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    padding: 8px 10px;
+    border-radius: var(--radius-sm);
+}
+.switch-item:hover {
+    background: var(--surface-2);
+}
+/* 长书名 / 长章名不许把这行撑破 —— 换行之后按钮会被挤到看不见的地方 */
+.switch-item-main {
+    flex: 1;
+    min-width: 0;
+}
+.switch-item-title {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    font-size: 13.5px;
+    color: var(--ink);
+}
+.switch-item-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.switch-item-meta {
+    margin-top: 2px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 .settings {
     display: flex;
     flex-direction: column;

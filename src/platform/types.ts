@@ -67,8 +67,10 @@ export interface PlatformCache {
 /**
  * 应用跑起来需要的那份环境
  *
- * `ENGINE_VERSION` / `ENABLE_FIXTURE` 是部署级配置（前者是界面「关于」页显示的版本号，
- * 后者是内置测试站点的开关），两个都**允许缺席** —— 少一个不该让整个应用起不来。
+ * 后三个是部署级配置：`ENGINE_VERSION`（界面「关于」页显示的版本号）、
+ * `ENABLE_FIXTURE`（内置测试站点的开关）、`SEARCH_ALL_SOURCES`
+ * （一次搜索是否把**全部**书源跑一遍，而不是一页几个）。
+ * 三个都**允许缺席** —— 少一个不该让整个应用起不来。
  */
 export interface AppEnv {
     DB: PlatformDb
@@ -76,4 +78,12 @@ export interface AppEnv {
     CACHE: PlatformCache
     ENGINE_VERSION?: string
     ENABLE_FIXTURE?: string
+    /**
+     * `'true'` = 不带 `sourceIds` 的搜索一次覆盖全部启用的书源
+     *
+     * 这条开关存在的唯一理由是**宿主有没有每请求的 CPU 上限**：Workers 免费计划
+     * 每请求 10 ms（见 wrangler.jsonc），一次求值八百个源必然被掐；自建与容器
+     * 那份没有这个上限，所以默认开着（见 platform/node.ts）。
+     */
+    SEARCH_ALL_SOURCES?: string
 }
