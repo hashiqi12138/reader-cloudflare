@@ -224,8 +224,61 @@ console.log('\n=== 3. 逐源跑通链路 ===')
 // 第 3、4 节只跑**文本源**：它们比的是三种规则方言在同一个页面上的提取结果。
 // 媒体源（图片/音频/文件）的正文形态本来就不同，混进来会让「逐字一致」这个断言失真 ——
 // 比如图片源返回的根本不是文字，比出来必然不等。它们在下面第 13 节单独验证。
-console.log('\n=== 搜索分页（免费计划的 10 ms CPU 上限逼出来的形态）===')
-{
+/**
+ * 搜索范围：一次搜完全部源，还是按页搜
+ *
+ * 同一套代码在两种宿主上是两种形状 —— 判据是「这个部署有没有每请求的 CPU 上限」：
+ * Workers 免费计划每请求 10 ms，一个请求里跑不完几百个源；自建与容器那份没有这个上限。
+ * 这件事服务端从部署配置算出来（`searchAllSources`），经 `/api/version` 的
+ * `features.searchAllSources` 下发给前端，前端照着改界面文案与「继续加载」按钮。
+ *
+ * 所以这一段**先读服务端自己怎么说的**，再按它说的那条路验。两条路都得在场 ——
+ * 只验一条的话，「开关接反了」「全量那条路被谁改回了分页」在冒烟里就是一片绿。
+ */
+const versionInfo = await getJson('/api/version')
+const searchAllAtOnce = versionInfo.json?.features?.searchAllSources === true
+console.log(
+    `\n=== 搜索范围（这个部署：${searchAllAtOnce ? '一次搜完全部源' : '按页搜，界面走「继续加载」'}）===`,
+)
+// 服务端必须真的说过这句话 —— 只说 true / false 都算数，但**不能说漏**
+// （前端读不到时按保守走，那样分页那份的文案会退化成「不知道能搜多少」，不是故障但不该发生）
+check(
+    typeof versionInfo.json?.features?.searchAllSources === 'boolean',
+    '/api/version 下发了 features.searchAllSources（前端靠它决定要不要「继续加载」）',
+    JSON.stringify(versionInfo.json?.features),
+)
+
+if (searchAllAtOnce) {
+    // 不带 sourceIds：一个请求就把全部启用的书源搜一遍
+    const all = await call('POST', '/api/search', { keyword: '测试' })
+    const ids = (all.json?.sources ?? []).map((s) => s.sourceId)
+    const total = all.json?.totalSources
+    check(all.status === 200, '[全量] 不带 sourceIds 的搜索返回 200', `status=${all.status}`)
+    check(
+        typeof total === 'number' && total > 3 && ids.length === total,
+        '[全量] 一次就把全部启用的书源搜完（不是一页几个）',
+        `searched=${ids.length} totalSources=${total}`,
+    )
+    check(
+        ids.length === new Set(ids).size,
+        '[全量] 结果里没有重复的书源',
+        `unique=${new Set(ids).size}`,
+    )
+
+    /**
+     * 带上 `offset` / `limit` 也不许被切成一小页
+     *
+     * 前端在「一次全量」的部署上根本不发这两个字段；这里故意发一次，验的是
+     * **服务端不依赖前端守规矩** —— 万一有别的客户端（或者回退到旧前端）带着分页字段来，
+     * 结果也不该变成「只搜了第 4 个源往后的三个」，那对用户就是「搜不到书」。
+     */
+    const withPaging = await call('POST', '/api/search', { keyword: '测试', offset: 3, limit: 3 })
+    check(
+        (withPaging.json?.sources ?? []).length === total,
+        '[全量] 请求里带了 offset/limit 也不会漏源（服务端不依赖前端守规矩）',
+        `searched=${(withPaging.json?.sources ?? []).length} totalSources=${total}`,
+    )
+} else {
     // 不带 sourceIds：服务端按「健康度」分页，一次只搜一页
     const page1 = await call('POST', '/api/search', { keyword: '测试', limit: 3 })
     check(page1.status === 200, '[分页] 一页搜索返回 200', `status=${page1.status}`)
@@ -7472,6 +7525,246 @@ console.log('\n=== 47. 搜索里的逐条字段也走批量求值（第六十一
             String(s.id).includes('batch-47'),
         ),
         '批量求值的三个测试源已清理',
+    )
+}
+
+console.log('\n=== 48. 换源（书架搬家 + 章节落点）===')
+{
+    /**
+     * 换源是一件**改主键**的事
+     *
+     * 书架行与阅读进度行的主键都是 `bookKey(sourceId, bookUrl)`
+     * （`书源 id + 换行 + 书籍地址`，见 src/data/types.ts），所以「换到另一个源」
+     * 不是改一个字段，而是「插新行 + 删旧行 + 搬进度」三件事 —— 必须一起成或一起败。
+     * 中间断掉就是一本书架上有名字、点进去没有进度的书，而且不报错。
+     *
+     * 这一段验的就是这三件事落在同一次请求里，外加三条底线的报法。
+     * 「按章名怎么在新源目录里找落点」是纯前端的事，在 test/switchSource.test.mjs 里单测。
+     */
+    const fromId = 'builtin:fixture-xpath'
+    const toId = 'builtin:fixture-css'
+    const showKey = (key) => String(key ?? '').replace('\n', ' ↵ ')
+
+    const user = await sessionUser('smokeswitch')
+    check(user.status === 201, '[换源] 注册临时账号拿到会话', `status=${user.status}`)
+
+    const anon = await fetch(`${BASE}/api/shelf/switch`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            fromSourceId: fromId,
+            fromBookUrl: `${BASE}/fixture/book/1`,
+            toSourceId: toId,
+            toBookUrl: `${BASE}/fixture/book/1`,
+            name: '匿名',
+        }),
+    })
+    check(
+        anon.status === 401,
+        '[换源] 未登录换源被挡住（401，不靠前端藏按钮）',
+        `status=${anon.status}`,
+    )
+
+    // 测试站点对所有源给同一份内容，所以这本书在两个源上都找得到，地址还一样
+    const hits = await call('POST', '/api/search', { keyword: '测试', sourceIds: [fromId] })
+    const book = (hits.json?.sources?.[0]?.books ?? [])[0] ?? {}
+    const bookUrl = String(book.bookUrl ?? '')
+    const bookName = String(book.name ?? '')
+    const bookAuthor = String(book.author ?? '')
+    check(bookUrl !== '' && bookName !== '', '[换源] 老源上搜到这本书', `${bookName} / ${bookUrl}`)
+
+    // 目录：落点要按章名对（真实场景两个源的章节地址必然不同，这里同址不影响接口本身）
+    const info = await getJson(
+        `/api/book?sourceId=${encodeURIComponent(fromId)}&url=${encodeURIComponent(bookUrl)}`,
+    )
+    const toc = await getJson(
+        `/api/toc?sourceId=${encodeURIComponent(fromId)}&url=${encodeURIComponent(String(info.json?.tocUrl ?? ''))}`,
+    )
+    const chapters = toc.json?.chapters ?? []
+    check(chapters.length >= 3, '[换源] 拿到章节列表', `count=${chapters.length}`)
+    const mark = chapters[2] ?? {}
+    check(Boolean(mark.url), '[换源] 取第三章当落点', JSON.stringify(mark.name ?? ''))
+
+    // ---- 先在老源上把书加进书架，并读到一个位置 ----
+    const added = await user.call('POST', '/api/shelf', {
+        sourceId: fromId,
+        bookUrl,
+        name: bookName,
+        author: bookAuthor,
+    })
+    check(added.status === 201, '[换源] 加入书架', `status=${added.status}`)
+    const saved = await user.call('PUT', '/api/progress', {
+        sourceId: fromId,
+        bookUrl,
+        chapterUrl: mark.url,
+        chapterName: mark.name ?? '',
+        chapterIndex: 2,
+    })
+    check(saved.status === 200, '[换源] 在老源上读到第三章（写入进度）', `status=${saved.status}`)
+
+    const shelfOf = async () => (await user.call('GET', '/api/shelf')).json?.entries ?? []
+    const before = (await shelfOf()).find((e) => e.sourceId === fromId) ?? {}
+    const fromKey = `${fromId}\n${bookUrl}`
+    const toKey = `${toId}\n${bookUrl}`
+    check(
+        before.bookKey === fromKey,
+        '[换源] 书架行的主键是「书源 id ↵ 书籍地址」',
+        showKey(before.bookKey),
+    )
+
+    const switched = await user.call('POST', '/api/shelf/switch', {
+        fromSourceId: fromId,
+        fromBookUrl: bookUrl,
+        toSourceId: toId,
+        toBookUrl: bookUrl,
+        name: bookName,
+        author: bookAuthor,
+        chapter: { url: mark.url, name: mark.name ?? '', index: 2 },
+    })
+    check(
+        switched.status === 200,
+        '[换源] 换源返回 200',
+        `status=${switched.status} ${switched.status === 200 ? '' : switched.text.slice(0, 160)}`,
+    )
+    check(
+        switched.json?.entry?.bookKey === toKey && switched.json?.entry?.sourceId === toId,
+        '[换源] 返回的是**新源**上那条书架行',
+        showKey(switched.json?.entry?.bookKey),
+    )
+    check(
+        switched.json?.movedProgress === true,
+        '[换源] 明确告诉调用方「进度跟着搬了」',
+        JSON.stringify(switched.json?.movedProgress),
+    )
+
+    /**
+     * 加入时间必须沿用旧行的
+     *
+     * `created_at` 记的是「这本书什么时候进的书架」。新行要是写了 `now`，
+     * 一本一年前加的书会因为换了个源被顶到书架最前面 —— 而这件事在界面上
+     * 看起来完全正常（书架本来就可以按加入时间排），只会让人觉得「排序坏了」。
+     */
+    check(
+        switched.json?.entry?.createdAt === before.createdAt,
+        '[换源] 加入时间沿用旧行（换源不该把书顶到书架最前）',
+        `${before.createdAt} → ${switched.json?.entry?.createdAt}`,
+    )
+
+    const after = await shelfOf()
+    check(
+        after.some((e) => e.bookKey === toKey) && !after.some((e) => e.bookKey === fromKey),
+        '[换源] 书架上是新主键、旧主键没了（不是两条并存的幽灵行）',
+        `count=${after.length}`,
+    )
+    const moved = after.find((e) => e.bookKey === toKey) ?? {}
+    check(
+        moved.chapterIndex === 2 && moved.chapterName === (mark.name ?? ''),
+        '[换源] 书架列表里带出的阅读位置已经是新源的第三章',
+        JSON.stringify({ name: moved.chapterName, index: moved.chapterIndex }),
+    )
+
+    const progressOnNew = await user.call(
+        'GET',
+        `/api/progress?sourceId=${encodeURIComponent(toId)}&bookUrl=${encodeURIComponent(bookUrl)}`,
+    )
+    check(
+        progressOnNew.json?.progress?.chapterUrl === mark.url,
+        '[换源] 进度真的搬到了新源上',
+        JSON.stringify(progressOnNew.json?.progress?.chapterUrl),
+    )
+    const progressOnOld = await user.call(
+        'GET',
+        `/api/progress?sourceId=${encodeURIComponent(fromId)}&bookUrl=${encodeURIComponent(bookUrl)}`,
+    )
+    check(
+        progressOnOld.json?.progress === null,
+        '[换源] 老源上不留孤儿进度（留着就是一条读不到书的进度）',
+        JSON.stringify(progressOnOld.json?.progress),
+    )
+
+    // ---- 三条底线 ----
+    const same = await user.call('POST', '/api/shelf/switch', {
+        fromSourceId: toId,
+        fromBookUrl: bookUrl,
+        toSourceId: toId,
+        toBookUrl: bookUrl,
+        name: bookName,
+    })
+    check(
+        same.status === 400 && same.json?.code === 'shelf_switch_same_target',
+        '[换源] 换到同一个地址报 400 shelf_switch_same_target',
+        `status=${same.status} code=${same.json?.code}`,
+    )
+
+    const missing = await user.call('POST', '/api/shelf/switch', {
+        fromSourceId: fromId,
+        fromBookUrl: `${BASE}/fixture/book/999`,
+        toSourceId: toId,
+        toBookUrl: `${BASE}/fixture/book/999`,
+        name: '不在书架的书',
+    })
+    check(
+        missing.status === 404 && missing.json?.code === 'shelf_entry_not_found',
+        '[换源] 不在书架的书报 404 shelf_entry_not_found',
+        `status=${missing.status} code=${missing.json?.code}`,
+    )
+
+    /**
+     * 目标源不存在 → 404，而且**不许留下半条数据**
+     *
+     * 不校验的话会落下一行指向不存在书源的书架行：界面上是一本点进去什么都读不到的书，
+     * 还不会报错。所以验两件事：状态码，以及旧行**原地不动**。
+     */
+    const ghost = await user.call('POST', '/api/shelf/switch', {
+        fromSourceId: toId,
+        fromBookUrl: bookUrl,
+        toSourceId: 'builtin:does-not-exist',
+        toBookUrl: bookUrl,
+        name: bookName,
+    })
+    check(ghost.status === 404, '[换源] 目标书源不存在报 404', `status=${ghost.status}`)
+    check(
+        (await shelfOf()).some((e) => e.bookKey === toKey),
+        '[换源] 目标源不存在时旧行原地不动（没有半途改坏）',
+    )
+
+    /**
+     * 不带落点的那种换源：**从第一章开始，而且不写进度**
+     *
+     * 这是「章名在新源目录里对不上」时前端会走的路（见 views.js 的 `openSwitchPanel`）。
+     * 它和「搬了进度」是两回事，返回的 `movedProgress` 必须分得清 ——
+     * 不然界面会对着一个假位置说「接着读第三章」。
+     */
+    const back = await user.call('POST', '/api/shelf/switch', {
+        fromSourceId: toId,
+        fromBookUrl: bookUrl,
+        toSourceId: fromId,
+        toBookUrl: bookUrl,
+        name: bookName,
+        author: bookAuthor,
+    })
+    check(
+        back.status === 200 && back.json?.movedProgress === false,
+        '[换源] 不给落点时 movedProgress=false（不假装搬了进度）',
+        JSON.stringify(back.json?.movedProgress),
+    )
+    check(
+        (
+            await user.call(
+                'GET',
+                `/api/progress?sourceId=${encodeURIComponent(fromId)}&bookUrl=${encodeURIComponent(bookUrl)}`,
+            )
+        ).json?.progress === null,
+        '[换源] 不给落点时新源上不写进度（宁可从头开始）',
+    )
+    check(
+        (
+            await user.call(
+                'GET',
+                `/api/progress?sourceId=${encodeURIComponent(toId)}&bookUrl=${encodeURIComponent(bookUrl)}`,
+            )
+        ).json?.progress === null,
+        '[换源] 旧进度照旧清掉（换完不留两份）',
     )
 }
 

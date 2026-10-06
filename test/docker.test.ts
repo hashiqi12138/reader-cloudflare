@@ -79,6 +79,13 @@ describe('数据落点与 compose 对得上', () => {
     it('compose 的 ENABLE_FIXTURE 默认关，与 wrangler.jsonc 线上那份一致', () => {
         expect(compose).toMatch(/ENABLE_FIXTURE: '\$\{ENABLE_FIXTURE:-false\}'/)
     })
+
+    it('compose 的 SEARCH_ALL_SOURCES 默认开，而且能与线上那份对得上', () => {
+        // 自建这份没有每请求的 CPU 上限，「一次搜完全部书源」是它该有的能力
+        expect(compose).toMatch(/SEARCH_ALL_SOURCES: '\$\{SEARCH_ALL_SOURCES:-true\}'/)
+        // 线上反过来：免费计划每请求 10 ms，一次求值几百个源必然被掐
+        expect(read('wrangler.jsonc')).toMatch(/"SEARCH_ALL_SOURCES":\s*"false"/)
+    })
 })
 
 describe('.dockerignore', () => {

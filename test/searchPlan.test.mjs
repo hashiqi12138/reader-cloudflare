@@ -5,6 +5,7 @@ import {
     isCpuLimitError,
     nextPageSize,
     normalizeSelection,
+    searchAllAtOnce,
     searchableSources,
 } from '../public/js/searchPlan.js'
 
@@ -61,6 +62,29 @@ describe('isCpuLimitError', () => {
         expect(isCpuLimitError({ status: 400 })).toBe(false)
         expect(isCpuLimitError(null)).toBe(false)
         expect(isCpuLimitError(undefined)).toBe(false)
+    })
+})
+
+/**
+ * 「一次搜完全部书源」这条开关只认服务端说的
+ *
+ * 值得单独钉住的是**默认方向**：读不到（老服务端、离线、还没加载）时必须按
+ * **关**处理 —— 反过来会在不能一次搜完的部署上把分页与折半那套兜底一起关掉，
+ * 而那种部署（线上免费计划）恰恰最需要它们。
+ */
+describe('searchAllAtOnce', () => {
+    it('服务端说开才是开', () => {
+        expect(searchAllAtOnce({ searchAllSources: true })).toBe(true)
+    })
+
+    it('读不到 / 字段缺席 / 值不是 true → 一律按关处理（保守的那条）', () => {
+        expect(searchAllAtOnce(undefined)).toBe(false)
+        expect(searchAllAtOnce(null)).toBe(false)
+        expect(searchAllAtOnce({})).toBe(false)
+        expect(searchAllAtOnce({ searchAllSources: false })).toBe(false)
+        // 字符串 'true' 不算：这个字段是 JSON 的布尔，不是环境变量那种字符串
+        expect(searchAllAtOnce({ searchAllSources: 'true' })).toBe(false)
+        expect(searchAllAtOnce(true)).toBe(false)
     })
 })
 

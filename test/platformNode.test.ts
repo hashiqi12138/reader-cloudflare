@@ -185,3 +185,74 @@ describe('Node 适配器：静态资源与缓存', () => {
         expect(none).toBeUndefined()
     })
 })
+
+/**
+ * 部署级开关的**默认方向**
+ *
+ * 两条开关的默认正好相反，而且反得有理 —— 所以更值得钉住：
+ *
+ *   - `ENABLE_FIXTURE`：要显式 `true` 才开。内置测试站点是给冒烟用的，
+ *     任何一条部署（包括别人从镜像起一份）都不该默认把它挂出去。
+ *   - `SEARCH_ALL_SOURCES`：要显式 `false` 才关。自建那份没有每请求的 CPU 上限，
+ *     「一次把全部书源搜完」正是它有而线上没有的那个能力（见 `platform/types.ts`）。
+ *
+ * 两条都读环境变量，所以用例里临时改 `process.env` 之后要还原 ——
+ * 漏了还原会让**同一文件里后面**的用例读到串味的值。
+ */
+describe('Node 适配器：部署级开关的默认', () => {
+    const withEnv = (values: Record<string, string | undefined>, run: () => void) => {
+        const before: Record<string, string | undefined> = {}
+        for (const key of Object.keys(values)) {
+            before[key] = process.env[key]
+            if (values[key] === undefined) delete process.env[key]
+            else process.env[key] = values[key]
+        }
+        try {
+            run()
+        } finally {
+            for (const key of Object.keys(values)) {
+                if (before[key] === undefined) delete process.env[key]
+                else process.env[key] = before[key]
+            }
+        }
+    }
+
+    const open = (options = {}) => {
+        const dir = mkdtempSync(join(tmpdir(), 'rc-switch-'))
+        const env = nodeEnv({ dbPath: join(dir, 'x.sqlite'), publicRoot: dir, ...options })
+        opened.push(env)
+        return env
+    }
+
+    it('SEARCH_ALL_SOURCES：不写就是开（自建那份与线上相反）', () => {
+        withEnv({ SEARCH_ALL_SOURCES: undefined }, () => {
+            expect(open().SEARCH_ALL_SOURCES).toBe('true')
+        })
+    })
+
+    it('SEARCH_ALL_SOURCES=false 才关，其它值（含空串）都算开', () => {
+        withEnv({ SEARCH_ALL_SOURCES: 'false' }, () => {
+            expect(open().SEARCH_ALL_SOURCES).toBe('false')
+        })
+        for (const value of ['true', 'TRUE', '', 'no', '0']) {
+            withEnv({ SEARCH_ALL_SOURCES: value }, () => {
+                expect(open().SEARCH_ALL_SOURCES, value).toBe('true')
+            })
+        }
+    })
+
+    it('显式选项优先于环境变量', () => {
+        withEnv({ SEARCH_ALL_SOURCES: 'true' }, () => {
+            expect(open({ searchAllSources: false }).SEARCH_ALL_SOURCES).toBe('false')
+        })
+    })
+
+    it('ENABLE_FIXTURE 的方向相反：不写就是关', () => {
+        withEnv({ ENABLE_FIXTURE: undefined }, () => {
+            expect(open().ENABLE_FIXTURE).toBe('false')
+        })
+        withEnv({ ENABLE_FIXTURE: 'true' }, () => {
+            expect(open().ENABLE_FIXTURE).toBe('true')
+        })
+    })
+})
