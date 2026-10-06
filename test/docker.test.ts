@@ -21,12 +21,21 @@ import { describe, expect, it } from 'vitest'
 const read = (name: string) => readFileSync(new URL(`../${name}`, import.meta.url), 'utf8')
 
 const dockerfile = read('Dockerfile')
+const pageDockerfile = read('Dockerfile.page')
+const nginx = read('page.nginx.conf')
 const compose = read('docker-compose.yml')
 const dockerignore = read('.dockerignore')
 const doc = read('DOCKER.md')
 
 /** 容器里那个数据库路径（`ENV DB_PATH=…` 那一行） */
 const dbPath = /^ENV DB_PATH=(\S+)$/m.exec(dockerfile)?.[1] ?? ''
+/** 接口那一份在容器里监听的端口（`ENV PORT=…`） */
+const apiPort = /^ENV PORT=(\d+)$/m.exec(dockerfile)?.[1] ?? ''
+/** 页面那一份暴露的端口（`EXPOSE …`） */
+const pagePort = /^EXPOSE (\d+)$/m.exec(pageDockerfile)?.[1] ?? ''
+/** compose 里两个服务的配置块（按缩进切，够用且不必引 YAML 依赖） */
+const apiBlock = compose.slice(compose.indexOf('\n    api:\n'), compose.indexOf('\n    page:\n'))
+const pageBlock = compose.slice(compose.indexOf('\n    page:\n'), compose.indexOf('\nvolumes:'))
 
 describe('Dockerfile', () => {
     it('两阶段构建：构建阶段装了打包器，运行阶段只装运行期依赖', () => {
@@ -62,35 +71,115 @@ describe('Dockerfile', () => {
     })
 })
 
+describe('两服务分工：页面（nginx）与接口（node）', () => {
+    it('两个服务各建各的镜像，页面那份用 `Dockerfile.page`', () => {
+        expect(apiBlock).toContain('build: .')
+        expect(pageBlock).toContain('dockerfile: Dockerfile.page')
+        // 页面那份是 nginx（只有它与静态资源），接口那份是 node
+        expect(pageDockerfile).toMatch(/^FROM nginx:/m)
+        expect(pageDockerfile).toContain('COPY public /usr/share/nginx/html')
+        expect(dockerfile).toMatch(/^CMD \["node", "dist-node\/server\.mjs"\]$/m)
+    })
+
+    it('只有页面那一份对外发端口 —— 浏览器只该看到一个源', () => {
+        expect(pageBlock).toMatch(/ports:/)
+        expect(pageBlock).toContain(`:${pagePort}'`)
+        // 接口那一份不 publish（要直接调它就在 compose 里自己加一行，见 DOCKER.md）
+        expect(apiBlock).not.toMatch(/^\s+ports:/m)
+    })
+
+    it('接口那一份关掉静态资源，页面那一份的 nginx 打到接口的监听端口', () => {
+        // compose 里关掉；代码里的默认仍是「发」（单容器与 `npm run start:node` 靠它）
+        expect(apiBlock).toContain(`SERVE_STATIC: 'false'`)
+        expect(read('src/server/node.ts')).toMatch(/process\.env\.SERVE_STATIC !== 'false'/)
+        expect(dockerfile).toMatch(/^ENV SERVE_STATIC=true$/m)
+        // 这一条最要紧：接口换了端口而 nginx 没跟着改 = 全站接口 502
+        expect(apiPort).toBeTruthy()
+        expect(nginx).toContain(`set $api_upstream http://api:${apiPort};`)
+    })
+
+    it('上游按请求解析，而不是启动时解析一次就记死', () => {
+        // `proxy_pass http://api:8787` 直写的话，nginx 启动时解析一次并一直用那个 IP ——
+        // api 容器重建换了地址就全站 502，除非有人记得把 page 也重启一遍。
+        // 写成变量 + 声明 Docker 内嵌 DNS 才会按 ttl 重新解析。
+        expect(nginx).toMatch(/proxy_pass \$api_upstream;/)
+        expect(nginx).toMatch(/resolver 127\.0\.0\.11/)
+    })
+
+    it('页面那一份等接口健康了再起（否则头几秒打开页面会拿到 502）', () => {
+        expect(pageBlock).toMatch(/depends_on:/)
+        expect(pageBlock).toContain('condition: service_healthy')
+        // 健康检查得真的存在，不然 compose 会直接拒绝启动
+        expect(dockerfile).toMatch(/^HEALTHCHECK/m)
+    })
+
+    it('nginx 的三个数字都设对了（不设就会在具体场景下坏掉）', () => {
+        // ① 全量搜索实测要 184.5 秒，默认 60 秒就断 —— 表现是「搜索转一会儿 504」
+        const readTimeout = Number(/proxy_read_timeout (\d+)s/.exec(nginx)?.[1] ?? 0)
+        expect(readTimeout).toBeGreaterThanOrEqual(300)
+        expect(Number(/proxy_send_timeout (\d+)s/.exec(nginx)?.[1] ?? 0)).toBeGreaterThanOrEqual(
+            300,
+        )
+        // ② 书源那份语料约 4.5 MB，而 nginx 默认上限 1 MB（导入会 413）
+        const maxBody = Number(/client_max_body_size (\d+)m/.exec(nginx)?.[1] ?? 0)
+        expect(maxBody).toBeGreaterThanOrEqual(8)
+        // ③ 接口那一侧用 Host 推请求源（夹具地址与 cookie 的 Secure 判断都跟着它）
+        expect(nginx).toContain('proxy_set_header Host $http_host;')
+    })
+
+    it('静态资源的回退策略与另外两份一致（都回 index.html）', () => {
+        expect(nginx).toMatch(/try_files \$uri \$uri\/ \/index\.html;/)
+    })
+})
+
 describe('数据落点与 compose 对得上', () => {
     it('DB_PATH 在 /data 里，而这个目录正是 compose 挂卷的地方', () => {
         expect(dbPath.startsWith('/data/')).toBe(true)
-        expect(compose).toMatch(/- reader-data:\/data/)
+        expect(apiBlock).toMatch(/- reader-data:\/data/)
         expect(dockerfile).toMatch(/^VOLUME \["\/data"\]$/m)
     })
 
+    it('卷只挂在接口那一份上 —— 页面容器是无状态的', () => {
+        expect(pageBlock).not.toContain('reader-data')
+        expect(pageDockerfile).not.toContain('VOLUME')
+        expect(pageDockerfile).not.toContain('DB_PATH')
+    })
+
     it('compose 的容器端口与 EXPOSE 的是同一个', () => {
-        const exposed = /^EXPOSE (\d+)$/m.exec(dockerfile)?.[1]
-        expect(exposed).toBeTruthy()
-        // 端口那行长这样：'${READER_PORT:-8787}:8787'
-        expect(compose).toContain(`:${exposed}'`)
+        expect(pagePort).toBeTruthy()
+        // 端口那行长这样：'${READER_PORT:-8787}:80'
+        expect(pageBlock).toContain(`:${pagePort}'`)
     })
 
     it('compose 的 ENABLE_FIXTURE 默认关，与 wrangler.jsonc 线上那份一致', () => {
-        expect(compose).toMatch(/ENABLE_FIXTURE: '\$\{ENABLE_FIXTURE:-false\}'/)
+        expect(apiBlock).toMatch(/ENABLE_FIXTURE: '\$\{ENABLE_FIXTURE:-false\}'/)
     })
 
     it('compose 的 SEARCH_ALL_SOURCES 默认开，而且能与线上那份对得上', () => {
         // 自建这份没有每请求的 CPU 上限，「一次搜完全部书源」是它该有的能力
-        expect(compose).toMatch(/SEARCH_ALL_SOURCES: '\$\{SEARCH_ALL_SOURCES:-true\}'/)
+        expect(apiBlock).toMatch(/SEARCH_ALL_SOURCES: '\$\{SEARCH_ALL_SOURCES:-true\}'/)
         // 线上反过来：免费计划每请求 10 ms，一次求值几百个源必然被掐
         expect(read('wrangler.jsonc')).toMatch(/"SEARCH_ALL_SOURCES":\s*"false"/)
+    })
+
+    it('两个开工开关都挂在接口那一份上（页面那份不该拿到引擎的开关）', () => {
+        for (const name of ['ENABLE_FIXTURE', 'SEARCH_ALL_SOURCES', 'SERVE_STATIC']) {
+            expect(apiBlock, name).toContain(name)
+            expect(pageBlock, name).not.toContain(name)
+        }
     })
 })
 
 describe('.dockerignore', () => {
     it('构建产物与依赖一律不进上下文 —— 否则会跑上一次的旧产物', () => {
-        for (const one of ['node_modules', 'dist-node', 'dist', '.wrangler', 'data']) {
+        for (const one of [
+            'node_modules',
+            'dist-node',
+            'dist',
+            'dist-pages',
+            '.wrangler',
+            'data',
+        ]) {
             expect(dockerignore.split('\n'), one).toContain(one)
         }
     })
